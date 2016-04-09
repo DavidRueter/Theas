@@ -2,7 +2,7 @@
 
 Theas is a server-side web application framework that provides:
 
-1) turnkey performance and security-aware embedded web server (written in Python)
+1) turnkey performance and security-aware embedded web server (written in Python 3.4, based on Tornado)
 2) extensions to Jinja2 templating via custom filters
 3) session management
 4) session data management and multi-tier data binding
