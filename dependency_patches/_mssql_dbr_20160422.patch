@@ -1,0 +1,59 @@
+Index: ../../Prog/pymssql/src/_mssql.pyx
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- ../../Prog/pymssql/src/_mssql.pyx	(revision )
++++ ../../Prog/pymssql/src/_mssql.pyx	(revision )
+@@ -48,6 +48,7 @@
+ import datetime
+ import re
+ import uuid
++import gc #dbr
+ 
+ from sqlfront cimport *
+ 
+@@ -1712,8 +1713,12 @@
+         return DBVERSION_71
+     if verstr == u'7.2':
+         return DBVERSION_72
+-    if verstr == u'8.0':
+-        return DBVERSION_80
++    if verstr == u'7.3':      #dbr
++        return DBVERSION_73   #dbr
++    if verstr == u'7.4':      #dbr
++        return DBVERSION_74   #dbr
++    #dbr if verstr == u'8.0':
++    #dbr    return DBVERSION_80
+     raise MSSQLException('unrecognized tds version: %s' % verstr)
+ 
+ #######################
+@@ -1972,5 +1977,28 @@
+ 
+     dberrhandle(err_handler)
+     dbmsghandle(msg_handler)
++
++
++#dbr start
++####################################
++## Exit _mmsql and free resources ##
++####################################
++def exit_mssql():
++    """
++    Free all resources that were allocated by db-lib.
++
++    Call when done with the database to avoid memory leaks.
++    """
++    try:
++        gc.collect()
++        dbexit()
++    except Exception as e:
++        raise MSSQLDriverException("dbexit() failed")
++
++    dberrhandle(err_handler)
++    dbmsghandle(msg_handler)
++
++    return None
++#dbr end
+ 
+ init_mssql()

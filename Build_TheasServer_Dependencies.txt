@@ -1,0 +1,118 @@
+To set up TheasServer dev environment:
+
+0) Create folder C:\Prog and use this for all of the following installs.
+1) Install Python 3.4
+2) Install virtualenv: pip install virtualenv (see: https://pypi.python.org/pypi/virtualenv)
+3) Install source for openssl, freetds, pymssl and build--by running: build_freetds_pymssql.bat (see detailed instructions for how-to)  This should copy files to the right places when done.
+ 
+3a) Install Visual Studio 2010
+3b) Install PERL (from http://www.activestate.com/activeperl/downloads)
+	PERL module Text::Template (
+	cd \Prog\Perl64\bin
+	cpan Text::Template
+	Note: may download andinstall dmake and MinGW gcc complier
+3c) Install MinGW (from http://mingw.org/category/wiki/download)
+3c1) Test by running mingw\bin\ld -v  If you get an error:
+	mingw-get remove binutils
+	mingw-get install binutils
+3c2)
+	mingq-get install gcc
+
+3d) Install NASM (from http://www.nasm.us/pub/nasm/releasebuilds/2.12.01/win64/)
+3e) Install CMake (from https://cmake.org/download/)
+3f) Install git (from https://git-scm.com/download)
+3g) Copy C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\vcvars32.bat to \Prog\vc32.bat
+3h) C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\x86_amd64\vcvarsx86_amd64.bat to \Prog\vc32.bat
+3i) In files copied in 3g and 3h, edit and add to the path the appropriate Visual Studio .\bin folder
+3j) Also, add paths to NASM, MINGW, CMAKE, GIT, and PERL in that order
+
+4) Download freetds source tarball (from http://openssl.org/source/)
+4a) Tarball only.  NOT GitHub repository.
+4b) Extract, and copy source folder to C:\Prog
+4c) Make two copies of the source folder to C:\Prog\openssl-src-32 and C:\Prog\openssl-src-64
+
+5) Build openssl
+
+Win64 Dynamic (the only one really needed for Theas)
+#perl Configure VC-WIN64A --prefix=C:\Prog\openssl-bin-64-VC2010.dynamic
+perl Configure VC-WIN64A no-idea no-mdc2 no-rc --prefix=C:\Prog\openssl-bin-64-VC2010.dynamic
+ms\do_win64a
+nmake -f ms\ntdll.mak
+nmake -f ms\ntdll.mak install
+
+Optionally (for complete openssl):
+
+Win64 Static
+perl Configure VC-WIN64A --prefix=C:\openssl-bin-VC-64.dynamic
+ms\do_win64a
+nmake -f ms\nt.mak
+nmake -f ms\nt.mak install
+
+
+Win32 Dynamic
+perl Configure VC-WIN32 --prefix=C:\openssl-bin-VC-32.dynamic
+#does not work as of 4/21/2016
+#ms\do_ms
+ms\do_nasm
+nmake -f ms\ntdll.mak
+nmake -f ms\ntdll.mak install
+
+Win32 Static
+perl Configure VC-WIN32 --prefix=C:\openssl-bin-VC-32.dynamic
+#does not work as of 4/21/2016
+#ms\do_ms
+ms\do_nasm
+nmake -f ms\nt.mak
+nmake -f ms\nt.mak install
+
+5) Set environment variables for openssl
+
+4) Build freetds
+4a) Run CMake.  Set source to C:/Prog/freetds, and destination to C:/Prog/freetds_binx64
+4b) Click Configure, review settings, click Configure again, click Generate
+4c) Open C:\Prog\freetds_binx64\FreeTDS.sln in Visual Studio 2010
+4d) Set target to Release, then Build Solution
+4e) Let build_freetds_pymssql.bat copy files to the right places
+
+4) Edit (patch) pymssql source:
+4a) Edit \pymssql\src\_mssql.c and _mssql.pyx to change DBVERSION_80 to DBVERSION_72
+4b) See: https://groups.google.com/forum/#!topic/pymssql/dkNMLarYiGA
+
+5) Build pymssql:  python setup.py build
+Note:  an error like:
+	File "C:\Python31\lib\distutils\cygwinccompiler.py", line 124, in __init__
+	    if self.ld_version >= "2.10.90":
+probably means that path to mingw is bad (or that mingw is bad)
+
+6) Install setuptools: (https://pypi.python.org/pypi/setuptools)
+Download zip or tar.gz, unzip, and run: python ez_setup.py
+
+7) Create egg for pymssql:
+7a) From pymssql folder run:  python setup.py bdist_egg
+7b) Create folder C:\Prog\pymssql_egg
+7c) Copy C:\Prog\pymssql\dist\pymssql-2.2.0.dev0-py3.4-win-amd64.egg to C:\Prog\pymssql_egg
+
+8) Change to the venv directory, and run ./Scripts/activate.bat
+
+9) Install setuptools here too (just like in 6 above)
+9a) Install pymssql:  easy_install C:\prog\pymssql_egg\pymssql-2.2.0.dev0-py3.4-win-amd64.egg
+9b) copy C:\Prog\freetds_binx64\src\dblib\Release\sybdb.dll C:\Projects\TheasServer
+9c) copy C:\Prog\freetds_binx64\src\dblib\Release\sybdb.dll C:\Projects\TheasServer\venv_theas\Scripts\exe.win-amd64-3.4
+9d) copy c:\Prog\pymssql\*.dll C:\Projects\TheasServer
+9e) Download MS Visual C++ 2010 SP1 Redistributable Package
+10) Install tornado:  pip install tornado
+11) Install anything else needed
+
+
+CMake for freetds:
+LIB_EAY_DEBUG =
+LIB_EAY_DEBUG-NOTFOUND
+
+LIB_EAY_RELEASE = 
+C:/Prog/openssl-bin-VC-64.dynamic/lib/libeay32.lib
+SSL_EAY_DEBUG = 
+SSL_EAY_DEBUG-NOTFOUND
+
+SSL_EAY_RELEASE = 
+C:/Prog/openssl-bin-VC-64.dynamic/lib/ssleay32.lib
+
