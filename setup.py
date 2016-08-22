@@ -133,14 +133,16 @@ setup(
     #    This is a list of tuples, where the first element is the folder (and empty string means the folder
     #    where the .EXE is located), and the second element is a list of filenames.
 
-    data_files=[('', ['SAMPLE_settings.cfg', 'Theas.js',
-                      'libeay32.dll', 'ssleay32.dll',
-                      'sybdb.dll',
-                      'TheasMessages.dll'
-                      ])],
+    data_files=[('', ['SAMPLE_settings.cfg', #Sample configuration file
+                      'Theas.js', # Javascript file served up by TheasServer
+                      'bin/TheasMessages.dll',  # Windows event viewer message resources
 
-    # If using OpenSSL:
-    # 'libeay32.dll', 'ssleay32.dll',
+                      #If FreeTDS is dynamically linked in pymssql:
+                      #'bin/sybdb.dll',  # FreeTDS
+
+                      #OpenSSl, if needed:
+                      #'libeay32.dll', 'ssleay32.dll', # OpenSSL
+                      ])],
 
     # If you want to cheat and include MS VC++ redistributable
     # 'msvcp100.dll', 'msvcr100.dll',

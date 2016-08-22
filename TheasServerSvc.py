@@ -177,12 +177,18 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
             servicemanager.LogInfoMsg(self._svc_name_ + ' - is alive and well')
 
     def SvcStop(self):
+
+        servicemanager.LogInfoMsg(self._svc_name_ + ' - Service stop request received')
+
         #import servicemanager
         #ask TheasServer server to stop
         TheasServer.StopServer()
 
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         win32event.SetEvent(self.hWaitStop)
+
+        # Clean up
+        #TheasServer.cleanup()
 
         #servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE, servicemanager.PYS_SERVICE_STOPPED, (self._svc_name_, ''))
 
@@ -204,6 +210,7 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
 
         #start TheasServer server
         TheasServer.run()
+
 
 
 def ctrlHandler(ctrlType):

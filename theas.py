@@ -147,8 +147,8 @@ class TheasControlNV:
         self.control_type = control_type
 
     def __del__(self):
-        for ctrl_value in self.controls:
-            self.controls[ctrl_value] = None
+        #for ctrl_value in self.controls:
+        #    self.controls[ctrl_value] = None
 
         self.controls = None
         del self.controls
@@ -254,10 +254,20 @@ class Theas:
         return result
 
     # ------------Jinja filter functions-------------
-    def format_friendlydate(self, value, pre="", post=""):
+    def format_friendlydate(self, value, pre="", post="", formatstr="%a %m/%d/%y"):
+        '''
+
+        :param value:
+        :param pre:
+        :param post:
+        :param formatstr:
+        :return:
+
+        Default format is DOW MM/DD/YY as per strftime('%a %m/%d/%y')
+        '''
         s = ''
         if value:
-            s = value.strftime('%a %m/%d')
+            s = value.strftime(formatstr)
         if value and pre:
             s = pre + s
         if value and post:
@@ -265,29 +275,28 @@ class Theas:
         return s
 
     def get_control(self, ctrl_name, control_type=None, id=None, auto_create=True, **kwargs):
-        #NOTE:  pass in datavalue='xxx' to set the value of the control
+        # NOTE:  pass in datavalue='xxx' to set the value of the control
 
-        #If control is a radio, checkbox or select, you can pass in value='yyy' which does
-        #not set the value of the control but merely defines the value that will be used if the
-        #control element ins checked.
+        # If control is a radio, checkbox or select, you can pass in value='yyy' which does
+        # not set the value of the control but merely defines the value that will be used if the
+        # control element ins checked.
 
-        #For other types, it is an error to pass in value='yyy'
+        # For other types, it is an error to pass in value='yyy'
 
+        # HTML id attributes are unique.  HTML name attributes are not necessisarly unique.
+        # For example, in the case of radio buttons, multiple elements (for each individual button)
+        # may share the same name (where the name pertains to the group of radio buttons)
 
-        #HTML id attributes are unique.  HTML name attributes are not necessisarly unique.
-        #For example, in the case of radio buttons, multiple elements (for each individual button)
-        #may share the same name (where the name pertains to the group of radio buttons)
+        # Theas both renders HTML and binds data values to HTML elements.  In other words, Theas
+        # needs an entry in controls[] for each element (such as each individual radio button), and
+        # so  Theas needs to store elements by id (not by name).  However, if for some reason an element
+        # does not have an ID, the element may be stored by name.
 
-        #Theas both renders HTML and binds data values to HTML elements.  In other words, Theas
-        #needs an entry in controls[] for each element (such as each individual radio button), and
-        #so  Theas needs to store elements by id (not by name).  However, if for some reason an element
-        #does not have an ID, the element may be stored by name.
-
-        #Additionally, at times Theas needs to support retrieving a value by name--even if the controls
-        #are stored by id.  For example, two radio buttons may share the same name.  We may need to
-        #ask Theas what the value of the name is.  In this case we need to find all the elements
-        #for the name, but then look only for the element that is checked.  To do this, call
-        #get_control() and provide value_for_name=True.
+        # Additionally, at times Theas needs to support retrieving a value by name--even if the controls
+        # are stored by id.  For example, two radio buttons may share the same name.  We may need to
+        # ask Theas what the value of the name is.  In this case we need to find all the elements
+        # for the name, but then look only for the element that is checked.  To do this, call
+        # get_control() and provide value_for_name=True.
 
         this_ctrl = None
         this_ctrl_nv = None
@@ -607,7 +616,7 @@ class Theas:
 
         buf = '<input name="{}" type="hidden" value="{}"/>'.format(
             'theas:' + this_ctrl_nv.name,
-            this_ctrl_nv.value
+            '' if this_ctrl_nv.value is None else this_ctrl_nv.value
         )
         return buf
 
@@ -623,25 +632,35 @@ class Theas:
         if 'name' in kwargs:
             ctrl_name = kwargs['name']
 
+        type = 'text'
+        if 'type' in kwargs:
+            if kwargs['type'].lower() == 'password':
+                type = 'password'
+
         assert ctrl_name, 'Filter theas_input requires either id or name be provided.'
 
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
         #id not used for looking up (but might be provided and might need to be rendered)
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='text', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type=type, **kwargs)
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
             this_attribs_str = this_attribs_str + ' {}="{}"'.format(k, v)
 
-        buf = '<input name="{}"{} type="{}"{} value="{}" >'.format(
+        buf = '<input name="{}"{} type="{}"{}'.format(
                 'theas:' + this_ctrl_nv.name,
                 format_str_if(this_ctrl.id, ' id="{}"'),
                 this_ctrl_nv.control_type,
-                this_attribs_str,
-                this_ctrl_nv.value
+                this_attribs_str
             )
+
+        #include value="" attribute, but only if we have a value
+        if this_ctrl_nv.value:
+            buf += ' value="{}">'.format(this_ctrl_nv.value)
+        else:
+            buf += '>'
 
         return buf
 
@@ -737,7 +756,7 @@ class Theas:
         for k, v in this_ctrl.attribs.items():
             this_attribs_str = ' {}="{}"'.format(k, v)
 
-        buf = '<select name="{}"{}{}" >'.format(
+        buf = '<select name="{}"{}{} >'.format(
             'theas:' + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_attribs_str
@@ -781,7 +800,7 @@ class Theas:
             'theas:' + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_attribs_str,
-            this_ctrl_nv.value
+            '' if this_ctrl_nv.value is None else this_ctrl_nv.value
         )
         return buf
 
@@ -843,13 +862,41 @@ class Theas:
 
     @environmentfilter
     def theas_echo(self, this_env, this_value, *args, **kwargs):
-        # This filter is called like:
-        #         {{ active|theasEcho(if_curpage="mypage") }}
+        '''
 
-        # This would cause the word "active" to be writen out to the HTML, if the current page is
-        # equal to mypage
+        :param this_env:
+        :param this_value:
+        :param args:
+        :param kwargs:
+        :return:
 
-        #Note that mypage is to contain the resource_code for the page.
+        This filter is called like:
+                {{ 'active'|theasEcho(if_curpage='mypage') }}
+
+                 This would cause the word "active" to be writen out to the HTML, if the
+                 current page is equal to mypage
+
+        Note that mypage is to contain the resource_code for the page.
+
+        Can also be called on other ways, such as:
+                {{ 'active'|theasEcho(control_name='Customer:CompanyName', target_value='ABC, Inc.') }}
+
+                This would cause the word "active" to be writen out to the HTML, if the value of the
+                Theas control named Customer:CompanyName equals the targe_value of "ABC, Inc."
+
+
+                {{ data.SomeRow.SomeCol|theasEcho(else_output='N/A') }}
+
+                This would cause the value of data.SomeRow.SomeCol to be written out to the HTML
+                if it is not None.  If it is none, the else_output string of 'N/A' would be written.
+
+                {{ data.SomeRow.SomeCol|theasEcho }}
+
+                This would cause the value of data.SomeRow.SomeCol to be written out to the HTML
+                if it is not None.  If it is None, an empty string would be written.  (Without this
+
+        '''
+
 
         buf = ''
 
@@ -858,6 +905,7 @@ class Theas:
         control_name = None
         target_value = None
         else_output = None
+        append_str = ''
 
         if 'if_curpage' in kwargs:
             target_curpage = kwargs['if_curpage']
@@ -871,18 +919,33 @@ class Theas:
         if 'else_output' in kwargs:
             else_output = kwargs['else_output']
 
+        if 'append_str' in kwargs:
+            append_str = kwargs['append_str']
 
-        if this_page and this_page.th_session:
+        # conditionally echo this_value if the current page matches target_curpage
+        if target_curpage is not None and this_page and this_page.th_session:
             if this_page.th_session.current_resource.resource_code == target_curpage:
                 buf = this_value
+
+        # conditionally echo this_value if the value of control_name matches target_value
+        elif control_name is not None and target_value is not None:
+            this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(control_name)
+
+            if this_ctrl_nv is not None and this_ctrl_nv.value == target_value:
+                buf = this_value
+
+        # simply echo the provided this_value
+        else:
+            buf = this_value
+
+
+        if buf:
+            buf = buf + append_str
+        else:
+            if else_output:
+                buf = else_output
             else:
-                this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(control_name)
-                if this_ctrl_nv is not None and this_ctrl_nv.value == target_value:
-                    buf = this_value
-                elif else_output:
-                    buf = else_output
-                else:
-                    buf = ''
+                buf = ''
 
         return buf
 

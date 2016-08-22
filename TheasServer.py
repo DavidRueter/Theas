@@ -86,7 +86,8 @@ LOGIN_RESOURCE_CODE = 'login'
 LOGIN_AUTO_USER_TOKEN = None
 DEFAULT_RESOURCE_CODE = None
 
-FULL_SQL_IS_OK_CHECK = True
+PERFORM_SQL_IS_OK_CHECK = False
+FULL_SQL_IS_OK_CHECK = False
 
 USE_WORKER_THREADS = False
 MAX_WORKERS = 30
@@ -239,18 +240,24 @@ class TheasServerSQLError(TheasServerError):
 
 
 def StopServer():
-    global G_server_is_running
-    ThSession.cls_log('Shutown', 'StopServer() called')
-    G_server_is_running = False
+    #global G_server_is_running
+    msg = 'StopServer() called'
+    ThSession.cls_log('Shutdown', msg)
+    write_winlog(msg)
+
+    #G_server_is_running = False
+
+    this_ioloop = tornado.ioloop.IOLoop.current()
+    this_ioloop.add_callback(this_ioloop.stop)
 
 
-def set_exit_handler(func):
-    signal.signal(signal.SIGTERM, func)
+#def set_exit_handler(func):
+#    signal.signal(signal.SIGTERM, func)
 
 
-def on_exit(signum, frame):
-    ThSession.cls_log('Shutown', 'on_exit() called')
-    StopServer()
+#def on_exit(signum, frame):
+#    ThSession.cls_log('Shutdown', 'on_exit() called')
+#    StopServer()
 
 
 def do_periodic_callback():
@@ -271,7 +278,11 @@ def do_periodic_callback():
 
     if not G_server_is_running:
         ThSession.cls_log('Periodic', 'Trying to stop IOLoop.instance()')
-        tornado.ioloop.IOLoop.current().stop()
+
+        this_ioloop = tornado.ioloop.IOLoop.current()
+        this_ioloop.add_callback(this_ioloop.stop)
+
+        #tornado.ioloop.IOLoop.current().stop()
         # tornado.ioloop.IOLoop.instance().stop()
         # tornado.ioloop.IOLoop.instance().add_callback(tornado.ioloop.IOLoop.instance().stop)
 
@@ -291,19 +302,22 @@ class ThStoredProc:
 
     @property
     def is_ok(self):
-        self._th_session.log('StoredProc', 'Checking is_ok:', self.stored_proc_name)
-        result = self._storedproc is not None and self.connection is not None and self.connection.connected
+        if not PERFORM_SQL_IS_OK_CHECK:
+            return True
+        else:
+            self._th_session.log('StoredProc', 'Checking is_ok:', self.stored_proc_name)
+            result = self._storedproc is not None and self.connection is not None and self.connection.connected
 
-        if result and FULL_SQL_IS_OK_CHECK:
-            try:
-                self.connection.execute_non_query('SELECT 1 AS IsOK')
-            except:
-                result = False
+            if result and FULL_SQL_IS_OK_CHECK:
+                try:
+                    self.connection.execute_non_query('SELECT 1 AS IsOK')
+                except:
+                    result = False
 
-        if not result:
-            self._th_session.logged_in = False
-            self._th_session.sql_conn = None
-        return result
+            if not result:
+                self._th_session.logged_in = False
+                self._th_session.sql_conn = None
+            return result
 
     def __init__(self, this_stored_proc_name, this_th_session):
         self._connection = None
@@ -464,6 +478,7 @@ class ThCachedResources:
     def __init__(self):
         self.__resources = {}
         self.__static_blocks_dict = {}
+        self.default_path = G_program_options.settings_path
 
     def __del__(self):
         self.lock()
@@ -629,6 +644,10 @@ class ThCachedResources:
             finally:
                 self.unlock()
 
+            self.load_global_resources()
+
+
+
         elif resource_code is not None and resource_code in self.__resources:
             self.lock()
             try:
@@ -648,6 +667,9 @@ class ThCachedResources:
 
         if resource_code:
             resource_code = resource_code.strip()
+
+        if resource_code == '':
+            resource_code = None
 
         if resource_code is not None and resource_code in self.__resources:
             # Cached resource
@@ -691,6 +713,11 @@ class ThCachedResources:
             th_session.current_resource = this_resource
 
         return this_resource
+
+    def load_global_resources(self):
+        global G_program_options
+        self.load_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
+        self.load_resource(None, None, all_static_blocks=True, sessionless=True)
 
 
 # -------------------------------------------------
@@ -901,6 +928,13 @@ class ThSession:
         self.sql_files_init_done = False
 
         self.current_xsrf_form_html = None
+
+        # username holds the username of the currently authenticated user, and will be updated by authenticate()
+        self.username = None
+
+        # if set to true, upon successful authentictae the user's token will be saved to a cookie
+        # for automatic login on future visits
+        self.remember_user_token = False
 
     @property
     def locked(self):
@@ -1157,6 +1191,9 @@ class ThSession:
 
         self.log('Session', 'Attempting authentication')
 
+        # The session keeps a copy of the user_name for convenience / to access in templates
+        self.username = None
+
         # authenticate user into database app
         proc = ThStoredProc('theas.spdoAuthenticateUser', self)
         if proc.is_ok:
@@ -1177,9 +1214,14 @@ class ThSession:
                 for row in proc.resultset:
                     session_guid = row['SessionGUID']
                     user_token = row['UserToken']
+                    username = row['UserName']
 
                 if session_guid is not None and (LOGIN_AUTO_USER_TOKEN is None or user_token != LOGIN_AUTO_USER_TOKEN):
                     self.logged_in = True
+
+                    # Store some user information (so the information can be accessed in templates)
+                    self.username = username
+
 
                 proc = None
                 del proc
@@ -1198,8 +1240,8 @@ class ThSession:
             self.current_handler.set_secure_cookie('theas:th:ST', self.session_token, path='/')
             next_url = '/'
 
-            if self.logged_in:
-                self.current_handler.clear_cookie('theas:th:UserToken')
+            self.current_handler.clear_cookie('theas:th:UserToken')
+            if self.logged_in and self.remember_user_token:
                 if user_token is not None:
                     self.current_handler.set_secure_cookie('theas:th:UserToken', user_token, path='/')
 
@@ -1301,25 +1343,30 @@ class ThSession:
 
     def init_template_data(self):
         this_data = {}
-        this_data['_Local'] = {}
-        this_data['_Local']['ST'] = self.session_token
+        this_data['_Theas'] = {}
+        this_data['_Theas']['ST'] = self.session_token
+        this_data['_Theas']['UserName'] = self.username
 
         if self.current_handler is not None:
-            this_data['_Local']['xsrf_token'] = self.current_handler.xsrf_token.decode('ascii')
-            this_data['_Local']['__handler_guid'] = self.current_handler.handler_guid
+            this_data['_Theas']['xsrf_token'] = self.current_handler.xsrf_token.decode('ascii')
+            this_data['_Theas']['__handler_guid'] = self.current_handler.handler_guid
 
-        this_data['_Local']['theasServerPrefix'] = G_program_options.server_prefix
+        this_data['_Theas']['theasServerPrefix'] = G_program_options.server_prefix
 
-        # this_data['_Local']['xsrf_formHTML'] = self.current_handler.xsrf_form_html()
-        this_data['_Local']['theasParams'] = self.theas_page.get_controls()
+        # this_data['_Theas']['xsrf_formHTML'] = self.current_handler.xsrf_form_html()
+        this_data['_Theas']['theasParams'] = self.theas_page.get_controls()
 
         if self.current_resource is not None:
-            this_data['_Local']['theasCurrentPage'] = self.current_resource.resource_code
-        this_data['_Local']['theasIncludes'] = G_cached_resources.static_blocks_dict
-        this_data['_Local']['theasJS'] = 'Theas.js'
+            this_data['_Theas']['theasCurrentPage'] = self.current_resource.resource_code
+        this_data['_Theas']['theasIncludes'] = G_cached_resources.static_blocks_dict
+        this_data['_Theas']['theasJS'] = 'Theas.js'
 
         now_time = datetime.datetime.now().strftime("%I:%M%p")
-        this_data['_Local']['Now'] = now_time
+        this_data['_Theas']['Now'] = now_time
+
+        # Note:  if an APIStoredProc is called, data._resultsetMeta will be added,
+        # but we do not add this dictionary here during initialization
+        #this_data['_resultsetMeta'] = {}
 
         return this_data
 
@@ -1343,7 +1390,7 @@ class ThSession:
             template_str = resource.data
             this_data = self.init_template_data()
 
-            this_data['_Local']['errorMessage'] = self.theas_page.get_value('theas:ErrorMessage')
+            this_data['_Theas']['errorMessage'] = self.theas_page.get_value('theas:ErrorMessage')
 
             buf = self.theas_page.render(template_str, data=this_data)
 
@@ -1502,6 +1549,10 @@ class ThHandler(tornado.web.RequestHandler):
     def get_data(self, resource, suppress_resultsets=False):
         # Get actual quest data
 
+        # Always initialize data--even if there is no APIStoredProc to call.
+        # This way a Jinja template can always access data._Theas
+        this_data = self.session.init_template_data()
+
         form_params = self.request.body_arguments
         # form_params_str = urlparse.urlencode(form_params, doseq=True)
 
@@ -1606,7 +1657,7 @@ class ThHandler(tornado.web.RequestHandler):
             #  list of a subset of the list of fields contained in the resultset.  This is to make it easy to control
             #  the columns from a resultet that will be displayed, without hard-coding fields into a template.
 
-            this_data = self.session.init_template_data()
+            # Since we did call APIStoredProc to get data, add data._resultsetMeta
             this_data['_resultsetMeta'] = {}
 
             redirect_to = None
@@ -1694,6 +1745,10 @@ class ThHandler(tornado.web.RequestHandler):
                                 # Incorporate any Theas control changes from SQL, so these values can be used
                                 # when rendering the template.
                                 self.session.theas_page.process_client_request(buf=theas_params_str, accept_any=True)
+
+                                # Since Theas controls may have changed, update the copy in data._Theas
+                                this_data['_Theas']['theasParams'] = self.session.theas_page.get_controls()
+
                         if 'Cookies' in row:
                             cookies_str = row['Cookies']
                             # Cookies returns a string like name1=value1&name2=value2...
@@ -1716,7 +1771,8 @@ class ThHandler(tornado.web.RequestHandler):
                 if not have_next_resultset:
                     break
 
-                this_data['_Local']['theasParams'] = self.session.theas_page.get_controls()
+                # stored proc may have updated Theas controls, so update the copy in data._Theas
+                #this_data['_Theas']['theasParams'] = self.session.theas_page.get_controls()
 
             return this_data, redirect_to, history_go_back
         else:
@@ -1838,7 +1894,7 @@ class ThHandler(tornado.web.RequestHandler):
             else:
                 template_str, this_resource = self.get_template(next_page)
 
-                if this_resource.on_before:
+                if this_resource is not None and this_resource.on_before:
                     this_function = getattr(TheasCustom, this_resource.on_before)
                     if this_function is not None:
                         handled = this_function(self, args, kwargs)
@@ -1859,7 +1915,7 @@ class ThHandler(tornado.web.RequestHandler):
                         # template_str does not need to be merged with data
                         buf = template_str
 
-                    if this_resource.on_after:
+                    if this_resource and this_resource.on_after:
                         this_function = getattr(TheasCustom, this_resource.on_after)
                         if this_function is not None:
                             handled = this_function(self, args, kwargs)
@@ -2650,6 +2706,7 @@ def get_program_directory():
     return program_directory, program_filename
 
 
+
 def run():
     global G_program_options
     global G_server_is_running
@@ -2804,25 +2861,24 @@ def run():
     if not LOGGING_LEVEL:
         print("Note: Logging is disabled")
 
+
+    global G_cached_resources
+
     G_cached_resources = ThCachedResources()  # Global list of cached resources
+
+    try:
+        G_cached_resources.load_global_resources()
+
+    except Exception as e:
+        msg = 'Theas app: error global cached resources when calling G_cached_resources.load_global_resources(): {}'.format(e)
+        print(msg)
+        write_winlog(msg)
+        sys.exit()
+
+
+
     G_sessions = ThSessions()  # Global list of sessions
 
-    try:
-        G_cached_resources.load_resource('Theas.js', None, from_filename=G_program_options.settings_path + 'Theas.js',
-                                         is_public=True)
-    except Exception as e:
-        msg = 'Theas app: error loading in file Theas.js: {}'.format(e)
-        print(msg)
-        write_winlog(msg)
-        sys.exit()
-
-    try:
-        G_cached_resources.load_resource(None, None, all_static_blocks=True, sessionless=True)
-    except Exception as e:
-        msg = 'Theas app: error loading in static resources from database: {}'.format(e)
-        print(msg)
-        write_winlog(msg)
-        sys.exit()
 
     _mssql.set_max_connections(G_program_options.sql_max_connections)
 
@@ -2865,21 +2921,32 @@ def run():
 
     tornado.ioloop.IOLoop.instance().start()
 
+
     # all_objects = muppy.get_objects()
     # sum1 = summary.summarize(all_objects)
     # summary.print_(sum1)
 
 
-    tornado.ioloop.IOLoop.current().close()
+    # tornado.ioloop.IOLoop.current().close()
     # tornado.ioloop.IOLoop.instance().close()
-    # http_server.stop()
 
-    ThHandler.executor.shutdown()
-    ThSession.cls_log('Shutdown', 'Winding down #1')
-    ThHandler_Attach.executor.shutdown()
-    ThSession.cls_log('Shutdown', 'Winding down #2')
-    TestThreadedHandler.executor.shutdown()
-    ThSession.cls_log('Shutdown', 'Winding down #3')
+
+    msg = 'Shutting down...Exited IOLoop'
+    ThSession.cls_log('Shutdown', msg)
+    write_winlog(msg)
+
+
+    #ioloop = tornado.ioloop.IOLoop.current()
+    #ioloop.add_callback(ioloop.stop)
+    http_server.stop()
+
+
+    #ThHandler.executor.shutdown()
+    #ThSession.cls_log('Shutdown', 'Winding down #1')
+    #ThHandler_Attach.executor.shutdown()
+    #ThSession.cls_log('Shutdown', 'Winding down #2')
+    #TestThreadedHandler.executor.shutdown()
+    #ThSession.cls_log('Shutdown', 'Winding down #3')
 
     http_server = None
     del http_server
@@ -2922,7 +2989,8 @@ if __name__ == "__main__":
 
         # os.kill(0, signal.CTRL_BREAK_EVENT)
     finally:
+        pass
         G_break_handler.disable()
 
         # Clean up _mssql resources
-        _mssql.exit_mssql()
+#        _mssql.exit_mssql()
