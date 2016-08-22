@@ -15,7 +15,9 @@ Theas does not impose any restrictions on client-side development:  you are free
 
 See thie Wiki for more information.
 
-This is a new repository as of 4/8/2016 and will not be complete for a couple of weeks.  Check back in in a while.
+This was a new repository as of 4/8/2016.  As of 8/2016 source code has been added.  The source here is complete and useable.  I have not yet created a sample database for Theas, as I have been using Theas with OpsStream (a MSSQL application from http://opsstream.com).
+
+I am happy to help you get your dev environment set up, and to help you get your Theas server working--either with OpsStream or some other database of your choosing.  Let me know if you have questions or if I can be of assistance.
 
 David Rueter
 drueter@assyst.com
