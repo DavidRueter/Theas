@@ -56,7 +56,7 @@ import TheasCustom
 # import time
 # import gc
 # from pympler import muppy, summary
-# import urllib.parse as urlparse
+import urllib.parse as urlparse
 # from jinja2 import Template, Untornado.options.defined
 # from jinja2.environment import Environment
 # from tornado.stack_context import ExceptionStackContext
@@ -86,12 +86,13 @@ LOGIN_RESOURCE_CODE = 'login'
 LOGIN_AUTO_USER_TOKEN = None
 DEFAULT_RESOURCE_CODE = None
 
-PERFORM_SQL_IS_OK_CHECK = False
+PERFORM_SQL_IS_OK_CHECK = True
 FULL_SQL_IS_OK_CHECK = False
 
 USE_WORKER_THREADS = False
 MAX_WORKERS = 30
 USE_SESSION_COOKIE = True
+REMEMBER_USER_TOKEN = False
 
 # NOTE:
 # 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
@@ -387,7 +388,29 @@ class ThStoredProc:
         if self.is_ok:
             self._th_session.do_on_sql_start(self)
             try:
-                this_result = self._storedproc.execute(*args, **kwargs)
+
+                # pymssql and/or FreeTDS have a number of limitations.
+                # a) They do not seem to support output parameters
+                # b) They truncate input parameters at 8000 characters
+
+                # To work around b), we must not use _storedproc.execute, and must instead build our own
+                # SQL query to execute.
+
+                #this_result = self._storedproc.execute(*args, **kwargs)
+
+                this_sql = 'EXEC ' + self.stored_proc_name
+
+                for this_name, this_value in self.parameters.items():
+                    if isinstance(this_name, str) and this_name.startswith('@'):
+                        this_sql += ' ' + this_name + '='
+                        this_sql += 'NULL' if this_value is None else '\'' + str(this_value) + '\''
+                        this_sql += ', '
+
+                if this_sql.endswith(', '):
+                    this_sql = this_sql[:-2]
+
+                self._th_session.sql_conn.execute_query(this_sql)
+
                 if fetch_rows:
                     self.resultset = [row for row in self._th_session.sql_conn]
                 self._th_session.do_on_sql_done(self)
@@ -524,25 +547,29 @@ class ThCachedResources:
         if from_filename:
             # load resource from file
             buf = None
-            try:
-                with open(from_filename, 'r') as f:
-                    buf = f.read()
-                    f.close()
-            except Exception as e:
-                raise TheasServerError('Error while starting the Theas Server:  File Theas.js could not be read.')
 
-            this_resource = ThResource()
-            this_resource.resource_code = resource_code
-            this_resource.filename = from_filename
-            this_resource.data = buf
-            this_resource.api_stored_proc = None
-            this_resource.api_async_stored_proc = None
-            this_resource.api_stored_proc_resultset_str = None
-            this_resource.is_public = is_public
-            this_resource.is_static = is_static
-            this_resource.requires_authentication = False
+            if from_filename.endswith('Theas.js'):
+                try:
+                    with open(from_filename, 'r') as f:
+                        buf = f.read()
+                        f.close()
+                except Exception as e:
+                    raise TheasServerError('Error while starting the Theas Server:  File Theas.js could not be read.')
 
-            self.add_resource(resource_code, this_resource)
+                this_resource = ThResource()
+                this_resource.resource_code = resource_code
+                this_resource.filename = from_filename
+                this_resource.data = buf
+                this_resource.api_stored_proc = None
+                this_resource.api_async_stored_proc = None
+                this_resource.api_stored_proc_resultset_str = None
+                this_resource.is_public = is_public
+                this_resource.is_static = is_static
+                this_resource.requires_authentication = False
+
+                self.add_resource(resource_code, this_resource)
+            else:
+                raise TheasServerError('Error due to request of file {} from the file system.  Server is configured to server resources only from the database.').format(from_filename)
 
 
         else:
@@ -934,7 +961,7 @@ class ThSession:
 
         # if set to true, upon successful authentictae the user's token will be saved to a cookie
         # for automatic login on future visits
-        self.remember_user_token = False
+        self.remember_user_token = REMEMBER_USER_TOKEN
 
     @property
     def locked(self):
@@ -1390,8 +1417,6 @@ class ThSession:
             template_str = resource.data
             this_data = self.init_template_data()
 
-            this_data['_Theas']['errorMessage'] = self.theas_page.get_value('theas:ErrorMessage')
-
             buf = self.theas_page.render(template_str, data=this_data)
 
         return buf
@@ -1435,7 +1460,7 @@ class ThHandler(tornado.web.RequestHandler):
                       '<p>{}</p><p>{}</p></body></html>'
                 buf = buf.format(
                     str(datetime.datetime.now()),
-                    G_program_options.server_prefix,
+                    G_program_options.server_prefix + '/logout',
                     str(this_err),
                     str(lines)
                 )
@@ -1525,7 +1550,7 @@ class ThHandler(tornado.web.RequestHandler):
                     'default template' if resource_code is None else 'template "{}"'.format(resource_code)
                 ) + ' Probably this user is not configured to use this server.' + \
                       '<p>Click <a href="{}">here</a> to log in and try again.</p>'.format(
-                          G_program_options.server_prefix)
+                          G_program_options.server_prefix + '/logout')
 
                 template_str = '<html><body>' + msg + '</body></html/>'
 
@@ -1540,7 +1565,7 @@ class ThHandler(tornado.web.RequestHandler):
                     'default template' if resource_code is None else 'template "{}"'.format(resource_code)
                 ) + ' Empty template was returned.' + \
                       '<p>Click <a href="{}">here</a> to log in and try again.</p>'.format(
-                          G_program_options.server_prefix)
+                          G_program_options.server_prefix + '/logout')
 
                 template_str = '<html><body>' + msg + '</body></html>'
 
@@ -1553,24 +1578,25 @@ class ThHandler(tornado.web.RequestHandler):
         # This way a Jinja template can always access data._Theas
         this_data = self.session.init_template_data()
 
+        # serialize form parameters (excluding theas: parameters) to pass into the stored procedure
         form_params = self.request.body_arguments
-        # form_params_str = urlparse.urlencode(form_params, doseq=True)
 
         form_params_str = ''
         for key in form_params:
-            this_val = form_params[key]
+            if not key.startswith('theas:'):
+                this_val = form_params[key]
 
-            if isinstance(this_val, list) and len(this_val) > 0:
-                this_val = this_val[0]
+                if isinstance(this_val, list) and len(this_val) > 0:
+                    this_val = this_val[0]
 
-            if isinstance(this_val, bytes):
-                this_val = this_val.decode('utf-8')
-            elif this_val:
-                this_val = str(this_val)
+                if isinstance(this_val, bytes):
+                    this_val = this_val.decode('utf-8')
+                elif this_val:
+                    this_val = str(this_val)
 
-            this_val = this_val.replace('=', '%3D').replace('&', '%26')
-            form_params_str = form_params_str + '&' + key.replace('=', '%3D').replace('&', '%26') + '=' + this_val
+                form_params_str = form_params_str + key + '=' + urlparse.unquote(this_val) + '&'
 
+        # serialize theas paramters to pass into the stored procedure
         theas_params_str = self.session.theas_page.serialize()
 
         proc = None
@@ -1578,63 +1604,70 @@ class ThHandler(tornado.web.RequestHandler):
         if resource and resource.api_stored_proc:
             proc = ThStoredProc(resource.api_stored_proc, self.session)
 
-            if proc.is_ok:
-                try:
-                    proc.refresh_parameter_list()
-                except:
-                    self.session.logout()
-                    raise
+            try:
+                if proc.is_ok:
+                    try:
+                        proc.refresh_parameter_list()
+                    except:
+                        self.session.logout()
+                        raise
 
-            # if '@QuestGUID' in proc.parameter_list and self.session.theas_page.get_value('questGUID') is not None:
-            #    proc.bind(self.session.theas_page.get_value('questGUID'), _mssql.SQLCHAR, '@QuestGUID')
+                # if '@QuestGUID' in proc.parameter_list and self.session.theas_page.get_value('questGUID') is not None:
+                #    proc.bind(self.session.theas_page.get_value('questGUID'), _mssql.SQLCHAR, '@QuestGUID')
 
 
-            # if '@StepGUID' in proc.parameter_list and self.session.theas_page.get_value('stepGUID') is not None:
-            #    proc.bind(self.session.theas_page.get_value('stepGUID'), _mssql.SQLCHAR, '@StepGUID')
+                # if '@StepGUID' in proc.parameter_list and self.session.theas_page.get_value('stepGUID') is not None:
+                #    proc.bind(self.session.theas_page.get_value('stepGUID'), _mssql.SQLCHAR, '@StepGUID')
 
-            # if '@StepDefID' in proc.parameter_list and self.session.theas_page.get_value('stepDefID') is not None:
-            #    proc.bind(self.session.theas_page.get_value('stepDefID'), _mssql.SQLCHAR, '@StepDefID')
+                # if '@StepDefID' in proc.parameter_list and self.session.theas_page.get_value('stepDefID') is not None:
+                #    proc.bind(self.session.theas_page.get_value('stepDefID'), _mssql.SQLCHAR, '@StepDefID')
 
-            if '@Document' in proc.parameter_list:
-                proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
+                if '@Document' in proc.parameter_list:
+                    proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
 
-            if '@HTTPParams' in proc.parameter_list:
-                proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
+                if '@HTTPParams' in proc.parameter_list:
+                    proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
 
-            if '@FormParams' in proc.parameter_list:
-                proc.bind(form_params_str, _mssql.SQLCHAR, '@FormParams')
-                # proc.bind(urlparse.urlencode(self.request.body_arguments, doseq=True), _mssql.SQLCHAR, '@FormParams')
+                if '@FormParams' in proc.parameter_list:
+                    proc.bind(form_params_str, _mssql.SQLCHAR, '@FormParams')
+                    # proc.bind(urlparse.urlencode(self.request.body_arguments, doseq=True), _mssql.SQLCHAR, '@FormParams')
 
-            if '@HTTPHeaders' in proc.parameter_list:
-                headers_str = ''
-                this_dict = dict(self.request.headers)
-                for key in this_dict:
-                    this_val = this_dict[key]
+                if '@HTTPHeaders' in proc.parameter_list:
+                    headers_str = ''
+                    this_dict = dict(self.request.headers)
+                    for key in this_dict:
+                        this_val = this_dict[key]
 
-                    if isinstance(this_val, list) and len(this_val) > 0:
-                        this_val = this_val[0]
+                        if isinstance(this_val, list) and len(this_val) > 0:
+                            this_val = this_val[0]
 
-                    if isinstance(this_val, bytes):
-                        this_val = this_val.decode('utf-8')
-                    elif this_val:
-                        this_val = str(this_val)
+                        if isinstance(this_val, bytes):
+                            this_val = this_val.decode('utf-8')
+                        elif this_val:
+                            this_val = str(this_val)
 
-                    this_val = this_val.replace('=', '%3D').replace('&', '%26')
-                    headers_str = headers_str + '&' + key.replace('=', '%3D').replace('&', '%26') + '=' + this_val
+                        headers_str = headers_str + '&' + key + '=' + urlparse.quote(this_val)
 
-                proc.bind(headers_str, _mssql.SQLCHAR, '@HTTPHeaders')
+                    proc.bind(headers_str, _mssql.SQLCHAR, '@HTTPHeaders')
 
-            if '@TheasParams' in proc.parameter_list:
-                # proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams', output=proc.parameter_list['@TheasParams']['is_output'])
-                # Would prefer to use output parameter, but this seems not to be supported by FreeTDS.  So
-                # we look to the resultest(s) returned by the stored proc instead.
-                proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams')
+                if '@TheasParams' in proc.parameter_list:
+                    # proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams', output=proc.parameter_list['@TheasParams']['is_output'])
+                    # Would prefer to use output parameter, but this seems not to be supported by FreeTDS.  So
+                    # we look to the resultest(s) returned by the stored proc instead.
+                    proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams')
 
-            if '@SuppressResultsets' in proc.parameter_list:
-                proc.bind(str(int(suppress_resultsets)), _mssql.SQLCHAR, '@SuppressResultsets')
+                if '@SuppressResultsets' in proc.parameter_list:
+                    proc.bind(str(int(suppress_resultsets)), _mssql.SQLCHAR, '@SuppressResultsets')
 
-            # Execute stored procedure
-            proc_result = proc.execute(fetch_rows=False)
+                # Execute stored procedure
+                proc_result = proc.execute(fetch_rows=False)
+
+            except Exception as e:
+                err_msg = 'Error in stored procedure ' + e.procname.decode('ascii') + \
+                          '(error ' + str(e.number) + ' at line ' + str(e.line) + '): ' + \
+                          e.text.decode('ascii')
+
+                self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(urlparse.quote(err_msg)))
 
         # if not suppress_resultsets:
         if True:
@@ -1999,12 +2032,12 @@ class ThHandler(tornado.web.RequestHandler):
 
                     # if not self.session.authenticate(self.get_argument('u'), self.get_argument('pw')):
                     if not success:
-                        self.session.theas_page.set_value('theas:ErrorMessage', 'Error: {}.'.format(error_message))
+                        self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
                         buf = self.session.build_login_screen()
                         self.write(buf)
 
                     else:
-                        self.session.theas_page.set_value('theas:ErrorMessage', '')
+                        self.session.theas_page.set_value('theas:th:ErrorMessage', '')
                         self.session.log('Response', 'Sending bounce')
                         self.write(self.session.bounce_back())
                         #                else:
@@ -2113,13 +2146,13 @@ class ThHandler(tornado.web.RequestHandler):
             else:
                 # we have a session, but are not necessarily logged in
 
-                # try to auto-login if there is a user cookie
-                orig_cookie_user = self.get_secure_cookie('theas:th:UserToken')
-                if orig_cookie_user:
-                    orig_cookie_user = orig_cookie_user.decode(encoding='ascii')
+                if not self.session.logged_in:
+                    # try to auto-login if there is a user cookie
+                    orig_cookie_user = self.get_secure_cookie('theas:th:UserToken')
+                    if orig_cookie_user:
+                        orig_cookie_user = orig_cookie_user.decode(encoding='ascii')
 
-                if orig_cookie_user:
-                    self.session.authenticate(None, None, user_token=orig_cookie_user)
+                        self.session.authenticate(None, None, user_token=orig_cookie_user)
 
                 if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
                     # resource_code was not provided and user is not logged in:  use default resource
@@ -2423,7 +2456,7 @@ class ThHandler_Async(ThHandler):
 
     @tornado.gen.coroutine
     def post(self, resource_code=None, *args, **kwargs):
-        G_cached_resources
+        global G_cached_resources
 
         cmd = None
         if self.get_arguments('cmd'):
@@ -2464,25 +2497,24 @@ class ThHandler_Async(ThHandler):
                     row_count = 0
 
                     form_params = self.request.body_arguments
-                    # form_params_str = urlparse.urlencode(form_params, doseq=True)
 
-
+                    # We want to serialize form data (excluding theas: fields)
                     form_params_str = ''
                     for key in form_params:
-                        this_val = form_params[key]
+                        if not key.startswith('theas:'):
+                            this_val = form_params[key]
 
-                        if isinstance(this_val, list) and len(this_val) > 0:
-                            this_val = this_val[0]
+                            if isinstance(this_val, list) and len(this_val) > 0:
+                                this_val = this_val[0]
 
-                        if isinstance(this_val, bytes):
-                            this_val = this_val.decode('utf-8')
-                        elif this_val:
-                            this_val = str(this_val)
+                            if isinstance(this_val, bytes):
+                                this_val = this_val.decode('utf-8')
+                            elif this_val:
+                                this_val = str(this_val)
 
-                        this_val = this_val.replace('%', '%25').replace('&', '%26').replace('=', '%3D')
-                        form_params_str = form_params_str + '&' + key.replace('%', '%25').replace('&', '%26').replace(
-                            '=', '%3D') + '=' + this_val
+                            form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
 
+                    # We also want to serialize all Theas controls
                     theas_params_str = self.session.theas_page.serialize()
 
                     if async_proc_name is not None:
@@ -2562,9 +2594,12 @@ class ThHandler_Async(ThHandler):
                                     # let stored proc create any desired Theas controls, so these values can be used
                                     # when rendering the template.
 
-                            except:
-                                self.session.logout()
-                                buf = 'invalidSession'
+                            except Exception as e:
+                                err_msg = 'Error in stored procedure ' + e.procname.decode('ascii') +\
+                                          '(error ' + str(e.number) + ' at line ' + str(e.line) + '): ' +\
+                                          e.text.decode('ascii')
+
+                                buf = 'theas:th:ErrorMessage=' + urlparse.quote(err_msg)
 
                     if len(buf) > 0:
                         # stored proc specified an explicit response
@@ -2719,7 +2754,9 @@ def run():
     global REMOVE_EXPIRED_THREAD_SLEEP
     global LOGIN_RESOURCE_CODE
     global LOGIN_AUTO_USER_TOKEN
+    global REMEMBER_USER_TOKEN
     global DEFAULT_RESOURCE_CODE
+    global PERFORM_SQL_IS_OK_CHECK
     global FULL_SQL_IS_OK_CHECK
 
     msg = 'Theas app getting ready...'
@@ -2812,6 +2849,11 @@ def run():
                              help="User token for the default (public) login.",
                              type=str)
 
+    G_program_options.define("remember_user_token",
+                             default=REMEMBER_USER_TOKEN,
+                             help="Save the user token in a cookie, and automatically log user in on future visits.",
+                             type=bool)
+
     G_program_options.define("default_resource_code",
                              default=DEFAULT_RESOURCE_CODE,
                              help="Resource code to use when a resource is not specified (i.e. like index.htm)",
@@ -2850,8 +2892,11 @@ def run():
         G_program_options.logging_level)  # 0 to disable all, 1 to enable all, other value for threshold to exceed.
     LOGIN_RESOURCE_CODE = G_program_options.login_resource_code
     LOGIN_AUTO_USER_TOKEN = G_program_options.login_auto_user_token
+    REMEMBER_USER_TOKEN = G_program_options.remember_user_token
     DEFAULT_RESOURCE_CODE = G_program_options.default_resource_code
     FULL_SQL_IS_OK_CHECK = G_program_options.full_sql_is_ok_check
+    if FULL_SQL_IS_OK_CHECK:
+        PERFORM_SQL_IS_OK_CHECK = True
 
     msg = 'Starting Theas server {} (in {}) on port {}.'.format(
         program_filename, program_directory, G_program_options.port)

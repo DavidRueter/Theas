@@ -1,4 +1,4 @@
-;TH = {
+TH = {
         /* EXAMPLES:
 
         //On click of a button, update some Theas form field values, then submit the form 
@@ -23,7 +23,10 @@
 
             var thisCtrl = $('*[name="' + ctrlName + '"]');
 
-            if (thisCtrl.length > 0 && newValue) {
+            if (thisCtrl.length == 0) {
+                thisCtrl = null;
+            }
+            else if (newValue) {
                 thisCtrl.val(newValue);
             }
 
@@ -44,6 +47,24 @@
             }
         },
     
+
+        //Encode value of all Theas controls
+        encodeAll: function() {
+            $('*[name^="theas:"]').each(function( index ){
+                var $this = $(this);                
+                $this.val( encodeURIComponent($this.val()) );
+            });
+        },
+
+
+        //Decode value of all Theas controls
+        decodeAll: function() {
+            $('*[name^="theas:"]').each(function( index ){
+                var $this = $(this);
+                $this.val( decodeURIComponent($this.val()) );
+            });
+        },
+
     
         //Serialize all theas controls into a string
         serialize: function () {
@@ -56,7 +77,6 @@
 
             return buf;
         },
-    
     
         //Clear all theas controls and cookies
         clearAll: function() {
@@ -116,17 +136,20 @@
                 origevent.preventDefault();
             }
 
-            var buf = '_xsrf=' + $('input[name="_xsrf"]').val() + '&' + th.serialize();
+            var buf = '';
             
             if (cmd) {
-                buf = buf + '&cmd=' + cmd
+                buf = buf + 'cmd=' + cmd + '&';
             }
+            
+            buf = buf + '_xsrf=' + $('input[name="_xsrf"]').val() + '&' + th.serialize();
+            
             if (dataToSend) {
-                buf = buf + '&' +  dataToSend;
+                buf = buf + '&' +  dataToSend + '&';
             }
 
             if (!onSuccess) {
-                onSuccess = th.receiveAsync
+                onSuccess = th.receiveAsync;
             }
 
             if (!thisUrl){
@@ -137,7 +160,7 @@
                 url: thisUrl,
                 type: 'POST',
                 cache: false,
-                timeout: 30000,
+                timeout: null, //30000,
                 dataType: 'text',
                 contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
                 //context: workTimer,
@@ -166,12 +189,16 @@
                 e.cancelBubble = true;
             }
 
+            // encode all form values
+            th.encodeAll();
+
             $('#' + th.formID).submit();
 
             return false;
         },
     
-        initHeartbeat: function() {
+        initHeartbeat: function(interval) {
+            th.heartbeatInterval = interval;
             window.setInterval(
                 (function () {
                     th.sendAsync(th.heartbeatCommand);
@@ -180,4 +207,3 @@
         }
 };
 th=TH;
-th.initHeartbeat();

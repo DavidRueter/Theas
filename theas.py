@@ -98,9 +98,10 @@ import string
 from collections import OrderedDict
 import ast
 import uuid
+import urllib.parse as urlparse
+import html
 
-
-from jinja2 import Template, Undefined, environmentfilter, Markup, escape
+from jinja2 import Template, Undefined, environmentfilter  #, Markup, escape
 from jinja2.environment import Environment
 
 ALLOW_UNSAFE_FUNCTIONS = False
@@ -127,7 +128,7 @@ class TheasControl:
     def __init__(self):
         #self.control_nv = None
         self.id = None
-        self.authenticator = None
+        #self.authenticator = None
         self.checked = ''
         self.value = ''
         self.caption = ''
@@ -208,6 +209,7 @@ class Theas:
 
         self.th_session = theas_session
         self.control_names = {}
+        self.set_value('theas:th:ErrorMessage', '');
         self.functions = {}
         self.authenicator = None
 
@@ -353,17 +355,20 @@ class Theas:
                     this_ctrl_nv.controls[value_param] = this_ctrl
                     value_changed = True
 
+            if this_ctrl_nv.control_type == 'select' and ('options_dict' in kwargs or 'source_list' in kwargs):
+                this_ctrl_nv.controls.clear()
 
             this_options_dict = this_ctrl_nv.controls
 
             this_attribs = {}
+
 
             for this_key, this_paramvalue in kwargs.items():
 
                 if this_key == 'options_dict':
                     this_options_dict = kwargs[this_key]
 
-                elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label'):
+                elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label', 'escaping'):
                     #this kwarg does not apply or has already been handled
                     pass
 
@@ -397,8 +402,8 @@ class Theas:
 
             if this_ctrl is None:
                 this_ctrl = noneTheasControl
-            else:
-              this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
+            #else:
+              #this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
 
             if this_ctrl is not None:
                 this_ctrl.attribs = this_attribs
@@ -422,7 +427,6 @@ class Theas:
 
         return this_result
 
-
     def get_value(self, ctrl_name):
         this_result = None
 
@@ -432,7 +436,6 @@ class Theas:
             this_result = this_ctrl_nv.value
 
         return this_result
-
 
     def set_value(self, ctrl_name, new_value):
         this_ctrl_nv, this_ctrl, value_changed = self.get_control(ctrl_name, datavalue=new_value)
@@ -445,7 +448,7 @@ class Theas:
 
 
 
-    def process_client_request(self, request_handler = None, accept_any = False, buf = None, *args, **kwargs):
+    def process_client_request(self, request_handler = None, accept_any = False, buf = None, escaping='default', *args, **kwargs):
         #handle updating theas_page controls
         #('Theas: process_client_request starting')
 
@@ -457,57 +460,34 @@ class Theas:
             for this_func in self.doOnBeforeProcessRequest:
                 perform_processing = this_func(self, request_handler=None, accept_any=accept_any)
 
-        theas_name = ''
         changed_controls = []
 
         if buf and buf.index('=') > 0:
             for this_nv in buf.split('&'):
                 if this_nv and this_nv.index('=') > 0:
                     this_name, v = this_nv.split('=')
-
                     theas_name = this_name
 
+                    # NOTE:  default for processing TheasParams from SQL stored procedures
+                    if v:
+                        if escaping == 'default' or escaping == 'urlencode':
+                            v = urlparse.unquote(v)
+                        elif escaping == 'htmlentities':
+                            v = html.unescape(v)
+
+                    # The HTML form input names begin with theas:, but in Python and elsewhere
+                    # we omit this prefix.
                     if theas_name.startswith('theas:'):
                         theas_name = theas_name[6:]
-
-
-                    #The HTML <input> names begin with theas:, but in Python and elsewhere
-                    #we omit this prefix.
-                    if theas_name.startswith('theas:'):
-                        theas_name = theas_name[6:]
-
-                    if '~~' in v:
-                        #note that buf may contain spesial escaping of & and = (i.e. from SQL stored procedure)
-                        v = v.replace('~~amp~~', '&').replace('~~eq~~', '&')
 
                     this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
-                                                               datavalue=v,
-                                                               auto_create=True)
+                                                                              datavalue=v,
+                                                                              auto_create=True)
 
                     if value_changed:
                         changed_controls.append(this_ctrl_nv)
 
-                    #print('Theas: Updated control {}={}  Result={}'.format(theas_name, v, this_ctrl_nv.datavalue))
-
         else:
-            '''            if perform_processing and request_handler and request_handler.request.body_arguments:
-                # process fields in the body of the posted data
-                for this_name, this_value in request_handler.request.body_arguments.items():
-                    theas_name = this_name
-
-                    if theas_name.startswith('theas:'):
-                        theas_name = theas_name[6:]
-
-
-                    this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
-                                                datavalue=this_value[0].decode('utf-8'),
-                                                auto_create=True)
-
-                    #print('Theas: Updated control {}={}  Result={}'.format(theas_name, this_value[0].decode('utf-8'), this_ctrl_nv.datavalue))
-
-                self.authenicator = str(uuid.uuid4())  #set a new authenicator GUID
-            '''
-
             if perform_processing and request_handler and request_handler.request.arguments:
                 # process query string parameters
 
@@ -517,19 +497,24 @@ class Theas:
                     if theas_name.startswith('theas:'):
                         theas_name = theas_name[6:]
 
-                    this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
-                                                                              datavalue=this_value[0].decode('utf-8'),
-                                                                              auto_create=True)
+                        this_value_str = this_value[0].decode('utf-8')
 
-                    # print('Theas: Updated control {}={}  Result={}'.format(theas_name, this_value[0].decode('utf-8'), this_ctrl_nv.datavalue))
+                        # NOTE:  default for processing HTTML forms
+                        if this_value_str:
+                            if escaping == 'default' or escaping == 'urlencode':
+                                this_value_str = urlparse.unquote(this_value_str)
+                            elif escaping == 'htmlentities':
+                                this_value_str = html.unescape(this_value_str)
+
+                        this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
+                                                                                  datavalue=this_value_str,
+                                                                                  auto_create=True)
 
                 self.authenicator = str(uuid.uuid4())  # set a new authenicator GUID
-
 
         if len(self.doOnAfterProcessRequest):
             for this_func in self.doOnAfterProcessRequest:
                 this_func(self, request_handler=request_handler, accept_any=accept_any)
-
 
         return changed_controls
 
@@ -570,6 +555,13 @@ class Theas:
             'theas:th:ST',
             this_env.theas_page.th_session.session_token
         )
+
+        # sneak in hidden field to pass ErrorMessage
+        buf += '\n\t\t\t\t\t<input name="{}" type="hidden" value="{}"/>'.format(
+            'theas:th:ErrorMessage',
+            self.get_value('theas:th:ErrorMessage')
+        )
+
         return buf
 
     @environmentfilter
@@ -587,7 +579,7 @@ class Theas:
 
 
     @environmentfilter
-    def theas_hidden(self, this_env, this_value, *args, **kwargs):
+    def theas_hidden(self, this_env, this_value, escaping='urlencode', *args, **kwargs):
         #This filter is called like:
         #         {{ data._Local.osST|hidden(name="theas:HelloWorld") }}
         #The arguments  behave as documented at: http://jinja.pocoo.org/docs/dev/api/#custom-filters
@@ -614,15 +606,24 @@ class Theas:
         #id is not used for hidden
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='hidden', **kwargs)
 
+        value_str = ''
+        if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
+            if escaping == 'urlencode':
+                value_str = urlparse.quote(str(this_ctrl_nv.value))
+            elif escaping == 'htmlentities':
+                value_str = html.escape(str(this_ctrl_nv.value), quote=True)
+            else:
+                value_str = str(this_ctrl_nv.value)
+
         buf = '<input name="{}" type="hidden" value="{}"/>'.format(
             'theas:' + this_ctrl_nv.name,
-            '' if this_ctrl_nv.value is None else this_ctrl_nv.value
+            value_str
         )
         return buf
 
 
     @environmentfilter
-    def theas_input(self, this_env, this_value, *args, **kwargs):
+    def theas_input(self, this_env, this_value, escaping="urlencode", *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.Company | theasInput(id="company", name="ejCompany", placeholder="", class ="form control input-md", required="")}}
 
@@ -657,8 +658,18 @@ class Theas:
             )
 
         #include value="" attribute, but only if we have a value
+
+        value_str = ''
+        if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
+            if escaping == 'urlencode':
+                value_str = urlparse.quote(str(this_ctrl_nv.value))
+            elif escaping == 'htmlentities':
+                value_str = html.escape(str(this_ctrl_nv.value), quote=True)
+            else:
+                value_str = str(this_ctrl_nv.value)
+
         if this_ctrl_nv.value:
-            buf += ' value="{}">'.format(this_ctrl_nv.value)
+            buf += ' value="{}">'.format(value_str)
         else:
             buf += '>'
 
@@ -775,7 +786,7 @@ class Theas:
 
 
     @environmentfilter
-    def theas_textarea(self, this_env, this_value, *args, **kwargs):
+    def theas_textarea(self, this_env, this_value, escaping='urlencode', *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.BasicQualifications | theasTextarea(id="basicQualifications", name="ejBasicQualifications", class ="form-control")}}
 
@@ -796,11 +807,20 @@ class Theas:
         for k, v in this_ctrl.attribs.items():
             this_attribs_str = ' {}="{}"'.format(k, v)
 
+        value_str = ''
+        if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
+            if escaping == 'urlencode':
+                value_str = urlparse.quote(str(this_ctrl_nv.value))
+            elif escaping == 'htmlentities':
+                value_str = html.escape(str(this_ctrl_nv.value), quote=True)
+            else:
+                value_str = str(this_ctrl_nv.value)
+
         buf = '<textarea name="{}"{}{}>{}</textarea>'.format(
             'theas:' + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_attribs_str,
-            '' if this_ctrl_nv.value is None else this_ctrl_nv.value
+            value_str
         )
         return buf
 
@@ -961,12 +981,16 @@ class Theas:
                 if result_data:
                     data = result_data
 
-        self.authenicator = str(uuid.uuid4())  #set a new authenticator GUID
+        #self.authenicator = str(uuid.uuid4())  #set a new authenticator GUID
 
         # render "function_def" template to define functions
         #if self.template_function_def_str:
         #    function_def_template = self.jinja_env.from_string(self.template_function_def_str)
         #    function_def_template.render()
+
+        # set th:CurrentPage
+        if self.th_session and self.th_session.current_resource and self.th_session.current_resource.resource_code:
+            self.get_control('th:CurrentPage', datavalue=self.th_session.current_resource.resource_code)
 
         # render output using template and data
         this_template = self.jinja_env.from_string(template_str)
@@ -1078,13 +1102,17 @@ class Theas:
         if control_list is None:
             # serialize all controls
             for this_key, this_control_nv in self.control_names.items():
-                if this_control_nv.name:
-                    buf = buf + this_control_nv.name.replace('%', '%25').replace('&', '%26').replace('=', '%3D') + '=' + str(this_control_nv.value).replace('%', '%25').replace('&', '%26').replace('=', '%3D') + '&'
+                buf += this_control_nv.name + '='
+                if this_control_nv.value is not None and not isinstance(this_control_nv.value, SilentUndefined):
+                    buf += urlparse.quote(str(this_control_nv.value))
+                buf += '&'
         else:
             # serialize only the controls specified in control_list
             for this_control_nv in control_list:
-                if this_control_nv.name:
-                    buf = buf + this_control_nv.name.replace('%', '%25').replace('&', '%26').replace('=', '%3D') + '=' + str(this_control_nv.value).replace('%', '%25').replace('&', '%26').replace('=', '%3D') + '&'
+                buf += this_control_nv.name + '='
+                if this_control_nv.value is not None and not isinstance(this_control_nv.value, SilentUndefined):
+                    buf += urlparse.quote(str(this_control_nv.value))
+                buf += '&'
 
         return buf
 
