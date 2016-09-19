@@ -14,7 +14,32 @@ TH = {
        heartbeatCommand : 'heartbeat',
        heartbeatInterval : 30000,
        formID : 'theasForm',  //Value for id attribute of the Theas form
-        
+
+        //Utility function to translate a date provided by SQL into a javascript date
+        dateFromSQLString: function(s) {
+            var d = null;
+
+            if (s.trim().length) {
+                var bits = s.split(/[-T:]/g);
+                d = new Date(bits[0], bits[1] - 1, bits[2]);
+                if (bits[3] + bits[4] + bits[5] > 0) {
+                    d.setHours(bits[3], bits[4], bits[5]);
+                }
+            }
+
+            return d;
+        },
+
+        //Utility function to format a date provided by SQL
+        mdyFromSQLString: function (s) {
+            var thisDate = this.dateFromSQLString(s);
+            var thisDateStr = '';
+            if (thisDate) {
+                thisDateStr = thisDate.getMonth() + 1 + "/" + thisDate.getDate() + "/" + thisDate.getFullYear();
+            }
+            return thisDateStr;
+        },
+
         //Return a theas control.  Optionally, sets the value of the control first.
         get: function (ctrlName, newValue) {
             if (ctrlName.indexOf('theas:') != 0) {

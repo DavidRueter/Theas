@@ -918,6 +918,7 @@ class ThSession:
             self.session_token = this_session_token
 
         self.logged_in = False
+        self.autologged_in = False # not a "real" login, but rather indicates a login using LOGIN_AUTO_USER_TOKEN
 
         self.__locked_by = None
         self.__date_locked = None
@@ -1165,8 +1166,9 @@ class ThSession:
 
                             self.sql_files_init_done = True
 
-                    if LOGIN_AUTO_USER_TOKEN and not self.logged_in and self.current_handler is not None:
+                    if LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in and self.current_handler is not None:
                         self.authenticate(None, None, LOGIN_AUTO_USER_TOKEN)
+                        self.autologged_in = True
 
         return self
 

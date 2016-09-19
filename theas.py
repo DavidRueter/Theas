@@ -70,7 +70,7 @@ either embedded in a Jinja template, or in a string stored in a database or some
 See https://github.com/mitsuhiko/jinja2 and http://jinja.pocoo.org for more information on Jinja2
 
 
-this_data['_Local']['theasParams'
+this_data['_Theas']['theasParams'
 
 Within your template, you can access data from the resultsets like this:
         {{ data.Employer.JobTitle }}
@@ -84,11 +84,11 @@ You can add form fields containing Theas control values to your page by includin
         {{ data.EmployerJob.WorkplaceLocation|theasHidden(name="EmployerJob:WorkplaceLocation") }}
 
 Within your template, you can also access access the values of Theas controls like this:
-    {{ data._Local.theasParams["Theas:nextPage"] }}
+    {{ data._Theas.theasParams["Theas:nextPage"] }}
 
     You could also use theasParams to access data values, such as:
 
-    {{ data._Local.theasParams["EmployerJob:JobTitle"] }}
+    {{ data._Theas.theasParams["EmployerJob:JobTitle"] }}
 
     ...but this would return the value of the session.theas_page.control, which a) would not exist unless the control
     had been previously created by a filter or by Python code prior to the start of template rendering.
@@ -100,6 +100,9 @@ import ast
 import uuid
 import urllib.parse as urlparse
 import html
+
+from time import struct_time, strptime, strftime
+import datetime
 
 from jinja2 import Template, Undefined, environmentfilter  #, Markup, escape
 from jinja2.environment import Environment
@@ -142,10 +145,22 @@ noneTheasControl = TheasControl()
 class TheasControlNV:
     def __init__(self, name='', control_type=None):
         self.name = name
+            # Name of the name/value pair (i.e. the HTML "name" attribute of an input control, etc.)
         self.controls = OrderedDict()
+            # List of controls that share this name.  Radio buttons and checkboxes can have multiple
+            # controls.  Inputs and TextAreas can have only one control.  Selects are a special case
+            # because we use self.control to store the list of HTML <Options> (name/value pairs of
+            # every option in the dropdown)...but these aren't real controls because they do not accept
+            # HTML attributes such as class, style, etc.
+        self.control = None
+            #Needed for select
         self.__datavalue = ''
+            # For internal use (to aid in setting the value of this name-value pair when the value must
+            # correspond to a child control, such as radio, checkbox, or select
         self.value = ''
+            # The current value, i.e. what jquery .val() would return for this name
         self.control_type = control_type
+            # Type of control:  'hidden', 'text', 'password', 'radio', 'checkbox', 'select', 'textarea', etc.
 
     def __del__(self):
         #for ctrl_value in self.controls:
@@ -256,25 +271,83 @@ class Theas:
         return result
 
     # ------------Jinja filter functions-------------
-    def format_friendlydate(self, value, pre="", post="", formatstr="%a %m/%d/%y"):
+    def format_friendlydate(self, value, pre='', post='', formatstr='%a %m/%d/%y', stripleading='', informatstr=None):
         '''
 
-        :param value:
-        :param pre:
-        :param post:
-        :param formatstr:
-        :return:
+        :param value: value passed by Jina--which will probably be a datetime.datetime or datetime.time...but
+                      may be a str
+        :param pre: characters to prepend to the result
+        :param post: characters to append to the result
+        :param formatstr: format string to use when formatting output
+        ;param stripleading: format string to use when parsing input to a datetime or time type
+        :return: a formatted string
 
         Default format is DOW MM/DD/YY as per strftime('%a %m/%d/%y')
+
+        See:  http://strftime.org and https://www.craig-wright.com/2016/03/18/admin
+        for cheatsheet
+
+        It seems Jinja tries to present the contents of value as type datetime or time.
+        But for some reason, probably due to locale-specific settings, sometimes the same code and format string
+        will be presented as time in one environment, and as str in another.
+
+        (Specifically, running on Windows 10 under the Python 3.4 interpreter in the PyCharm debugger, something
+        like 18:00:00.00000000 is presented as time, but the same code and data running under the Python 3.4
+        interpreter packaged with Py2Exe and running on Windows Server 2012 is presented as str.)
+
+        Whatever the reasons and details, we need to go to some extra lengths here to determine if value is of
+        type str, and if so, try to parse it out ourselves.  Our parsing efforts are not exhaustive, but
+        does handle the simple case of trying to convert a value like '18:00:00.0000000'--which is how MSSQL
+        returns a time column.
+
+        The caller is free to provide parameter informatstr which is to contain a format string to be used
+        for parsing the string.  If not provided, we default to making some hard-coded assumptions (based on
+        what MSSQL will generally return).
+
         '''
+
         s = ''
-        if value:
+
+        if isinstance(value, str):
+            # Hmm...Jinja wasn't able to present value as a datetime or time type.  See if we can parse it
+            try:
+                if informatstr is None and value.index(':'):
+                    # guess that this is a time
+                    informatstr = '%H:%M:%S'
+
+                    if value.index('.'):
+                        # guess that this supposed time value has a decimal portion of seconds that must be discarded
+                        value = value.split('.')[0]
+
+                elif value.index('/'):
+                    # guess that this is a date
+                    informatstr = '%m/%d/%y'
+
+                value = strptime(value, informatstr)  # value is now of type struct_time
+                s = strftime(formatstr, value)
+            except:
+                # No, we were unable to parse the string.
+                # The original value will simply be cast to string and returned
+                s = ''
+
+        if isinstance(value, datetime.datetime) or isinstance(value, datetime.time):
             s = value.strftime(formatstr)
-        if value and pre:
-            s = pre + s
-        if value and post:
-            s = s + post
+
+        if s:
+            if stripleading:
+                # strip specified leading characters to partially work around lack of support for %-m and &-I
+                s = s.strip(stripleading)
+
+            if value and pre:
+                s = pre + s
+            if value and post:
+                s += post
+
+        else:
+            s = str(value)
+
         return s
+
 
     def get_control(self, ctrl_name, control_type=None, id=None, auto_create=True, **kwargs):
         # NOTE:  pass in datavalue='xxx' to set the value of the control
@@ -340,7 +413,10 @@ class Theas:
                 have_datavalue_param = True
                 datavalue_param = kwargs['datavalue']
 
-            if this_ctrl_nv.control_type not in ('radio', 'select') and len(this_ctrl_nv.controls) == 1:
+
+            this_ctrl = this_ctrl_nv.control
+
+            if this_ctrl is None and this_ctrl_nv.control_type not in ('radio', 'select') and len(this_ctrl_nv.controls) == 1:
                 this_ctrl = this_ctrl_nv.controls[list(this_ctrl_nv.controls.keys())[0]]
                 if this_ctrl is not None and value_param != this_ctrl.value:
                     this_ctrl = None
@@ -354,6 +430,14 @@ class Theas:
                     this_ctrl.value = value_param
                     this_ctrl_nv.controls[value_param] = this_ctrl
                     value_changed = True
+                elif this_ctrl_nv.control_type == 'select':
+                    # Special case:  we can't use .controls because that will contain a list
+                    # of option name/values.  So we use self.control instead--because we still
+                    # need a place to store the <select> control's attributes.
+                    # Arguably could be used for other singleton controls, such as hidden and input,
+                    # but these work fine using .controls[0]
+                    # In other words, as of 9/14/2016, .control is used only for select
+                    this_ctrl = TheasControl()
 
             if this_ctrl_nv.control_type == 'select' and ('options_dict' in kwargs or 'source_list' in kwargs):
                 this_ctrl_nv.controls.clear()
@@ -463,6 +547,8 @@ class Theas:
         changed_controls = []
 
         if buf and buf.index('=') > 0:
+            while buf.endswith('&'):
+                buf = buf[:-1]
             for this_nv in buf.split('&'):
                 if this_nv and this_nv.index('=') > 0:
                     this_name, v = this_nv.split('=')
@@ -557,11 +643,16 @@ class Theas:
         )
 
         # sneak in hidden field to pass ErrorMessage
-        buf += '\n\t\t\t\t\t<input name="{}" type="hidden" value="{}"/>'.format(
+        buf += '<input name="{}" type="hidden" value="{}"/>'.format(
             'theas:th:ErrorMessage',
             self.get_value('theas:th:ErrorMessage')
         )
 
+        # sneak in hidden field to pass PerformUpdate
+        buf += '<input name="{}" type="hidden" value="{}"/>'.format(
+            'theas:th:PerformUpdate',
+            '0'
+        )
         return buf
 
     @environmentfilter
@@ -570,9 +661,9 @@ class Theas:
         #         {{ "_th"|theasXSRF }}
         # No arguments are required.  The "_th" can be any value (i.e. the value is ignored)
         # This filter is just for convenience and consistency:  The user could directly use
-        # {{ data._Local.xsrf_formHTML }} instead.
+        # {{ data._Theas.xsrf_formHTML }} instead.
 
-        #buf = this_env.theas_page.th_session.current_data['_Local']['xsrf_formHTML']
+        #buf = this_env.theas_page.th_session.current_data['_Theas']['xsrf_formHTML']
         buf = this_env.theas_page.th_session.current_xsrf_form_html
 
         return buf
@@ -581,7 +672,7 @@ class Theas:
     @environmentfilter
     def theas_hidden(self, this_env, this_value, escaping='urlencode', *args, **kwargs):
         #This filter is called like:
-        #         {{ data._Local.osST|hidden(name="theas:HelloWorld") }}
+        #         {{ data._Theas.osST|hidden(name="theas:HelloWorld") }}
         #The arguments  behave as documented at: http://jinja.pocoo.org/docs/dev/api/#custom-filters
         #The environment is passed as the first argument.  The value that the fitler was called on is
         #passed as the second argument (this_value).  Additional arguments inside the parenthesis are
@@ -648,7 +739,7 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str = this_attribs_str + ' {}="{}"'.format(k, v)
+            this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{}'.format(
                 'theas:' + this_ctrl_nv.name,
@@ -697,7 +788,7 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str = this_attribs_str + ' {}="{}"'.format(k, v)
+            this_attribs_str += ' {}="{}"'.format(k, v)
 
 
 
@@ -765,7 +856,7 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str = ' {}="{}"'.format(k, v)
+            this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<select name="{}"{}{} >'.format(
             'theas:' + this_ctrl_nv.name,
@@ -805,7 +896,7 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str = ' {}="{}"'.format(k, v)
+            this_attribs_str += ' {}="{}"'.format(k, v)
 
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
@@ -845,7 +936,7 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str = ' {}="{}"'.format(k, v)
+            this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
             'theas:' + this_ctrl_nv.name,
