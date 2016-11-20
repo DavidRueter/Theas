@@ -255,6 +255,14 @@ class Theas:
 
     @classmethod
     def mimetype_for_extension(cls, filename):
+        '''
+        :param filename:
+        :return: string:
+
+        Note:  at present this simply looks up the filename extension.
+        This function could be expanded to look at file contents to determine the type from data signatures
+        if desired.  See:  https://en.wikipedia.org/wiki/List_of_file_signatures
+        '''
         result = 'text/html'
 
         fn = None
@@ -264,7 +272,7 @@ class Theas:
         if fn:
             global MIME_TYPE_EXTENSIONS
             if extension:
-                extension = '.' + extension
+                extension = '.' + extension.lower()
                 if extension in MIME_TYPE_EXTENSIONS:
                     result = MIME_TYPE_EXTENSIONS[extension]
 
@@ -358,7 +366,7 @@ class Theas:
 
         # For other types, it is an error to pass in value='yyy'
 
-        # HTML id attributes are unique.  HTML name attributes are not necessisarly unique.
+        # HTML id attributes are unique.  HTML name attributes are not necessarily unique.
         # For example, in the case of radio buttons, multiple elements (for each individual button)
         # may share the same name (where the name pertains to the group of radio buttons)
 
@@ -393,6 +401,11 @@ class Theas:
                         control_type = 'hidden'
                     this_ctrl_nv = TheasControlNV(name=ctrl_name, control_type=control_type)
                     self.control_names[ctrl_name] = this_ctrl_nv
+            else:
+                # existing control, but may have been auto-created as a hidden...but now we have a more specific
+                # type
+                if control_type != 'hidden':
+                    this_ctrl_nv.control_type = control_type
 
 
             value_param = None
@@ -413,92 +426,120 @@ class Theas:
                 have_datavalue_param = True
                 datavalue_param = kwargs['datavalue']
 
-
-            this_ctrl = this_ctrl_nv.control
-
-            if this_ctrl is None and this_ctrl_nv.control_type not in ('radio', 'select') and len(this_ctrl_nv.controls) == 1:
-                this_ctrl = this_ctrl_nv.controls[list(this_ctrl_nv.controls.keys())[0]]
-                if this_ctrl is not None and value_param != this_ctrl.value:
-                    this_ctrl = None
-
-            if this_ctrl is None:
-                if this_ctrl_nv.control_type != 'select' and (value_param or len(this_ctrl_nv.controls) == 0):
-                    #We must create a new control.  Value and other attributes will be set below.
-                    this_ctrl = TheasControl()
-                    #this_ctrl.control_nv = this_ctrl_nv
-
-                    this_ctrl.value = value_param
-                    this_ctrl_nv.controls[value_param] = this_ctrl
-                    value_changed = True
-                elif this_ctrl_nv.control_type == 'select':
-                    # Special case:  we can't use .controls because that will contain a list
-                    # of option name/values.  So we use self.control instead--because we still
-                    # need a place to store the <select> control's attributes.
-                    # Arguably could be used for other singleton controls, such as hidden and input,
-                    # but these work fine using .controls[0]
-                    # In other words, as of 9/14/2016, .control is used only for select
-                    this_ctrl = TheasControl()
-
-            if this_ctrl_nv.control_type == 'select' and ('options_dict' in kwargs or 'source_list' in kwargs):
-                this_ctrl_nv.controls.clear()
-
-            this_options_dict = this_ctrl_nv.controls
-
-            this_attribs = {}
+                if ctrl_name == 'th:ErrorMessage':
+                    self.th_session.log('Theas', 'th:ErrorMessage value set={}'.format(datavalue_param))
 
 
-            for this_key, this_paramvalue in kwargs.items():
+            if this_ctrl_nv is not None:
+                this_ctrl = this_ctrl_nv.control
 
-                if this_key == 'options_dict':
-                    this_options_dict = kwargs[this_key]
+                if this_ctrl is None and this_ctrl_nv.control_type not in ('radio', 'select') and len(this_ctrl_nv.controls) == 1:
+                    this_ctrl = this_ctrl_nv.controls[list(this_ctrl_nv.controls.keys())[0]]
+                    if this_ctrl is not None and value_param != this_ctrl.value:
+                        this_ctrl = None
 
-                elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label', 'escaping'):
-                    #this kwarg does not apply or has already been handled
-                    pass
+                if this_ctrl is None:
+                    if this_ctrl_nv.control_type != 'select' and (value_param or len(this_ctrl_nv.controls) == 0):
+                        #We must create a new control.  Value and other attributes will be set below.
+                        this_ctrl = TheasControl()
+                        #this_ctrl.control_nv = this_ctrl_nv
 
-                else:
-                    #HTML attributes that have a - are a problem, because this is not a valid character for a
-                    #Python identifier.  In particular, the HTML5 data-xxx="yyy" tag is a problem.
-                    #It is up to the user to replace - with _ in attribute names, however Theas does
-                    #treat data_ as data- internally
-                    if this_key.startswith('data_'):
-                        this_key = this_key.replace('data_', 'data-')
-                    this_attribs[this_key] = this_paramvalue
+                        this_ctrl.value = value_param
+                        this_ctrl_nv.controls[value_param] = this_ctrl
+                        value_changed = True
+                    elif this_ctrl_nv.control_type == 'select':
+                        # Special case:  we can't use .controls because that will contain a list
+                        # of option name/values.  So we use self.control instead--because we still
+                        # need a place to store the <select> control's attributes.
+                        # Arguably could be used for other singleton controls, such as hidden and input,
+                        # but these work fine using .controls[0]
+                        # In other words, as of 9/14/2016, .control is used only for select
+                        this_ctrl = TheasControl()
 
-            if this_ctrl_nv.control_type == 'select' and this_options_dict is not None:
-                #create pseudo control for each select option
-                for this_opt, this_caption in this_options_dict.items():
-                    if this_opt not in this_ctrl_nv.controls:
-                        temp_ctrl = TheasControl()
-                        #temp_ctrl.control_nv = this_ctrl_nv
-                        temp_ctrl.value = this_opt
-                        temp_ctrl.caption = this_caption
+                if this_ctrl_nv.control_type == 'select' and ('options_dict' in kwargs or 'source_list' in kwargs):
+                    this_ctrl_nv.controls.clear()
 
-                        this_ctrl_nv.controls[this_opt] = temp_ctrl
+                this_options_dict = this_ctrl_nv.controls
 
-            if have_datavalue_param:
-                if this_ctrl_nv.datavalue != datavalue_param:
-                    value_changed = True
-                # We want to go ahead and assign this value even if we don't think it has changed, because the
-                # datavalue property setter will set .checked which will not yet be set in the case of a new
-                # auto-created control.
-                this_ctrl_nv.datavalue = datavalue_param
+                this_attribs = {}
 
-            if this_ctrl is None:
-                this_ctrl = noneTheasControl
-            #else:
-              #this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
 
-            if this_ctrl is not None:
-                this_ctrl.attribs = this_attribs
-                if id:
-                    this_ctrl.id = id
+                for this_key, this_paramvalue in kwargs.items():
 
-            if control_type is not None and control_type != this_ctrl_nv.control_type and (not this_ctrl_nv.control_type or this_ctrl_nv.control_type=='hidden'):
-                # Even on an existing control we want to update control_type if it is provided, because
-                # the control could have been created from TheasParams from a stored procedure and defaulted
-                # to hidden...but now a filter or something else is specifying the "real" type.
-                this_ctrl_nv.control_type = control_type
+                    if this_key == 'options_dict':
+                        this_options_dict = kwargs[this_key]
+
+                    elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label', 'escaping'):
+                        #this kwarg does not apply or has already been handled
+                        pass
+
+                    else:
+                        #HTML attributes that have a - are a problem, because this is not a valid character for a
+                        #Python identifier.  In particular, the HTML5 data-xxx="yyy" tag is a problem.
+                        #It is up to the user to replace - with _ in attribute names, however Theas does
+                        #treat data_ as data- internally
+                        if this_key.startswith('data_'):
+                            this_key = this_key.replace('data_', 'data-')
+                        elif this_key.lower() == 'class' and this_key != 'class':
+                            # force class key to lowercase
+                            this_key = 'class'
+                        elif this_key.lower() == 'style' and this_key != 'style':
+                            # force class key to lowercase
+                            this_key = 'style'
+                        this_attribs[this_key] = this_paramvalue
+
+                if this_ctrl_nv.control_type != 'hidden':
+                    # add in _thControl CSS class
+                    class_str = this_attribs.get('class', '')
+                    if class_str:
+                        class_str += ' '
+                    class_str += '_thControl'
+                    this_attribs['class'] = class_str
+
+                    # add in visibility:hidden
+                    # theas.js will take care of $('._thControl').css('visibility', 'visible') when the page is ready
+                    style_str = this_attribs.get('style', '')
+
+                    if style_str.find('visibility:') == -1:
+                        if style_str:
+                            style_str += ' '
+                        style_str += 'visibility:hidden'
+                        this_attribs['style'] = style_str
+
+                if this_ctrl_nv.control_type == 'select' and this_options_dict is not None:
+                    #create pseudo control for each select option
+                    for this_opt, this_caption in this_options_dict.items():
+                        if this_opt not in this_ctrl_nv.controls:
+                            temp_ctrl = TheasControl()
+                            #temp_ctrl.control_nv = this_ctrl_nv
+                            temp_ctrl.value = this_opt
+                            temp_ctrl.caption = this_caption
+
+                            this_ctrl_nv.controls[this_opt] = temp_ctrl
+
+                if have_datavalue_param:
+                    if this_ctrl_nv.datavalue != datavalue_param:
+                        value_changed = True
+                    # We want to go ahead and assign this value even if we don't think it has changed, because the
+                    # datavalue property setter will set .checked which will not yet be set in the case of a new
+                    # auto-created control.
+                    this_ctrl_nv.datavalue = datavalue_param
+
+                if this_ctrl is None:
+                    this_ctrl = noneTheasControl
+                #else:
+                  #this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
+
+                if this_ctrl is not None:
+                    this_ctrl.attribs = this_attribs
+                    if id:
+                        this_ctrl.id = id
+
+                if control_type is not None and control_type != this_ctrl_nv.control_type and (not this_ctrl_nv.control_type or this_ctrl_nv.control_type=='hidden'):
+                    # Even on an existing control we want to update control_type if it is provided, because
+                    # the control could have been created from TheasParams from a stored procedure and defaulted
+                    # to hidden...but now a filter or something else is specifying the "real" type.
+                    this_ctrl_nv.control_type = control_type
 
         return this_ctrl_nv, this_ctrl, value_changed
 
@@ -511,10 +552,10 @@ class Theas:
 
         return this_result
 
-    def get_value(self, ctrl_name):
+    def get_value(self, ctrl_name, auto_create=False):
         this_result = None
 
-        this_ctrl_nv, this_ctrl, value_changed = self.get_control(ctrl_name)
+        this_ctrl_nv, this_ctrl, value_changed = self.get_control(ctrl_name, auto_create=auto_create)
 
         if this_ctrl_nv is not None:
             this_result = this_ctrl_nv.value
@@ -532,7 +573,7 @@ class Theas:
 
 
 
-    def process_client_request(self, request_handler = None, accept_any = False, buf = None, escaping='default', *args, **kwargs):
+    def process_client_request(self, request_handler = None, accept_any = False, buf = None, escaping='default', from_stored_proc=False, *args, **kwargs):
         #handle updating theas_page controls
         #('Theas: process_client_request starting')
 
@@ -546,7 +587,10 @@ class Theas:
 
         changed_controls = []
 
+
         if buf and buf.index('=') > 0:
+            # process from a string buf (typically returned by a stored procedure)
+
             while buf.endswith('&'):
                 buf = buf[:-1]
             for this_nv in buf.split('&'):
@@ -566,16 +610,16 @@ class Theas:
                     if theas_name.startswith('theas:'):
                         theas_name = theas_name[6:]
 
-                    this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
-                                                                              datavalue=v,
-                                                                              auto_create=True)
-
-                    if value_changed:
-                        changed_controls.append(this_ctrl_nv)
+                    if theas_name != 'th:LoggedIn' or from_stored_proc:
+                        this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
+                                                                                  datavalue=v,
+                                                                                  auto_create=True)
+                        if value_changed:
+                            changed_controls.append(this_ctrl_nv)
 
         else:
             if perform_processing and request_handler and request_handler.request.arguments:
-                # process query string parameters
+                # process arguments from HTTP request
 
                 for this_name, this_value in request_handler.request.arguments.items():
                     theas_name = this_name
@@ -595,6 +639,9 @@ class Theas:
                         this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
                                                                                   datavalue=this_value_str,
                                                                                   auto_create=True)
+
+                        if value_changed:
+                            changed_controls.append(this_ctrl_nv)
 
                 self.authenicator = str(uuid.uuid4())  # set a new authenicator GUID
 
