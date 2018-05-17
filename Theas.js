@@ -57,31 +57,36 @@ TH = {
 
         //Return a theas control.  Optionally, sets the value of the control first.
         get: function (ctrlName, newValue) {
-            if (ctrlName.indexOf('theas:') != 0) {
-                ctrlName = 'theas:' + ctrlName;
-            }
+            var thisCtrl;
 
-            var thisCtrl = $('*[name="' + ctrlName + '"]');
+            if (ctrlName) {
 
-            if (thisCtrl.length == 0) {
-                thisCtrl = null;
-            }
-
-
-           if (typeof newValue !== 'undefined') {
-                if (!thisCtrl) {
-                    //auto-create a new control
-                    var $thForm = $('#' + th.formID);
-                    if ($thForm && $thForm.length) {
-                        $thForm.append($('<input name="' + ctrlName + '" type="hidden" />'));
-                    }
-
-                    thisCtrl = $('*[name="' + ctrlName + '"]');
-
+                if (ctrlName.indexOf('theas:') != 0) {
+                    ctrlName = 'theas:' + ctrlName;
                 }
 
-                if (thisCtrl) {
-                    thisCtrl.val(newValue);
+                thisCtrl = $('*[name="' + ctrlName + '"]');
+
+                if (thisCtrl.length == 0) {
+                    thisCtrl = null;
+                }
+
+
+               if (typeof newValue !== 'undefined') {
+                    if (!thisCtrl) {
+                        //auto-create a new control
+                        var $thForm = $('#' + th.formID);
+                        if ($thForm && $thForm.length) {
+                            $thForm.append($('<input name="' + ctrlName + '" type="hidden" />'));
+                        }
+
+                        thisCtrl = $('*[name="' + ctrlName + '"]');
+
+                    }
+
+                    if (thisCtrl) {
+                        thisCtrl.val(newValue);
+                    }
                 }
             }
 
@@ -97,7 +102,7 @@ TH = {
                 q = q.split('&');
                 for (var i = 0; i < q.length; i++) {
                     hash = q[i].split('=');
-                    this.get(hash[0], decodeURIComponent(hash[1]));
+                    this.get(decodeURIComponent(hash[0]), decodeURIComponent(hash[1]));
                 }
             }
         },
@@ -227,6 +232,13 @@ TH = {
 
 
         submitForm: function(e) {
+            if (e === true) {
+                // set the Theas param th:PerformUpdate to tell the server it should treat this
+                // form post as an update request
+                this.get('th:PerformUpdate', '1');
+                e = null;
+            }
+
             if (!e) {
                 e = window.event;
             }
@@ -315,7 +327,7 @@ TH = {
 
                     if ($thMsgDlg.length) {
                         if (!this.origDialogContent) {
-                            var bufBody = $thMsgDlg.find('.modal-main').html();
+                            var bufBody = $thMsgDlg.find('.modal-body').html();
                             if ($.trim(bufBody)) {
                                 this.origDialogContent = bufBody;
                             }
@@ -337,11 +349,19 @@ TH = {
                         }
 
                         if (thisMsg) {
-                            $thMsgDlg.find('.modal-main').html(thisMsg);
+                            $thMsgDlg.find('.modal-body').html(thisMsg);
                         }
 
-                        if (thisTitle) {
-                            $thMsgDlg.find('.modal-title').text(thisTitle);
+                        var modalTitle = $thMsgDlg.find('.modal-title');
+
+                        if (modalTitle.length) {
+                            if (thisTitle) {
+                                modalTitle.text(thisTitle);
+                                modalTitle.css('visibility', 'visible');
+                            }
+                            else {
+                                modalTitle.css('visibility', 'hidden');
+                            }
                         }
 
                         $thMsgDlg.find('button.close').click(function () {
@@ -415,7 +435,7 @@ TH = {
 
                     // clear the error message
                     this.get('th:ErrorMessage', '');
-                    this.sendAsync('clearerror');
+                    this.sendAsync('clearError');
 
                     if (showModal) {
                         th.showModal(thErrorMsg, 'Error', onClose, backOnError);

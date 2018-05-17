@@ -1,4 +1,5 @@
 #!usr/bin/python
+
 import sys
 import os
 import datetime
@@ -9,6 +10,7 @@ import uuid
 import binascii
 import traceback
 import string
+import json
 
 import tornado.web
 import tornado.ioloop
@@ -42,9 +44,9 @@ import urllib.parse as urlparse
 # from jinja2.environment import Environment
 # from tornado.stack_context import ExceptionStackContext
 # import contextlib
-#import decimal
+# import decimal
 # import pymssql
-#from tornado import gen, concurrent, ioloop
+# from tornado import gen, concurrent, ioloop
 
 # from multiprocessing import Process, Lock
 # from tornado.options import tornado.options.define, options
@@ -92,6 +94,7 @@ USE_WORKER_THREADS = False
 MAX_WORKERS = 30
 USE_SESSION_COOKIE = True
 REMEMBER_USER_TOKEN = False
+FORCE_REDIR_AFTER_POST = True
 
 # NOTE:
 # 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
@@ -482,6 +485,7 @@ class ThResource:
         self.exists = True
         self.on_before = None
         self.on_after = None
+        self.revision = None
 
     def __del__(self):
         self.data = None
@@ -505,6 +509,7 @@ class ThCachedResources:
     def __init__(self):
         self.__resources = {}
         self.__static_blocks_dict = {}
+        self.__resource_versions_dict = {}
         self.default_path = G_program_options.settings_path
 
     def __del__(self):
@@ -523,6 +528,9 @@ class ThCachedResources:
             self.__static_blocks_dict = None
             del self.__static_blocks_dict
 
+            self.__resource_versions_dict = None
+            del self.__resource_versions_dict
+
         finally:
             self.unlock()
 
@@ -533,6 +541,15 @@ class ThCachedResources:
     @static_blocks_dict.setter
     def static_blocks_dict(self, new_dict):
         self.__static_blocks_dict = new_dict
+
+    @property
+    def resource_versions_dict(self):
+        return self.__resource_versions_dict
+
+    @resource_versions_dict.setter
+    def resource_versions_dict(self, new_dict):
+        self.__resource_versions_dict = new_dict
+
 
     def len(self):
         return len(self.__resources)
@@ -545,7 +562,7 @@ class ThCachedResources:
             self.unlock()
 
     def load_resource(self, resource_code, th_session, all_static_blocks=False, sessionless=False, from_filename=None,
-                      is_public=False, is_static=False):
+                      is_public=False, is_static=False, get_default_resource=False):
         this_resource = None
 
         if from_filename:
@@ -574,7 +591,7 @@ class ThCachedResources:
             else:
                 raise TheasServerError(
                     'Error due to request of file {} from the file system.  Server is configured to server resources only from the database.'.format(
-                    from_filename))
+                        from_filename))
         else:
             # load resource from database
             if th_session is None:
@@ -598,11 +615,20 @@ class ThCachedResources:
             this_proc = ThStoredProc('theas.spgetSysWebResources', th_session)
 
             if this_proc.is_ok:
+
+                # Note:  we could check for existence of @GetDefaultResource down below to help with backwards
+                # compatibililty ... but that would mean having to call refresh_parameter_list, which is
+                # unnecessary overhead.
+                # this_proc.refresh_parameter_list()
+
                 this_proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
                 this_proc.bind(str(int(all_static_blocks)), _mssql.SQLCHAR, '@AllStaticBlocks')
 
+                # if '@GetDefaultResource' in this_proc.parameter_list:
+                this_proc.bind(str(int(get_default_resource)), _mssql.SQLCHAR, '@GetDefaultResource')
+
                 proc_result = this_proc.execute(fetch_rows=False)
-                assert proc_result, 'ThCachedResources.load_resource received error result from call to opsusr.spapiGetSysWebResources in the SQL database.'
+                assert proc_result, 'ThCachedResources.load_resource received error result from call to theas.spgetSysWebResources in the SQL database.'
 
                 row_count = 0
 
@@ -613,7 +639,10 @@ class ThCachedResources:
                         row_count += 1
                         buf = row['ResourceText']
                         if not buf:
-                            buf = bytes(row['ResourceData'])
+                            buf = row['ResourceData']
+                            if buf:
+                                buf = bytes(buf)
+
                         elif not all_static_blocks and buf and '$thInclude_' in buf:
                             # Perform replacement of includes.  Template may include string like:
                             # $thInclude_MyResourceCode
@@ -641,6 +670,10 @@ class ThCachedResources:
                         if 'OnAfter' in row:
                             this_resource.on_after = row['OnAfter']
 
+                        if 'Revision' in row:
+                            this_resource.revision = row['Revision']
+
+
                         if this_resource.resource_code:
                             self.add_resource(row['ResourceCode'], this_resource)
 
@@ -655,6 +688,14 @@ class ThCachedResources:
 
                 if all_static_blocks:
                     ThCachedResources.static_blocks_dict = this_static_blocks_dict
+
+                    have_next_resultset = this_proc.th_session.sql_conn.nextresult()
+                    if have_next_resultset:
+                        for row in this_proc.th_session.sql_conn:
+                            # note:  should only be one row
+                            row_count += 1
+                            buf = row['JSON_CurResourceRevisions']
+                            ThCachedResources.resource_versions_dict = dict((v["ResourceCode"], v) for v in json.loads(buf))
 
                 this_proc = None
                 del this_proc
@@ -686,7 +727,7 @@ class ThCachedResources:
         return result
 
     def get_resource(self, resource_code, th_session, for_public_use=False, all_static_blocks=False,
-                     none_if_not_found=True, from_file=None):
+                     none_if_not_found=True, get_default_resource=False, from_file=None):
         global DEFAULT_RESOURCE_CODE
 
         this_resource = None
@@ -707,7 +748,8 @@ class ThCachedResources:
         else:
             if th_session is not None:
                 # Load resource (which requires a session)
-                this_resource = self.load_resource(resource_code, th_session, all_static_blocks)
+                this_resource = self.load_resource(resource_code, th_session, all_static_blocks,
+                                                   get_default_resource=get_default_resource)
 
         log_msg = None
 
@@ -722,7 +764,7 @@ class ThCachedResources:
                 log_msg = 'Resource', 'Requested resource {} could not be loaded in ThCachedResources.get_resource'.format(
                     resource_code)
         else:
-            if for_public_use and not this_resource.is_public:
+            if for_public_use and this_resource is None:
                 log_msg = 'Resource', 'Requested resource {} could not be loaded in ThCachedResources.get_resource'.format(
                     resource_code)
 
@@ -732,7 +774,7 @@ class ThCachedResources:
             else:
                 ThSession.cls_log('Resource', log_msg)
 
-        if th_session is not None and this_resource is not None and this_resource.render_jinja_template:
+        if th_session is not None and this_resource is not None and this_resource.exists and this_resource.resource_code != LOGIN_RESOURCE_CODE and this_resource.render_jinja_template:
             # we are assuming that only a jinja template page will have a stored procedure / can serve
             # as the current resource for a session.  (We don't want javascript files and the like
             # to be recorded as the current resource.)
@@ -922,7 +964,7 @@ class ThSession:
         self.__locked_by = None
         self.__date_locked = None
 
-        self.current_resource = None
+        self.__current_resource = None
 
         self.current_template_str = None
 
@@ -965,6 +1007,24 @@ class ThSession:
         self.remember_user_token = REMEMBER_USER_TOKEN
 
         self.theas_page = theas.Theas(theas_session=self)
+
+    @property
+    def current_resource(self):
+        return self.__current_resource
+
+    @property
+    def resource_versions(self):
+        # Return master resource_versions_dict from ThCachedResources to make this available in Theas filters
+        return ThCachedResources.resource_versions_dict
+
+    @current_resource.setter
+    def current_resource(self, value):
+        if value is not None and value.render_jinja_template:
+
+            if self.__current_resource is None or (value.resource_code != self.__current_resource.resource_code):
+                self.log('Resource', 'Current_resource changed to: {}  Was: {}'.format(value.resource_code,
+                                                                                       self.__current_resource.resource_code if self.__current_resource else 'not set'))
+                self.__current_resource = value
 
     @property
     def locked(self):
@@ -1072,7 +1132,7 @@ class ThSession:
             this_sess = G_sessions.retrieve_session(session_token, comments=comments, do_log=do_log)
 
         if this_sess is not None:
-            this_sess.log('Obtained existing session', this_sess.session_token)
+            this_sess.log('Session', 'Obtained existing session', this_sess.session_token)
             lock_succeeded = this_sess.get_lock(handler_guid=handler_guid)
 
             if not lock_succeeded:
@@ -1171,7 +1231,7 @@ class ThSession:
                             self.sql_files_init_done = True
 
                     if LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in and self.current_handler is not None:
-                        self.log('Authenticating as AUTO user (i.e. public)')
+                        self.log('Auth', 'Authenticating as AUTO user (i.e. public)')
                         self.authenticate(user_token=LOGIN_AUTO_USER_TOKEN)
                         self.autologged_in = True
 
@@ -1224,9 +1284,18 @@ class ThSession:
         self.logged_in = False
         result = False
 
-        if self.current_handler is not None and \
-                        'u' in self.current_handler.request.arguments and \
-                        'pw' in self.current_handler.request.arguments:
+        if self.current_handler is not None:
+            if username is None and password is None and user_token is None and not retrieve_existing:
+                if 'u' in self.current_handler.request.arguments:
+                    username = self.current_handler.get_argument('u')[0]
+                elif 'theas:Login:UserName' in self.current_handler.request.arguments:
+                    username = self.current_handler.get_argument('theas:Login:UserName')
+
+                if 'pw' in self.current_handler.request.arguments:
+                    password = self.current_handler.request.get_argument('pw')
+                elif 'theas:Login:Password' in self.current_handler.request.arguments:
+                    password = self.current_handler.get_argument('theas:Login:Password')
+
             # called due to login page being submitted
 
             # theas:th:RememberUser is a checkbox (which will not be submitted if unchecked)--so default to '0'
@@ -1247,7 +1316,6 @@ class ThSession:
 
         # The session keeps a copy of the user_name for convenience / to access in templates
         self.username = None
-
 
         # authenticate user into database app
         proc = ThStoredProc('theas.spdoAuthenticateUser', self)
@@ -1289,9 +1357,9 @@ class ThSession:
                             self.current_data['_Theas']['LoggedIn'] = self.logged_in
                             self.current_data['_Theas']['UserToken'] = self.user_token
 
-                        self.log('Authenticated as actual user')
+                        self.log('Auth', 'Authenticated as actual user')
                     else:
-                        self.log('Authenticated as AUTO (public)')
+                        self.log('Auth', 'Authenticated as AUTO (public)')
 
                 proc = None
                 del proc
@@ -1304,7 +1372,6 @@ class ThSession:
             self.logged_in = False
             self.log('Session', 'Could not access SQL database server to attempt Authentication.')
             error_message = 'Could not access SQL database server'
-
 
         if self.current_handler:
             if USE_SESSION_COOKIE:
@@ -1319,7 +1386,7 @@ class ThSession:
                                 self.current_handler.cookie_usertoken = self.user_token
 
                         self.current_handler.write_cookies()
-                        self.log('Cookies', 'Updated cookie theas:th:UserToken (authenticate() sucess)')
+                        self.log('Cookies', 'Updated cookie theas:th:UserToken (authenticate() success)')
 
             else:
                 self.current_handler.cookie_st = None
@@ -1476,7 +1543,7 @@ class ThSession:
         resource = None
         template_str = ''
 
-        self.log('Fetching login page resource')
+        self.log('Resource', 'Fetching login page resource')
         resource = G_cached_resources.get_resource(LOGIN_RESOURCE_CODE, self)
 
         if resource is None:
@@ -1504,6 +1571,7 @@ class ThHandler(tornado.web.RequestHandler):
         self.handler_guid = str(uuid.uuid4())
         self.deferred_xsrf = False
         self.set_header('Server', 'Theas/{}'.format(THEAS_VERSION))
+        self.filename = None
 
         self.__cookies_changed = False
 
@@ -1557,8 +1625,8 @@ class ThHandler(tornado.web.RequestHandler):
 
     def write_cookies(self):
         self.set_secure_cookie('theas:th:ST', '' if self.cookie_st is None else self.cookie_st, path='/')
-        self.set_secure_cookie('theas:th:UserToken', '' if self.cookie_usertoken is None else self.cookie_usertoken, path='/')
-
+        self.set_secure_cookie('theas:th:UserToken', '' if self.cookie_usertoken is None else self.cookie_usertoken,
+                               path='/')
 
     def check_xsrf_cookie(self):
         """
@@ -1651,7 +1719,7 @@ class ThHandler(tornado.web.RequestHandler):
             if bindata is not None:
                 buf = '0x' + binascii.hexlify(bindata).decode('ascii')
             elif file_obj is not None:
-                buf = '0x'.encode('ascii') + binascii.hexlify(file_obj['body']).decode('ascii')
+                buf = '0x' + binascii.hexlify(file_obj['body']).decode('ascii')
                 filename = file_obj['filename']
                 filetype = file_obj['content_type']
 
@@ -1684,18 +1752,18 @@ class ThHandler(tornado.web.RequestHandler):
             self.session.sql_conn.execute_non_query(sql_str)
 
         if self.session.sql_conn is None or not self.session.sql_conn.connected:
-            self.session.log('process_uploaded_files(', 'New connection')
+            self.session.log('POST Files', 'Process_uploaded_files(', 'New connection')
             self.session.init_session()
 
         if self.request.headers.get('Content-Type') == 'application/octet-stream':
-            self.session.log('Request', 'Delivering binary body to SQL')
+            self.session.log('POST Files', 'Delivering binary body to SQL')
             process_file(bindata=self.request.body,
                          filename=self.request.headers.get('X-File-Name'),
                          filetype=self.request.headers.get('X-File-Type')
                          )
 
         if len(self.request.files) > 0:
-            self.session.log('Request', 'Delivering upload files to SQL')
+            self.session.log('POST Files', 'Delivering upload files to SQL')
 
             # pass upload files to SQL
             for this_file_field in list(self.request.files.keys()):
@@ -1713,7 +1781,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         resource = None
 
-        self.session.log('Fetching resource ', resource_code)
+        self.session.log('Resource', 'Fetching resource ', resource_code)
         resource = G_cached_resources.get_resource(resource_code, self.session)
 
         if resource is None:
@@ -1797,8 +1865,30 @@ class ThHandler(tornado.web.RequestHandler):
                 # if '@StepDefID' in proc.parameter_list and self.session.theas_page.get_value('stepDefID') is not None:
                 #    proc.bind(self.session.theas_page.get_value('stepDefID'), _mssql.SQLCHAR, '@StepDefID')
 
+                first_path_elem = self.request.path.split('/')[1]
+
                 if '@Document' in proc.parameter_list:
-                    proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
+                    this_document = None
+
+                    if first_path_elem == 'r':
+                        this_document = self.request.path.split('/')[2]
+                    else:
+                        this_document = self.request.path
+
+                    if this_document is not None:
+                        proc.bind(this_document, _mssql.SQLCHAR, '@Document')
+
+                if '@PathFull' in proc.parameter_list:
+                    proc.bind(self.request.path, _mssql.SQLCHAR, '@PathFull')
+
+                if '@PathParams' in proc.parameter_list:
+                    this_path = None
+
+                    if first_path_elem == 'r':
+                        this_path = "/".join(self.request.path.split('/')[3:])
+
+                    if this_path is not None:
+                        proc.bind(this_path, _mssql.SQLCHAR, '@PathParams')
 
                 if '@HTTPParams' in proc.parameter_list:
                     proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
@@ -1838,6 +1928,8 @@ class ThHandler(tornado.web.RequestHandler):
                 proc_result = proc.execute(fetch_rows=False)
 
             except Exception as e:
+                had_error = True
+
                 err_msg = 'Error in stored procedure ' + e.procname.decode('ascii') + \
                           '(error ' + str(e.number) + ' at line ' + str(e.line) + '): ' + \
                           e.text.decode('ascii')
@@ -1851,7 +1943,7 @@ class ThHandler(tornado.web.RequestHandler):
             #  appropriately stored in a list of dictionaries.
             #
             #  For a single-row resultset stored in a dictionary, values can be accessed as:
-            #    this_data['general']['MO_Number']
+            #    this_data['General']['MO_Number']
             #
             #  For multi-row resultsets stored in a list of dictionaries, values can be accessed  while looping through the
             #  list of rows (dictionaries), or for a particular row in the list, such as:
@@ -1946,7 +2038,7 @@ class ThHandler(tornado.web.RequestHandler):
                     this_resultset_info['name'])
                                  )
 
-                if this_resultset_info['name'] in ('header', 'general'):
+                if this_resultset_info['name'] in ('General'):  #should we also include 'general' here??
                     if row is not None:
                         if 'TheasParams' in row:
                             theas_params_str = row['TheasParams']
@@ -1963,6 +2055,10 @@ class ThHandler(tornado.web.RequestHandler):
 
                                 # Since Theas controls may have changed, update the copy in data._Theas
                                 this_data['_Theas']['theasParams'] = self.session.theas_page.get_controls()
+
+                        if 'ErrorMessage' in row:
+                            if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
+                                self.session.theas_page.set_value('theas:th:ErrorMessage', row['ErrorMessage'])
 
                         if 'Cookies' in row:
                             cookies_str = row['Cookies']
@@ -1984,7 +2080,7 @@ class ThHandler(tornado.web.RequestHandler):
                                 self.session.log('Cookies', 'Updating cookies as per stored procedure E')
                                 self.cookies_changed = True
 
-                        # Check to see if stored proc indicates we should go back in history
+                        # Check to see if stored proc indicates we should redirect
                         if 'RedirectTo' in row:
                             redirect_to = row['RedirectTo']
 
@@ -1992,6 +2088,20 @@ class ThHandler(tornado.web.RequestHandler):
                         if 'DoHistoryGoBack' in row:
                             if str(row['DoHistoryGoBack']) == '1':
                                 history_go_back = True
+
+                        if 'Filename' in row:
+                            self.filename = row['Filename']
+
+                        if 'HTTPHeaders' in row:
+                            header_str = row['HTTPHeaders']
+                            # HTTPHeaders returns a string like name1=value1&name2=value2...
+
+                            if header_str:
+                                for this_pair in header_str.split('&'):
+                                    this_name, this_value = this_pair.split('=')
+                                    self.set_header(this_name, this_value)
+
+                                self.session.log('Headers', 'Updating HTTP headers as per stored procedure E')
 
                 have_next_resultset = self.session.sql_conn.nextresult()
                 if not have_next_resultset:
@@ -2003,7 +2113,7 @@ class ThHandler(tornado.web.RequestHandler):
             # One of our stored procedure resultsets indicated that authentication had been performed.
             # Have the session retrieve existing authentication from the database.
             if perform_authenticate_existing:
-                self.session.log('Authenticating due to resource stored proc th:LoggedIn')
+                self.session.log('Auth', 'Authenticating due to resource stored proc th:LoggedIn')
                 self.session.authenticate(retrieve_existing=True)
 
             self.session.comments = None
@@ -2024,8 +2134,10 @@ class ThHandler(tornado.web.RequestHandler):
     def build_login_screen_background(self):
         return self.session.build_login_screen()
 
-    def do_render_jinja(self, this_resource=None):
-        # Gets data and renders template.  Used by get only
+    def do_render_response(self, this_resource=None):
+        # Gets data and renders template.  Used by GET only.
+        # Note that this method will be called whenever the resource indicates that there is an APIStoredProc,
+        # even if a Jinja template is not actually used.
 
         buf = None
         this_data = None
@@ -2034,17 +2146,24 @@ class ThHandler(tornado.web.RequestHandler):
 
         if this_resource is not None:
 
-            if this_resource.render_jinja_template:
-                this_data, redirect_to, history_go_back = \
-                    self.get_data(this_resource)
+            if this_resource.api_stored_proc or this_resource.render_jinja_template:
+                this_data, redirect_to, history_go_back = self.get_data(this_resource)
 
-            buf = self.session.theas_page.render(this_resource.data, data=this_data)
+            if this_resource.render_jinja_template:
+                # resource indicates that we should render a Jinja template
+                buf = self.session.theas_page.render(this_resource.data, data=this_data)
+            elif this_resource.api_stored_proc:
+                # resource does not indicate that we should render a Jinja template (but does specify an
+                # api stored proc) so just return the raw content retrieved by get_data
+                if not self.session.theas_page.get_value(
+                        'theas:th:ErrorMessage') and 'General' in this_data and 'Content' in this_data['General']:
+                    buf = this_data['General']['Content']
 
         return buf, redirect_to, history_go_back
 
     @run_on_executor
-    def do_render_jinja_background(self, this_resource=None):
-        return self.do_render_jinja(this_resource=this_resource)
+    def do_render_response_background(self, this_resource=None):
+        return self.do_render_response(this_resource=this_resource)
 
     # @run_on_executor
     # def get_resource_background(self, resource_code, th_session, for_public_use=False, all_static_blocks=False, none_if_not_found=True, from_file=None):
@@ -2077,7 +2196,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         # self.session.theas_page.controls['ctrlinputHelloWorld'].value = self.get_body_argument('theasParams', 'NONE')
 
-        if self.get_argument('doHistoryGoBack', default='0') == '1':
+        if self.get_argument('DoHistoryGoBack', default='0') == '1':
             history_go_back = True
 
         cmd = self.get_argument('cmd', default=None)
@@ -2088,14 +2207,13 @@ class ThHandler(tornado.web.RequestHandler):
         if '?' in this_page:
             this_page = this_page[:this_page.find('?')]
 
-        if self.session.current_resource and this_page == self.session.current_resource.resource_code:
-            pass
-        else:
+            # if self.session.current_resource and this_page == self.session.current_resource.resource_code:
+            #    pass
+            # else:
             # Browser provided a different value for current_page.  Perhaps the user used the back button?
             # In any case, we want to use the correct stored procedure for this request.  Getting the template
             # will set that from us.
-            template_str, this_resource = self.get_template(this_page)
-
+        template_str, this_resource = self.get_template(this_page)
 
         if self.deferred_xsrf:
             self.session.theas_page.set_value('th:PerformUpdate', '1')
@@ -2120,10 +2238,15 @@ class ThHandler(tornado.web.RequestHandler):
                     if not next_page:
                         next_page = this_page
 
-                    # Force a redirect
-                    redirect_to = next_page
-                    # Perform redirect after processing the post (i.e. Post-Redirect-Get PRG) pattern
-                    # Redir will be to redirect_to if set, else will be to next_page
+            if redirect_to:
+                self.session.log('Nav', 'PerformUpdate stored proc sent redirect to {}'.format(redirect_to))
+            else:
+                self.session.log('Nav', 'After PerformUpdate stored proc th:NextPage={}'.format(next_page))
+                # Force a redirect
+                redirect_to = next_page
+                # Perform redirect after processing the post (i.e. Post-Redirect-Get PRG) pattern
+                # Redir will be to redirect_to if set, else will be to next_page.
+                # This is true even if FORCE_REDIR_AFTER_POST == False, because th:PerformUpdate == 1
 
             if redirect_to:
                 pass
@@ -2136,6 +2259,14 @@ class ThHandler(tornado.web.RequestHandler):
                     next_page = DEFAULT_RESOURCE_CODE
                 if not next_page:
                     next_page = this_page
+
+                if FORCE_REDIR_AFTER_POST:
+                    # We want to force a redirect even if next_page == this_page because this request
+                    # is a POST, and we only want to serve up content on a GET
+                    redirect_to = next_page
+
+            if not redirect_to:
+                self.session.log('Nav', 'Before processing for POST th:NextPage={}'.format(next_page))
 
                 if not self.session.current_resource or next_page != self.session.current_template_str:
                     template_str, this_resource = self.get_template(next_page)
@@ -2169,11 +2300,11 @@ class ThHandler(tornado.web.RequestHandler):
                 else:
                     if this_resource is not None:
                         if this_resource.requires_authentication and not self.session.logged_in:
-                            self.session.log('Resource requires auth and user not logged in')
+                            self.session.log('Auth', 'Resource requires auth and user not logged in')
                             # still not logged in:  present login screen
                             self.session.bookmark_url = this_resource.resource_code
                             buf = self.session.build_login_screen()
-                            self.session.log('Sending login screen')
+                            self.session.log('Auth', 'Sending login screen')
 
                         else:
                             if this_resource.on_before:
@@ -2243,7 +2374,9 @@ class ThHandler(tornado.web.RequestHandler):
                 if orig_cookie_session_token != this_sess.session_token:
                     self.cookie_st = this_sess.session_token
                     self.write_cookies()
-                    ThSession.cls_log('Cookies', 'Updating cookie theas:th:ST wait_for_session() gave different token ({} vs {})'.format(orig_cookie_session_token, this_sess.session_token))
+                    ThSession.cls_log('Cookies',
+                                      'Updating cookie theas:th:ST wait_for_session() gave different token ({} vs {})'.format(
+                                          orig_cookie_session_token, this_sess.session_token))
 
             else:
                 self.cookie_st = None
@@ -2267,7 +2400,7 @@ class ThHandler(tornado.web.RequestHandler):
         self.session = yield self.wait_for_session()
 
         self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
-        self.session.log('Authentictaion' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+        self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
         this_finished = False
         handled = False
@@ -2297,7 +2430,7 @@ class ThHandler(tornado.web.RequestHandler):
 
                 else:
                     # Authentication succeeded, so continue with redirect
-                    #self.session.theas_page.set_value('theas:th:ErrorMessage', '')
+                    # self.session.theas_page.set_value('theas:th:ErrorMessage', '')
 
                     if self.session.bookmark_url:
                         self.session.log('Proceeding with bookmarked page', self.session.bookmark_url)
@@ -2320,13 +2453,15 @@ class ThHandler(tornado.web.RequestHandler):
                     if redirect_to is not None:
                         if self.cookies_changed:
                             # must perform a client-side redirect in order to set cookies
-                            self.session.log('Session', 'Sending client-side redirect to: ({}) after do_post()'.format(redirect_to))
+                            self.session.log('Session', 'Sending client-side redirect to: ({}) after do_post()'.format(
+                                redirect_to))
                             self.write(self.session.clientside_redir(redirect_to))
                             self.session.finished()
                         else:
                             # can send a normal redirect, since no cookies need to be written
                             this_finished = True
-                            self.session.log('Session', 'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
+                            self.session.log('Session',
+                                             'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
                             self.session.finished()
                             self.redirect(redirect_to)
 
@@ -2334,8 +2469,7 @@ class ThHandler(tornado.web.RequestHandler):
                         if history_go_back and self.session is not None:
 
                             if len(self.session.history) > 0:
-                                self.session.history.pop()
-                                this_history_entry = self.session.history[-1]
+                                this_history_entry = self.session.history.pop()
 
                                 self.session.theas_page.set_value('theas:th:NextPage', this_history_entry['PageName'])
 
@@ -2346,10 +2480,15 @@ class ThHandler(tornado.web.RequestHandler):
                         if buf is None:
                             buf = '<html><body>No content to send in ThHandler.post()</body></html>'
                         self.write(buf)
+
+                        # CORS
+                        self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                        self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
                         self.session.log('Response', 'Sending response')
 
         else:
-            self.write('<mtml><body>Error: cannot process request without a valid session</body></html>')
+            self.write('<html><body>Error: cannot process request without a valid session</body></html>')
 
         if not handled and not this_finished:
             if self.session and self.session.locked:
@@ -2380,7 +2519,6 @@ class ThHandler(tornado.web.RequestHandler):
 
         ThSession.cls_log('GET Request', 'Received request for: {}'.format(self.request.path))
 
-        # buf = '<html><body>No content returned when processing HTTP GET request in ThHandler.get'
         handled = False
         buf = None
         redirect_to = None
@@ -2390,20 +2528,44 @@ class ThHandler(tornado.web.RequestHandler):
         resource_code = None
         resource = None
 
-        if not resource_code:
-            if len(args) > 0:
-                resource_code = args[0]
+        request_path = None
+        if len(args) >= 0:
+            request_path = args[0]
 
-        """Desired flow:
-        1) Receive request
-        2) Handle cached public resources
-        3) else get a sesssion
-        4) (may not be logged in)
-        5) Suppose
-        """
+        if request_path is not None and request_path.split('/')[0] == 'r':
+            # Special case:  an "r" as the first segment of the path, such as:
+            # r/resourcecode/aaa/bbb
+            # indicates that the second segment is to be the resource code.
+            # This allows URLs such as /r/img/myimg.jpg to be handled dynamically:  the resource img is
+            # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
+            # img/myimg.jpg
+            resource_code = request_path.split('/')[1]
+        else:
+            resource_code = request_path
+            if resource_code and resource_code.count('.') >= 2:
+                # A versioned filename, i.e. my.23.css for version #23 of my.css
+                # We just want to cut out the version, and return the unversioned
+                # filename as the resource code (i.e. my.css)
+
+                # That is, Theas will always / only serve up the most recent version
+                # of a resource.  There is not support for serving up a particular
+                # historical version.  The version number in the file name is merely
+                # for the browser's benefit, so that we can "cache bust" / have the
+                # browser request the latest version even if it has an old version in
+                # cache.
+
+                # For this reason, we don't really need to inspect the resources.
+                # We need only manipulate the resource_code to strip out the version
+                # number.
+                segments = resource_code.split('.')
+                if len(segments) >= 3 and 'ver' in segments:
+                    ver_pos = segments.index('ver')
+                    if ver_pos > 0:
+                        resource_code = '.'.join(segments[:ver_pos]) + '.' + '.'.join(segments[ver_pos + 2:])
 
         # note: self.session is probably not yet assigned
 
+        # check for a cached resource
         if resource_code or self.session:
             ThSession.cls_log('Resource', 'Fetching resource for GET', resource_code)
             resource = G_cached_resources.get_resource(resource_code, self.session, none_if_not_found=True)
@@ -2417,10 +2579,13 @@ class ThHandler(tornado.web.RequestHandler):
 
         else:
             # Retrieve or create a session.  We want everyone to have a session (even if they are not authenticated)
+            # We need to use the session's SQL connection to retrieve the resource
+
             self.session = yield self.wait_for_session()
 
             if self.session is None:
-                self.write('<mtml><body>Error: cannot process request without a valid session</body></html>')
+                self.session.log('Get' 'No session.  Cannot continue to process request.')
+                self.write('<html><body>Error: cannot process request without a valid session</body></html>')
             else:
                 # we have a session, but are not necessarily logged in
 
@@ -2429,8 +2594,11 @@ class ThHandler(tornado.web.RequestHandler):
                     if self.cookie_usertoken:
                         self.session.authenticate(user_token=self.cookie_usertoken)
 
-                self.session.log(
-                    'Authentictaion' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+                self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+
+                if resource is not None and resource.exists and self.session.logged_in and resource.render_jinja_template:
+                    # We retrieved a cached resource.  Set current_resource.
+                    self.session.current_resource = resource
 
                 if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
                     # resource_code was not provided and user is not logged in:  use default resource
@@ -2438,11 +2606,20 @@ class ThHandler(tornado.web.RequestHandler):
                     # resource for the user.
                     resource_code = DEFAULT_RESOURCE_CODE
 
-                # Call get_resources again, this time with a session
-                resource = G_cached_resources.get_resource(resource_code, self.session, none_if_not_found=True)
+                if resource is None or not resource.exists:
+                    # Call get_resources again, this time with a session
+                    resource = G_cached_resources.get_resource(resource_code, self.session, none_if_not_found=True)
+
+                    if resource is None or not resource.exists:
+                        # If the user is logged in, but resource_code is not specified, we explicitly set get_default_resource
+                        # so that the stored proc can look up the correct resource for us.
+                        # This change was made 9/21/2017 to correct a problem that led to 404 errors resulting in serving
+                        # up the default resource.
+                        resource = G_cached_resources.get_resource(resource_code, self.session, none_if_not_found=True,
+                                                                   get_default_resource=self.session.logged_in)
+
 
                 if resource is not None and resource.exists:
-
                     if resource.on_before:
                         this_function = getattr(TheasCustom, resource.on_before)
                         if this_function:
@@ -2454,21 +2631,22 @@ class ThHandler(tornado.web.RequestHandler):
                             # still not logged in:  present login screen
                             self.session.bookmark_url = resource.resource_code
                             # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
+                            self.session.current_resource = resource
                             buf = self.session.build_login_screen()
 
                             write_log(self.session, 'Response', 'Sending login screen')
 
                     if buf is None and (not resource.requires_authentication or self.session.logged_in):
-                        if resource.render_jinja_template:
-                            buf, redirect_to, history_go_back = self.do_render_jinja(this_resource=resource)
+                        if resource.api_stored_proc or resource.render_jinja_template:
+                            buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
                         else:
                             # note:  resource.data will usually be str but might be bytes
                             buf = resource.data
 
-                if resource is not None and resource.on_after:
-                    this_function = getattr(TheasCustom, resource.on_after)
-                    if this_function:
-                        handled = this_function(self, args, kwargs)
+                    if resource.on_after:
+                        this_function = getattr(TheasCustom, resource.on_after)
+                        if this_function:
+                            handled = this_function(self, args, kwargs)
 
         if not handled:
             if redirect_to is not None:
@@ -2496,12 +2674,24 @@ class ThHandler(tornado.web.RequestHandler):
 
                 self.write(buf)
 
-                if resource is not None and resource.filename:
-                    self.set_header('Content-Type', theas.Theas.mimetype_for_extension(resource.filename))
-                    self.set_header('Content-Disposition', 'filename=' + resource.filename)
+                # CORS
+                self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
                 if resource is not None and resource.is_public:
-                    self.set_header('Cache-Control', ' max-age=3600')  # let browser cache for 1 hour
+                    self.set_header('Cache-Control', ' max-age=86400')  # let browser cache for 1 day
+                else:
+                    self.set_header('Cache-Control', 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0')
+                    self.add_header('Cache-Control', 'Cache-Control: post-check=0, pre-check=0')
+                    self.add_header('Cache-Control', 'Pragma: no-cache')
+
+                if self.filename is not None:
+                    self.set_header('Content-Type', theas.Theas.mimetype_for_extension(self.filename))
+                    self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
+
+                elif resource is not None and resource.filename:
+                    self.set_header('Content-Type', theas.Theas.mimetype_for_extension(resource.filename))
+                    self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
 
                 self.finish()
 
@@ -2525,6 +2715,13 @@ class ThHandler(tornado.web.RequestHandler):
 
                 # def _handle_request_exception(self, e):
 
+    @tornado.gen.coroutine
+    def options(self, resource_code=None, *args, **kwargs):
+        # CORS
+        self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+        self.set_header('Access-Control-Allow-Methods', 'POST, GET, PUT, DELETE')
+        self.set_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+        self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
     def data_received(self, chunk):
         pass
@@ -2550,6 +2747,11 @@ class ThHandler_Attach(ThHandler):
         buf = None
 
         attachment_guid = self.get_argument('guid', default=None)
+
+        if attachment_guid is None:
+            attachment_guid = self.request.path.split('/')[-1]
+            if attachment_guid.lower() == 'attach':
+                attachment_guid = None
 
         if attachment_guid is not None:
             # Get attachment data from database
@@ -2609,7 +2811,7 @@ class ThHandler_Attach(ThHandler):
                 self.session.log('Response', 'Sending SysWebResource')
                 self.write(resource.data)
                 self.set_header('Content-Type', theas.Theas.mimetype_for_extension(resource.filename))
-                self.set_header('Content-Disposition', 'filename=' + resource.filename)
+                self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
 
             else:
                 # if not self.session.logged_in:
@@ -2625,7 +2827,7 @@ class ThHandler_Attach(ThHandler):
                     self.session.log('Response', 'Sending attachment response')
                     self.write(attachment['data'])
                     self.set_header('Content-Type', theas.Theas.mimetype_for_extension(attachment['filename']))
-                    self.set_header('Content-Disposition', 'filename=' + attachment['filename'])
+                    self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
                     self.finish()
                 else:
                     self.send_error(status_code=404)
@@ -2649,7 +2851,7 @@ class TestThreadedHandler(ThHandler):
 
     def process_request(self):
         # This will be executed in 'executor' pool.
-        return '<html><body>Made it to TestThreadedHandler.backgroud_process_requesat!</body></html>'
+        return '<html><body>Made it to TestThreadedHandler.background_process_requesat!</body></html>'
 
     @run_on_executor
     def process_request_background(self):
@@ -2750,9 +2952,39 @@ class ThHandler_Login(ThHandler):
             self.session.log('Response', 'Sending login screen')
 
         self.set_header('Content-Type', theas.Theas.mimetype_for_extension('login.html'))
-        self.set_header('Content-Disposition', 'filename=' + 'login.html')
+        self.set_header('Content-Disposition', 'inline; filename=' + 'login.html')
 
         self.write_cookies()
+
+        self.write(buf)
+        self.finish()
+
+        if self.session is not None:
+            self.session.finished()
+
+    @tornado.gen.coroutine
+    def post(self, *args, **kwargs):
+        global G_sessions
+
+        self.retrieve_cookies()
+
+        if self.session is None:
+            self.session = yield self.wait_for_session()
+
+        success = False
+        error_message = ''
+
+        success, error_message = self.session.authenticate()
+
+        resource = G_cached_resources.get_resource(None, self.session, none_if_not_found=True,
+                                                   get_default_resource=self.session.logged_in)
+
+        self.write_cookies()
+
+        buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
+            '1' if self.session.logged_in else '0',
+            error_message,
+            resource.resource_code if resource else DEFAULT_RESOURCE_CODE)
 
         self.write(buf)
         self.finish()
@@ -2778,6 +3010,8 @@ class ThHandler_Async(ThHandler):
     def post(self, resource_code=None, *args, **kwargs):
         global G_cached_resources
 
+        buf = ''
+
         cmd = None
         if self.get_arguments('cmd'):
             cmd = self.get_argument('cmd')
@@ -2787,6 +3021,9 @@ class ThHandler_Async(ThHandler):
         self.session = yield self.wait_for_session()
 
         if self.session is not None:
+            # update theas parameters based on this post...even if thre is not an async stored proc
+            self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
+
             # do_log=(not cmd == 'heartbeat'))
 
             if cmd == 'heartbeat':
@@ -2801,9 +3038,9 @@ class ThHandler_Async(ThHandler):
                 if self.session is not None and self.session.sql_conn is not None:
                     self.session.theas_page.set_value('th:ErrorMessage', '')
 
-                    self.write('clearError')
+                self.write('clearError')
 
-                    self.session.finished()
+                self.session.finished()
             else:
                 async_proc_name = None
                 theas_params_str = ''
@@ -2819,33 +3056,48 @@ class ThHandler_Async(ThHandler):
                     if self.session.current_resource is not None:
                         async_proc_name = self.session.current_resource.api_async_stored_proc
 
-                    self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
-
-                    buf = ''
-                    row_count = 0
-
-                    form_params = self.request.body_arguments
-
-                    # We want to serialize form data (excluding theas: fields)
-                    form_params_str = ''
-                    for key in form_params:
-                        if not key.startswith('theas:'):
-                            this_val = form_params[key]
-
-                            if isinstance(this_val, list) and len(this_val) > 0:
-                                this_val = this_val[0]
-
-                            if isinstance(this_val, bytes):
-                                this_val = this_val.decode('utf-8')
-                            elif this_val:
-                                this_val = str(this_val)
-
-                            form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
-
-                    # We also want to serialize all Theas controls
-                    theas_params_str = self.session.theas_page.serialize()
-
                     if async_proc_name is not None:
+
+                        # 5/11/2018 moved up, to as soon as we have a session.  We want to update theas parameters
+                        # even if there is no async stored proc.
+                        #self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
+
+                        # 5/11/2018 thought of moving up, to as soon as we have a session, to store uploaded files in
+                        # the SQL temp table even if there is no async stored proc.  Why?  Theoretically the
+                        # browser wants to send us files now, and process them later during some other call to us.
+                        # But on the other hand, what about denial of service attack?  Run-away file uploads, with
+                        # no stored proc to clear them out??  Moving up might be a bad idea.  Leave it here for now.
+                        # This means that file uploads to an async URL will be ignored unless the resource has an
+                        # asyinc stored proc.
+                        self.process_uploaded_files()
+
+                        row_count = 0
+
+                        form_params = self.request.body_arguments
+
+                        # We want to serialize form data (excluding theas: fields)
+                        form_params_str = ''
+                        for key in form_params:
+                            if not key.startswith('theas:'):
+                                this_val = form_params[key]
+
+                                if isinstance(this_val, list) and len(this_val) > 0:
+                                    this_val = this_val[0]
+
+                                if isinstance(this_val, bytes):
+                                    this_val = this_val.decode('utf-8')
+                                elif this_val:
+                                    this_val = str(this_val)
+
+                                form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
+
+                        # We also want to serialize all Theas controls
+                        theas_params_str = self.session.theas_page.serialize()
+
+                        self.session.log('Async', 'Async stored proc is: {}'.format(async_proc_name))
+                        self.session.log('Async',
+                                         'Resource code is: {}'.format(self.session.current_resource.resource_code))
+
                         proc = ThStoredProc(async_proc_name, self.session)
 
                         if not proc.is_ok:
@@ -2864,6 +3116,9 @@ class ThHandler_Async(ThHandler):
 
                                 # if '@StepDefID' in proc.parameter_list and self.session.theas_page.get_value('stepDefID') is not None:
                                 #    proc.bind(self.session.theas_page.get_value('stepDefID'), _mssql.SQLCHAR, '@StepDefID')
+
+                                if '@Command' in proc.parameter_list:
+                                    proc.bind(cmd, _mssql.SQLCHAR, '@Command')
 
                                 if '@Document' in proc.parameter_list:
                                     proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
@@ -2917,7 +3172,7 @@ class ThHandler_Async(ThHandler):
 
                                 if theas_params_str:
                                     changed_controls = self.session.theas_page.process_client_request(
-                                        buf=theas_params_str, accept_any=True)
+                                        buf=theas_params_str, accept_any=True, from_stored_proc=True)
 
                                     # let stored proc create any desired Theas controls, so these values can be used
                                     # when rendering the template.
@@ -2926,6 +3181,10 @@ class ThHandler_Async(ThHandler):
                                 err_msg = 'Error in stored procedure ' + e.procname.decode('ascii') + \
                                           '(error ' + str(e.number) + ' at line ' + str(e.line) + '): ' + \
                                           e.text.decode('ascii')
+
+                                self.session.log('Async',
+                                                 'ERROR when executing stored proc {}: {}'.format(
+                                                     async_proc_name, err_msg))
 
                                 buf = 'theas:th:ErrorMessage=' + urlparse.quote(err_msg)
 
@@ -2939,6 +3198,10 @@ class ThHandler_Async(ThHandler):
 
                         # send ALL Theas controls
                         self.write(self.session.theas_page.serialize())
+
+                # CORS
+                self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
                 self.session.finished()
                 self.session = None
@@ -3099,6 +3362,10 @@ def run():
     global DEFAULT_RESOURCE_CODE
     global PERFORM_SQL_IS_OK_CHECK
     global FULL_SQL_IS_OK_CHECK
+    global FORCE_REDIR_AFTER_POST
+
+    global USE_WORKER_THREADS
+    global MAX_WORKERS
 
     msg = 'Theas app getting ready...'
     if LOGGING_LEVEL:
@@ -3205,6 +3472,21 @@ def run():
                              help="Resource code of the login screen template.",
                              type=bool)
 
+    G_program_options.define("force_redir_after_post",
+                             default=FORCE_REDIR_AFTER_POST,
+                             help="After a POST, perform a redirect even if no update was requested.",
+                             type=bool)
+
+    G_program_options.define("use_worker_threads",
+                             default=USE_WORKER_THREADS,
+                             help="Indicates if individual requests should be processed in their own thread.",
+                             type=bool)
+
+    G_program_options.define("max_worker_threads",
+                             default=MAX_WORKERS,
+                             help="If use_worker_threads is true, indicates the maximum number of worker threads allowed.",
+                             type=int)
+
     G_program_options.parse_command_line()
 
     msg = 'Theas app: trying to use configuration from {}'.format(G_program_options.settings_path + 'settings.cfg')
@@ -3267,6 +3549,7 @@ def run():
 
     application = tornado.web.Application([
         (r'/attach', ThHandler_Attach),
+        (r'/attach/(.*)', ThHandler_Attach),
         (r'/logout', ThHandler_Logout),
         (r'/login', ThHandler_Login),
         (r'/back', ThHandler_Back),
@@ -3275,6 +3558,9 @@ def run():
         (r'/async', ThHandler_Async),
         (r'/async/(.*)', ThHandler_Async),
         (r'/(.*)', ThHandler)
+        # note that /r/* has special meaning, though it is handled by ThHandler.  When /r/resourcecode/param1/param2
+        # is specified, this indicates that the resource code is "resourcecode".  "param1/param2" will be passed
+        # in to @PathParams in the stored procedure.
     ],
         debug=False,
         autoreload=False,

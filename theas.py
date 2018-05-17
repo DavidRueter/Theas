@@ -3,11 +3,11 @@
 # -*- coding: utf-8 -*-
 version = '0.78'
 
-'''Theas complements the Jinja2 templeting enjine by provining persistent server-side state manamengemt,
-datta binding, and event handling.
+'''Theas complements the Jinja2 template engine by providing persistent server-side state management,
+data binding, and event handling.
 
-The name "Jinja" was selected because it is the name for a Japneese temple.  "Theas" is the Greek word for
-godess...as in "the godess of the temple".  Theas controls the way a template can be rendered from, and bound
+The name "Jinja" was selected because it is the name for a Japanese temple.  "Theas" is the Greek word for
+goddess...as in "the goddess of the temple".  Theas controls the way a template can be rendered from, and bound
 to, server-side "components'.
 
 Often times a Jinja2 template may be used to render an HTML form.  Theas provides multiple means of
@@ -19,7 +19,7 @@ be updated in server-side code, and the updated controls will automatically be r
 template is rendered.
 
 The main class provided is Theas.  This is provided to represent a "page" that is sent to a browser.  It
-manages a list of TheasControls, provides a number of custom Jinja filters, a wraper around Jinja to provide a
+manages a list of TheasControls, provides a number of custom Jinja filters, a wrapper around Jinja to provide a
 .render method (optional, for convenience), a method to parse HTTP post arguments and update the TheasControls,
 and several helper methods.
 
@@ -47,17 +47,17 @@ Similarly, Theas supports a number of different ways of implementing server-side
 2) Dynamically, within the Jinja2 template.
 3) Dynamically, within some other data repository.
 
-NOTE:  dynamic defintion of event handers can be very handy, but does pose a potential security risk if the
+NOTE:  dynamic definition of event handlers can be very handy, but does pose a potential security risk if the
 event handler source comes from "untrusted" outside sources.  By default, a constant ALLOW_UNSAFE_FUNCTIONS = False
 is defined to disable this capability.
 
-If dynamic source (surch as from Jinja templates) is properly managed and comes from only trusted sources,
+If dynamic source (such as from Jinja templates) is properly managed and comes from only trusted sources,
 ALLOW_UNSAFE_FUNCTIONS may be safely enabled.
 
 If enabled, you can do things like:
 
 a) Define custom Jinja filters via Python source embedded within a Jinja filter itself.  Note that really the
-filter definition source is placed within a SEPARATE template file that is renderd first.  Then filters defined
+filter definition source is placed within a SEPARATE template file that is rendered first.  Then filters defined
 in that template file can be used directly from a template file that is used for the actual rendering of the
 HTML output.
 
@@ -92,6 +92,21 @@ Within your template, you can also access access the values of Theas controls li
 
     ...but this would return the value of the session.theas_page.control, which a) would not exist unless the control
     had been previously created by a filter or by Python code prior to the start of template rendering.
+
+
+Originally Theas was created to support server-side rendering.  The above examples show how theas control values
+can be embedded in an HTML form and/or outputted in HTML.
+
+Vue.js is an exciting client-side javascript framework.  When using Vue.js the need for server-side rendering is
+diminished.  For example, when outputting a list in HTML based on contents of a dataset, instead of rendering
+the data into HTML at the server, it is preferable to send the data down to the browser as JSON and let Vue.js
+render the list at the client.
+
+Similarly for form fields, with Vue.js it is preferable to bind HTML form fields to Javascript variables (that
+Vue will automatically manage), and then have Vue submit JSON via an Async call instead of performing an
+HTTP POST of the actual Theas form.
+
+Theas is set to support both server-side rendering, and client-side rendering.  Which you use is up to you.
 '''
 import types
 import string
@@ -100,6 +115,8 @@ import ast
 import uuid
 import urllib.parse as urlparse
 import html
+import json
+import base64
 
 from time import struct_time, strptime, strftime
 import datetime
@@ -161,6 +178,8 @@ class TheasControlNV:
             # The current value, i.e. what jquery .val() would return for this name
         self.control_type = control_type
             # Type of control:  'hidden', 'text', 'password', 'radio', 'checkbox', 'select', 'textarea', etc.
+        self.include_in_json = False
+            # if set, this control will be included in the filter TheasValues
 
     def __del__(self):
         #for ctrl_value in self.controls:
@@ -191,7 +210,8 @@ class TheasControlNV:
 class Theas:
     def __init__(self, theas_session=None, jinja_environment=None):
 
-        if not isinstance(jinja_environment, Environment):
+        #if not isinstance(jinja_environment, Environment):
+        if True:
             #set up new jinja environment
             self.jinja_env = Environment()
 
@@ -201,7 +221,19 @@ class Theas:
 
 
             self.jinja_env.filters['theasSessionToken'] = self.theas_sessiontoken
+            # Ouputs the current session token as a hidden form field.  This is required for normal
+            # operation of Theas.  Also outputs other commonly-used Theas hidden form fields:
+            # th:ErrorMessage and th:PerformUpdate
+
             self.jinja_env.filters['theasXSRF'] = self.theas_xsrf
+            # Outputs the current XSRF token (used for security purposes).  This is required for
+            # normal operation of Theas.  (Form posts to Theas that do not have a valid XSRF
+            # token will be rejected.)
+
+            # The following output an HTML form field for the specified control.
+            # This is useful when producing HTML pages using server-side rendering (SSR).
+            # Note that when using Vue.js these may not be needed, as theas data is communicated
+            # via JSON instead. (See theasValuesjSON)
             self.jinja_env.filters['theasHidden'] = self.theas_hidden
             self.jinja_env.filters['theasInput'] = self.theas_input
             self.jinja_env.filters['theasRadio'] = self.theas_radio
@@ -209,8 +241,38 @@ class Theas:
             self.jinja_env.filters['theasTextarea'] = self.theas_textarea
             self.jinja_env.filters['theasCheckbox'] = self.theas_checkbox
 
+            self.jinja_env.filters['theasValuesJSON'] = self.theas_values_json
+            # Output a JSON string that includes all Theas controls that have the flag include_in_json set.
+            # The : character that is used as a delimiter in control names will be replaced with a $
+            # so that the resulting JSON contains legal javascript variable names.
+
+            self.jinja_env.filters['theasBase64'] = self.theas_base64
+
+            self.jinja_env.filters['theasInclude'] = self.theas_include
+            # Set the internal include_in_json flag for the specified control so that it will be
+            # included in the output of the filter |theasValueJSON
+
+            # By default this filter will not output anything (but instead merely affects the output of
+            # }theasValueJSON
+
+            # Optionally, you can pass in (output=True) to have this filter output the javascript-friendly
+            # version of the control name as a string as well, in which embedded : characters are translated
+            # to $ characters, such as:
+            # {{ "theas:Ping:AudioRecording"|theasInclude(output=True) }} would result in
+            # the string theas$Ping$AudioRecording being outputted.
+
+            self.jinja_env.filters['theasResource'] = self.theas_resource
+            # Lets you specify {{ SomeResource|theasResource }} instead of "SomeResource", and
+            # thereby modifies the actual resource URL that is rendered to bust the browser
+            # cache if needed.
+
             self.jinja_env.filters['theasEcho'] = self.theas_echo
+            # Conditionally echos the specified string.  For example:
+            # {{'active' | theasEcho(if_curpage='mypage')}} would output the string 'active' if
+            # the value of the Theas control named curpage was equal to 'mypage'
+
             self.jinja_env.filters['friendlydate'] = self.format_friendlydate
+            # General date formatting routine.
 
             # self.jinja_env.filters['button'] = self.theas_button
 
@@ -273,8 +335,14 @@ class Theas:
             global MIME_TYPE_EXTENSIONS
             if extension:
                 extension = '.' + extension.lower()
+
                 if extension in MIME_TYPE_EXTENSIONS:
                     result = MIME_TYPE_EXTENSIONS[extension]
+
+                    # We don't really know what the character encoding is, so in general we
+                    # don't specify.  But for certain types, we want to set the encoding type here.
+                    if result in ('application/javascript', 'text/html'):
+                        result += '; charset=utf-8'
 
         return result
 
@@ -517,7 +585,7 @@ class Theas:
 
                             this_ctrl_nv.controls[this_opt] = temp_ctrl
 
-                if have_datavalue_param:
+                if have_datavalue_param and datavalue_param != '__th':
                     if this_ctrl_nv.datavalue != datavalue_param:
                         value_changed = True
                     # We want to go ahead and assign this value even if we don't think it has changed, because the
@@ -544,11 +612,16 @@ class Theas:
         return this_ctrl_nv, this_ctrl, value_changed
 
 
-    def get_controls(self):
+    def get_controls(self, include_in_json_only=False):
         #return dictionary of control name-value pairs
         this_result = {}
         for this_ctrl_name, this_nv in self.control_names.items():
-            this_result[this_ctrl_name] = this_nv.value
+            if include_in_json_only:
+                if this_nv.include_in_json:
+                    this_ctrl_name = this_ctrl_name.replace(':', '$')
+                    this_result[this_ctrl_name] = this_nv.value
+            else:
+                this_result[this_ctrl_name] = this_nv.value
 
         return this_result
 
@@ -679,28 +752,60 @@ class Theas:
 
 
     @environmentfilter
-    def theas_sessiontoken(self, this_env, this_value, *args, **kwargs):
-        # This filter is called like:
-        #         {{ "_th"|theasST }}
-        # No arguments are required.  The "_th" can be any value (i.e. the value is ignored)
+    def theas_values_json(self, this_env, this_value, *args, **kwargs):
+        this_th = self.get_controls(include_in_json_only=True)
+        return json.dumps(this_th)
 
-        buf = '<input name="{}" type="hidden" value="{}"/>'.format(
-            'theas:th:ST',
-            this_env.theas_page.th_session.session_token
-        )
+    @environmentfilter
+    def theas_base64(self, this_env, this_value, *args, **kwargs):
+        buf = base64.b64encode(this_value.encode(encoding='utf-8', errors='strict')).decode(encoding='ascii', errors='strict')
+        return "'{}'".format(buf)
 
-        # sneak in hidden field to pass ErrorMessage
-        buf += '<input name="{}" type="hidden" value="{}"/>'.format(
-            'theas:th:ErrorMessage',
-            self.get_value('theas:th:ErrorMessage')
-        )
+    @environmentfilter
+    def theas_resource(self, this_env, this_value, *args, **kwargs):
+        busted_filename = this_value
 
-        # sneak in hidden field to pass PerformUpdate
-        buf += '<input name="{}" type="hidden" value="{}"/>'.format(
-            'theas:th:PerformUpdate',
-            '0'
-        )
+        # The idea is that this_value contains a resource code that may have been cached by the browser.
+        # If the resource has subsequently been updated on the server, we want the browser to request the
+        # resource...even though the old version is in cache.
+
+        # So we append a version number to the filename, such as my.css becomes my.23.css (if version #23
+        # were the current version of my.css)
+
+        # A versioned filename will have at least two . characters in it: the ultimate preceding the file
+        # extension, and the penultimate preceding the version number.
+
+        # A versioned filename will be returned ONLY if the resource has been updated / has a non-null
+        # Revision field value.  This version number will be stripped out by TheasServer when a
+        # versioned request is made.  See:  TheasServer.py ThHandler.get(), about line 2509
+
+        # We do need to retrieve the current version number of the resource.
+
+        if this_value in this_env.theas_page.th_session.resource_versions:
+            this_version = str(this_env.theas_page.th_session.resource_versions[this_value]['Revision'])
+
+            segments = this_value.split('.')
+            busted_filename = '.'.join(segments[:-1]) + '.ver.' + this_version + '.' + '.'.join(segments[-1:])
+
+        return json.dumps(busted_filename)
+
+    @environmentfilter
+    def theas_include(self, this_env, this_value, output=False, delims=('[[', ']]'), *args, **kwargs):
+        this_control_nv = self.get_control(this_value)[0]
+        this_control_nv.include_in_json = True
+
+        buf = ''
+
+        if output:
+            buf = '{}{}{}'.format(
+                delims[0],
+                this_control_nv.name.replace(':', '$'),
+                delims[1]
+            )
+
         return buf
+
+
 
     @environmentfilter
     def theas_xsrf(self, this_env, this_value, *args, **kwargs):
@@ -717,7 +822,40 @@ class Theas:
 
 
     @environmentfilter
-    def theas_hidden(self, this_env, this_value, escaping='urlencode', *args, **kwargs):
+    def theas_sessiontoken(self, this_env, this_value, vuejs=False, *args, **kwargs):
+        # This filter is called like:
+        #         {{ "_th"|theasST }}
+        # No arguments are required.  The "_th" can be any value (i.e. the value is ignored)
+
+        buf = '<input name="{}" type="hidden" value="{}"/>'.format(
+            'theas:th:ST',
+            this_env.theas_page.th_session.session_token
+        )
+
+
+        # sneak in hidden field to pass ErrorMessage
+        buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
+            'theas:th:ErrorMessage',
+            ':' if vuejs else '',
+            'theas.th$ErrorMessage' if vuejs else self.get_value('theas:th:ErrorMessage')
+        )
+
+        self.get_control('th:ErrorMessage')[0].include_in_json = True
+
+        # sneak in hidden field to pass PerformUpdate
+        buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
+            'theas:th:PerformUpdate',
+            ':' if vuejs else '',
+            'theas.th$PerformUpdate' if vuejs else '0'
+        )
+
+        self.get_control('th:PerformUpdate')[0].include_in_json = True
+
+        return buf
+
+
+    @environmentfilter
+    def theas_hidden(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
         #This filter is called like:
         #         {{ data._Theas.osST|hidden(name="theas:HelloWorld") }}
         #The arguments  behave as documented at: http://jinja.pocoo.org/docs/dev/api/#custom-filters
@@ -736,11 +874,6 @@ class Theas:
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        if str(this_value) == '__th':
-            #use server value for this control
-            this_value = self.get_value(ctrl_name)
-
-
         #id is not used for hidden
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='hidden', **kwargs)
 
@@ -753,15 +886,19 @@ class Theas:
             else:
                 value_str = str(this_ctrl_nv.value)
 
-        buf = '<input name="{}" type="hidden" value="{}"/>'.format(
+        buf = '<input name="{}" type="hidden" {}value="{}"/>'.format(
             'theas:' + this_ctrl_nv.name,
-            value_str
+            ':' if vuejs else '',
+            'theas.' + this_ctrl_nv.name.replace(':', '$') if vuejs else value_str
         )
+
+        this_ctrl_nv.include_in_json = True
+
         return buf
 
 
     @environmentfilter
-    def theas_input(self, this_env, this_value, escaping="urlencode", *args, **kwargs):
+    def theas_input(self, this_env, this_value, escaping="urlencode", vuejs=False, *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.Company | theasInput(id="company", name="ejCompany", placeholder="", class ="form control input-md", required="")}}
 
@@ -807,9 +944,14 @@ class Theas:
                 value_str = str(this_ctrl_nv.value)
 
         if this_ctrl_nv.value:
-            buf += ' value="{}">'.format(value_str)
+            buf += ' {}value="{}">'.format(
+                ':' if vuejs else '',
+                'theas.' + this_ctrl_nv.name.replace(':', '$') if vuejs else value_str
+            )
         else:
             buf += '>'
+
+        this_ctrl_nv.include_in_json = True
 
         return buf
 
@@ -837,8 +979,6 @@ class Theas:
         for k, v in this_ctrl.attribs.items():
             this_attribs_str += ' {}="{}"'.format(k, v)
 
-
-
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
             'theas:' + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
@@ -847,6 +987,9 @@ class Theas:
             this_ctrl.value,
             ' checked="checked"' if this_ctrl.checked else ''
         )
+
+        this_ctrl_nv.include_in_json = True
+
         return buf
 
 
@@ -920,11 +1063,13 @@ class Theas:
             )
         buf = buf + '\n</select>'
 
+        this_ctrl_nv.include_in_json = True
+
         return buf
 
 
     @environmentfilter
-    def theas_textarea(self, this_env, this_value, escaping='urlencode', *args, **kwargs):
+    def theas_textarea(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.BasicQualifications | theasTextarea(id="basicQualifications", name="ejBasicQualifications", class ="form-control")}}
 
@@ -954,12 +1099,16 @@ class Theas:
             else:
                 value_str = str(this_ctrl_nv.value)
 
-        buf = '<textarea name="{}"{}{}>{}</textarea>'.format(
+        buf = '<textarea name="{}"{}{}{}>{}</textarea>'.format(
             'theas:' + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
+            'v-model={}'.format('theas.' + this_ctrl_nv.name.replace(':', '$')) if vuejs else '',
             this_attribs_str,
             value_str
         )
+
+        this_ctrl_nv.include_in_json = True
+
         return buf
 
 
@@ -993,6 +1142,9 @@ class Theas:
             this_ctrl.value,
             ' checked="checked"' if this_ctrl.checked else ''
         )
+
+        this_ctrl_nv.include_in_json = True
+
         return buf
 
 
@@ -1309,7 +1461,7 @@ MIME_TYPE_EXTENSIONS = {
     '.mid': 'audio/midi',
     '.mny': 'application/x-msmoney',
     '.mov': 'video/quicktime',
-    '.mp3': 'audio/mpeg',
+    '.mp3': 'audio/x-mpeg-3', #'audio/mpeg',
     '.mp4': 'video/mp4',
     '.mp4a': 'audio/mp4',
     '.mpeg': 'video/mpeg',
