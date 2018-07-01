@@ -1,9 +1,10 @@
-====
+############
 Introduction to Theas
-====
-*******
+############
+
+************
 What is Theas?
-*******
+************
 
 Theas is a turn-key web application server and development platform for building database-driven web applications.
 
@@ -12,14 +13,15 @@ You can think of Theas being kind of like Wordpress, but for building web applic
 Theas is a server-side web application framework that provides:
 
     #. turnkey performance and security-aware embedded web server
-    #.extensions to Jinja2 templating via custom filters
-    #.session management
-    #.session data management and multi-tier data binding
-    #.database-only content and templates (no filesystem used)
-    #.mechanism for using template-specific stored procedure to retrieve and update data
-    #.support for both normal POST / GET requests and async / AJAX request ... and more.
-    
-Theas does not impose any restrictions on client-side development: you are free to use whatever tools and frameworks you like.
+    #. extensions to Jinja2 templating via custom filters
+    #. session management
+    #. session data management and multi-tier data binding
+    #. database-only content and templates (no filesystem used)
+    #. mechanism for using template-specific stored procedure to retrieve and update data
+    #. support for both normal POST / GET requests and async / AJAX request ... and more.
+   
+.. note::   
+    Theas does not impose any restrictions on client-side development: you are free to use whatever tools and frameworks you like.
 
 Theas is built in Python 3.4, using Tornado for the web server, Jinja2 for templating, and pymssql for MS SQL connectivity. Theas was built to work with Microsoft SQL, and in particular, the SQL-based OpsStream business execution platform, but can be used with other database platforms as well.
 
@@ -61,9 +63,10 @@ Theas expects that SSL / HTTPS will be provided by the reverse proxy. Theas does
 
 Theas includes a simple MS SQL database. This can be run on any version of MS SQL (SQL 2005 or later), and can be run on any edition including the free MS SQL Server Express, and including hosted SQL from Microsoft Azure or other provider.
 
-I encourage you to consider running the commercially-available OpsStream business execution platform in lieu of the simple database provided with Theas. OpsStream provides a turnkey environment for robust, complex, secure, enterprise-class applications.
+.. note::
+    I encourage you to consider running the commercially-available OpsStream business execution platform in lieu of the simple database provided with Theas. OpsStream provides a turnkey environment for robust, complex, secure, enterprise-class applications.
 
-But Theas can be used as a free, OSS (open-source software) platform without any dependencies on OpsStream when the included Theas database is run on the free edition of Microsoft SQL Server Express.
+    But Theas can be used as a free, OSS (open-source software) platform without any dependencies on OpsStream when the included Theas database is run on the free edition of Microsoft SQL Server Express.
 
 *******
 About the name
