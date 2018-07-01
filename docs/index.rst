@@ -73,7 +73,9 @@ Why is this project named “Theas”? Theas is the Greek work for "goddess".
 
 According to the Jinja2 documentation at http://jinja.pocoo.org/docs/dev/faq/#why-is-it-called-jinja:
 
+"""
 The name Jinja was chosen because it’s the name of a Japanese temple and temple and template share a similar pronunciation.
+"""
 
 Theas was designed to work with and empower Jinja to do more.
 
@@ -85,8 +87,62 @@ Architecture
 *******
 Database Overview
 =======
+
+Theas is designed to work with Microsoft SQL (version 2008R2 or later). More specifically, Theas was designed with the MSSQL-based OpsStream (http://opsstream.com) business process execution system in mind--but Theas can be run with or without OpsStream.
+
+Theoretically, Theas can work with any database environment of your choosing with only minor modification.
+
+Theas directly calls 7 required stored procedures:
+
+    #. theas.spInitSession
+    Purpose: Get SQL statements needed to run on a new SQL connection (i.e. for a new session) to initialize things.
+    -> sws.spInitSession
+    
+    #. theas.spAuthenticateUser
+    Purpose: Verify credentials (username/password) for a user login, and if successful establish a new application session.
+    -> opsstream.spactAuthenticateUser
+    
+    #. theas.spGetWebResources    
+    Purpose: Get web resources, such as HTML templates, static HTML blocks, javascript and CSS files, logos, etc.
+    -> opsusr.spapiGetSysWebResources
+    
+    #. theas.spGetAttachments
+    Purpose: Get a specific blob attachments to a data record.
+    -> opsstream.spgetQuestAttachments
+    
+    #. theas.spInsFiles
+    Purpose: When processing uploaded files, insert the files received from the client browser into a temporary SQL table. After that, a normal stored procedure (such as an APIStoredProc referenced in the web resource record) can take responsibility for processing these and permanently storing them as required.
+    -> sws.spinsFiles2
+    
+    #. theas.spUpdSessionData
+    Purpose: Non-essential, but provides a way to save transitory data to a user session. (Generally the TheasServer keeps session data in memory as long as the session is active. Writing session data to the database is needed only if you need session data to survive a TheasServer restart.)
+    -> opsstream.spudSessionData
+    
+    #. theas.spGetSessionData
+    Purpose: Non-essental, but provides a way to retrieve transitory session data stored in the database by theas.spUpdSessionData.
+    -> opsstream.spgetSessionData
+    
+All other stored procedures are web resource-specific. These are created to return data needed by a particular page, process HTTP posted data from a particular page (API StoredProc) or in the case of API AsyncStoredProc to process async (i.e. AJAX) requests from the browser.
+
+
 Jinja Environment
 =======
+
+The Jinja templating engine uses an "environment" that is often instantiated as a global environment used for rendering all templates in an application.
+
+Theas instantiates a separate Jinja environment for each session. The reasons for this are:
+
+Theas implements certain Jinja custom filters that need to have access to the Theas session. This means that the Jinja templating engine needs to pass the Theas session to the custom filter somehow.
+
+This could be done through two different means: Have each filter look in the template context's data for a session token, and then look up the session in the global list of Theas sessions, or to directly store the Theas session in the Jinja environment.
+
+The former approach is ugly, as it requires several lines of code to retrieve the session in each filter, requires that an environment global be set pointing to the global list of sessions (i.e. environment.globals['TheasSessionList']=xxx), puts more load on the global session list and provides more opportunity for locking problems, and has to trust data in the template rather than python code for the execution of filters.
+
+The later approach (of storing the session in the environment) eliminates all these problems. Furthermore, the cost of instantiating a new environment for each session is relatively small, and also provides the additional benefit of allowing custom functions to be added while the server is running.
+
+So in Theas, the Jinja environment is handled kind of like the SQL connection: there is one environment per session, and it is used for the duration of the session.
+
+
 UX Flow
 =======
 Page Lifecycle
