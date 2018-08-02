@@ -138,10 +138,13 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
-settings.cfg
 .idea/
-html/
-misc/
-venv_py34_theas/
-venv_py35_theas/
-dependency_patches/
+venv_py*/
+/HTMLFiles/
+/misc/
+/node_modules/
+
+settings.cfg
+TheasServer.exe
+
+
