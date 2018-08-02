@@ -84,7 +84,7 @@ You can add form fields containing Theas control values to your page by includin
         {{ data.EmployerJob.WorkplaceLocation|theasHidden(name="EmployerJob:WorkplaceLocation") }}
 
 Within your template, you can also access access the values of Theas controls like this:
-    {{ data._Theas.theasParams["Theas:nextPage"] }}
+    {{ data._Theas.theasParams["theas:nextPage"] }}
 
     You could also use theasParams to access data values, such as:
 
@@ -180,6 +180,8 @@ class TheasControlNV:
             # Type of control:  'hidden', 'text', 'password', 'radio', 'checkbox', 'select', 'textarea', etc.
         self.include_in_json = False
             # if set, this control will be included in the filter TheasValues
+        self.name_prefix = 'theas:'
+            # may contain 'Theas:' for controls saved in Theas Params, or may be empty for ad-hoc controls
 
     def __del__(self):
         #for ctrl_value in self.controls:
@@ -426,7 +428,8 @@ class Theas:
 
 
     def get_control(self, ctrl_name, control_type=None, id=None, auto_create=True, **kwargs):
-        # NOTE:  pass in datavalue='xxx' to set the value of the control
+        # NOTE:  pass in datavalue='xxx' to set the value of the control.
+        # Does NOT need to be URL-encoded:  we do that here.
 
         # If control is a radio, checkbox or select, you can pass in value='yyy' which does
         # not set the value of the control but merely defines the value that will be used if the
@@ -453,6 +456,12 @@ class Theas:
         this_ctrl_nv = None
         value_changed = False
 
+        save_param = True
+        if 'persist' in kwargs:
+            if kwargs['persist'] in ('0', 'false', 'False', 'no'):
+                save_param = False
+        # Note: in the future we may implement other values for persit (session, user, page, pageview, etc.)
+
         if ctrl_name:
             # The HTML <input> names begin with theas:, but in Python and elsewhere
             # we omit this prefix.
@@ -464,11 +473,15 @@ class Theas:
                 this_ctrl_nv = self.control_names[ctrl_name]
 
             if this_ctrl_nv is None:
+                if not control_type:
+                    control_type = 'hidden'
+
                 if auto_create:
-                    if not control_type:
-                        control_type = 'hidden'
                     this_ctrl_nv = TheasControlNV(name=ctrl_name, control_type=control_type)
-                    self.control_names[ctrl_name] = this_ctrl_nv
+                    if save_param:
+                        self.control_names[ctrl_name] = this_ctrl_nv
+                    else:
+                        this_ctrl_nv.name_prefix = ''
             else:
                 # existing control, but may have been auto-created as a hidden...but now we have a more specific
                 # type
@@ -493,6 +506,8 @@ class Theas:
             if 'datavalue' in kwargs:
                 have_datavalue_param = True
                 datavalue_param = kwargs['datavalue']
+                if isinstance(datavalue_param, (str, bytes, bytearray)):
+                    urlparse.quote(datavalue_param)
 
                 if ctrl_name == 'th:ErrorMessage':
                     self.th_session.log('Theas', 'th:ErrorMessage value set={}'.format(datavalue_param))
@@ -537,7 +552,8 @@ class Theas:
                     if this_key == 'options_dict':
                         this_options_dict = kwargs[this_key]
 
-                    elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label', 'escaping'):
+                    elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label',
+                                      'escaping', 'persist'):
                         #this kwarg does not apply or has already been handled
                         pass
 
@@ -763,6 +779,9 @@ class Theas:
 
     @environmentfilter
     def theas_resource(self, this_env, this_value, *args, **kwargs):
+
+        this_value = this_value.lstrip('/')
+
         busted_filename = this_value
 
         # The idea is that this_value contains a resource code that may have been cached by the browser.
@@ -887,9 +906,9 @@ class Theas:
                 value_str = str(this_ctrl_nv.value)
 
         buf = '<input name="{}" type="hidden" {}value="{}"/>'.format(
-            'theas:' + this_ctrl_nv.name,
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             ':' if vuejs else '',
-            'theas.' + this_ctrl_nv.name.replace(':', '$') if vuejs else value_str
+            (this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$') if vuejs else value_str
         )
 
         this_ctrl_nv.include_in_json = True
@@ -926,7 +945,7 @@ class Theas:
             this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{}'.format(
-                'theas:' + this_ctrl_nv.name,
+                this_ctrl_nv.name_prefix + this_ctrl_nv.name,
                 format_str_if(this_ctrl.id, ' id="{}"'),
                 this_ctrl_nv.control_type,
                 this_attribs_str
@@ -946,7 +965,7 @@ class Theas:
         if this_ctrl_nv.value:
             buf += ' {}value="{}">'.format(
                 ':' if vuejs else '',
-                'theas.' + this_ctrl_nv.name.replace(':', '$') if vuejs else value_str
+                (this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$') if vuejs else value_str
             )
         else:
             buf += '>'
@@ -980,7 +999,7 @@ class Theas:
             this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
-            'theas:' + this_ctrl_nv.name,
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_ctrl_nv.control_type,
             this_attribs_str,
@@ -1049,7 +1068,7 @@ class Theas:
             this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<select name="{}"{}{} >'.format(
-            'theas:' + this_ctrl_nv.name,
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_attribs_str
             )
@@ -1100,9 +1119,9 @@ class Theas:
                 value_str = str(this_ctrl_nv.value)
 
         buf = '<textarea name="{}"{}{}{}>{}</textarea>'.format(
-            'theas:' + this_ctrl_nv.name,
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
-            'v-model={}'.format('theas.' + this_ctrl_nv.name.replace(':', '$')) if vuejs else '',
+            'v-model={}'.format((this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$')) if vuejs else '',
             this_attribs_str,
             value_str
         )
@@ -1135,7 +1154,7 @@ class Theas:
             this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
-            'theas:' + this_ctrl_nv.name,
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_ctrl_nv.control_type,
             this_attribs_str,
