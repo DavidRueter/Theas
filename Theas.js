@@ -65,12 +65,12 @@ TH = {
                     ctrlName = 'theas:' + ctrlName;
                 }
 
-                thisCtrl = $('*[name="' + ctrlName + '"]');
+                var thisForm = $('#' + this.formID);
+                thisCtrl = thisForm.find('*[name="' + ctrlName + '"]');
 
                 if (thisCtrl.length == 0) {
                     thisCtrl = null;
                 }
-
 
                if (typeof newValue !== 'undefined') {
                     if (!thisCtrl) {
@@ -87,23 +87,48 @@ TH = {
                     if (thisCtrl) {
                         thisCtrl.val(newValue);
                     }
-                }
+               }
             }
 
             return thisCtrl;
         },
 
+        getval: function(ctrlName) {
+           var that = this;
+           var thisCtrl = that.get(ctrlName);
+           var thisVal;
+
+           if (thisCtrl) {
+               thisVal = thisCtrl.val();
+           }
+           return thisVal;
+        },
+
+        setval: function(ctrlName, newValue) {
+           var that = this;
+           return that.get(ctrlName, newValue);
+        },
 
         //Update all theas controls as per the updateStr
         updateAll: function (updateStr) {
-            var q = updateStr;
-            var hash;
-            if (q != undefined) {
-                q = q.split('&');
-                for (var i = 0; i < q.length; i++) {
-                    hash = q[i].split('=');
-                    this.get(decodeURIComponent(hash[0]), decodeURIComponent(hash[1]));
+            try{
+                var that = this;
+                var q = updateStr;
+                var hash;
+                if (q != undefined) {
+                    q = q.split('&');
+                    for (var i = 0; i < q.length; i++) {
+                        hash = q[i].split('=');
+                        this.get(decodeURIComponent(hash[0]), decodeURIComponent(hash[1]));
+                    }
                 }
+
+            }
+            catch (e){
+              th.get('th:ErrorMessage', 'TH.updateAll could not parse the string.  Expecting URL-encoded name-value ' +
+                     'pairs but received ' + updateStr.substring(1, 50).replace('|', '/') +
+                     '...|Unexpected data received from the server');
+              that.haveError(true);
             }
         },
 
@@ -118,8 +143,11 @@ TH = {
 
 
         //Decode value of all Theas controls
-        decodeAll: function() {
-            $('*[name^="theas:"]').each(function( index ){
+        decodeAll: function(namePrefix) {
+            if (!namePrefix) {
+                namePrefix = 'theas:';
+            }
+            $('[name^="' + namePrefix + '"]').each(function( index ){
                 var $this = $(this);
                 $this.val( decodeURIComponent($this.val()) );
             });
@@ -149,6 +177,8 @@ TH = {
 
         //Simple error handler for Async errors
         receiveAsyncError: function (thisjqXHR, thisStatus, thisError) {
+            var that = this;
+
             var debug = 0;
 
             if (debug) {
@@ -157,7 +187,8 @@ TH = {
 
             //this.clearAll();
             //this.sendAsync('logout');
-            window.location = '/'
+            //window.location = '/'
+            that.raiseError('Error waiting for async response: ' + thisjqXHR.status.toString() + ' (' + thisjqXHR.statusText + ')');
         },
 
 
@@ -169,6 +200,7 @@ TH = {
 
             //To support receiving a different type of data, simply pass sendAsync a different function for
             //onSuccess.
+            var that = this;
             var debug = 0;
 
             if (debug == 1){
@@ -177,7 +209,7 @@ TH = {
 
             if (dataReceived) {
                 if (dataReceived == 'invalidSession'){
-                    window.location = '/'
+                    that.raiseError('Async response indicates invalidSession');
                 }
                 else if (dataReceived == 'sessionOK'){
                     var noop = null
@@ -231,12 +263,12 @@ TH = {
         },
 
 
-        submitForm: function(e) {
+        submitForm: function(e, performUpdate) {
             if (e === true) {
                 // set the Theas param th:PerformUpdate to tell the server it should treat this
                 // form post as an update request
-                this.get('th:PerformUpdate', '1');
                 e = null;
+                performUpdate = true;
             }
 
             if (!e) {
@@ -258,36 +290,44 @@ TH = {
                 }
             }
 
+            var isOK = true;
 
-            // encode all form values
-            // actually...we can trust the browser to encode before performing the submit
-            //this.encodeAll();
+            if (performUpdate) {
+                th.get('th:PerformUpdate', '1');
+
+                //explicitly validate each focusable form element to trigger display of hints
+                $('#' + this.formID).find('input[type!="hidden"],select,textarea').each(function(i, el){
+                    if (! el.checkValidity()) {
+                      $(el).addClass('validation-error');
+                      $(el).parent('label').addClass('validation-error');
+                    }
+                    else {
+                     $(el).removeClass('validation-error');
+                     $(el).parent('label').removeClass('validation-error');
+                    }
+                });
 
 
+                //explicitly verify that the whole form is valid before submitting
+                if ($('#' + this.formID)[0].checkValidity()){
+                    // encode all form values
+                    // actually...we can trust the browser to encode before performing the submit
+                    //this.encodeAll();
 
-            //explicitly validate each focusable form element to trigger display of hints
-            $('#' + this.formID).find('input[type!="hidden"],select,textarea').each(function(i, el){
-                if (! el.checkValidity()) {
-                  $(el).addClass('validation-error');
-                  $(el).parent('label').addClass('validation-error');
+                    isOK = true;
                 }
                 else {
-                 $(el).removeClass('validation-error');
-                 $(el).parent('label').removeClass('validation-error');
+                    this.get('th:ErrorMessage', 'One or more fields have incomplete or invalid values.');
+                    this.haveError(true);
+                    isOK = false;
                 }
-            });
-
-
-            //explicitly verify that the whole form is valid before submitting
-            if ($('#' + this.formID)[0].checkValidity()){
-		        $('#' + this.formID).submit();
-            }
-	        else {
-                this.get('th:ErrorMessage', 'One or more fields have incomplete or invalid values.');
-                this.haveError(true);
             }
 
-            return false;
+            if (isOK) {
+                $('#' + this.formID).submit();
+            }
+
+            return isOK;
         },
 
         initHeartbeat: function(interval) {
@@ -344,18 +384,18 @@ TH = {
                             thisMsg = this.origDialogContent;
                         }
 
-                        if (!thisTitle) {
+                        if (thisTitle == null) {
                             thisTitle = this.origDialogTitle;
                         }
 
                         if (thisMsg) {
-                            $thMsgDlg.find('.modal-body').html(thisMsg);
+                            $thMsgDlg.find('.modal-body').html(thisMsg.replace(/(\r\n|\n|\r)/gm, '<br />'));
                         }
 
                         var modalTitle = $thMsgDlg.find('.modal-title');
 
                         if (modalTitle.length) {
-                            if (thisTitle) {
+                            if (thisTitle != null) {
                                 modalTitle.text(thisTitle);
                                 modalTitle.css('visibility', 'visible');
                             }
@@ -378,8 +418,11 @@ TH = {
         showModal: function(msg, title, onClose, goBackOnClose) {
           var $thMsgDlg = this.getModal(msg, title);
 
-           // define a custom click handler for the modal's close button
-            $thMsgDlg.find('button.close').click(function () {
+          $thMsgDlg.data('origfocused', document.activeElement);
+
+
+            // define an onClose handler
+            $thMsgDlg.on('hidden.bs.modal', function (){
                 doDefaultClose = true;
 
                 if (typeof onClose !== 'undefined') {
@@ -396,6 +439,10 @@ TH = {
                     if (goBackOnClose && window.history.length) {
                       window.history.back();
                     }
+                    else {
+                        $origfocused = $($thMsgDlg.data('origfocused'));
+                        $origfocused.focus();
+                    }
                 }
 
                 // Restore original dialog content
@@ -410,8 +457,14 @@ TH = {
                 }
             });
 
-            $thMsgDlg.modal('show');
+            $thMsgDlg.modal(show=true);
 
+        },
+
+        raiseError: function(errMsg) {
+            var that = this
+            that.get('th:ErrorMessage', errMsg);
+            that.haveError(true);
         },
 
         haveError: function(showModal, backOnError, onClose) {
@@ -438,7 +491,13 @@ TH = {
                     this.sendAsync('clearError');
 
                     if (showModal) {
-                        th.showModal(thErrorMsg, 'Error', onClose, backOnError);
+                        var msgParts = thErrorMsg.split('|');
+                        var msgTitle = 'Error'
+                        if (msgParts.length > 1) {
+                          msgTitle = msgParts[1];
+                          thErrorMsg = msgParts[0];
+                        }
+                        th.showModal(thErrorMsg, msgTitle, onClose, backOnError);
                      }
 
                 }
