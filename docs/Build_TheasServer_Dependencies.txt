@@ -1,7 +1,7 @@
 To set up TheasServer dev environment:
 
 0) Create folder C:\Prog and use this for all of the following installs.
-1) Install Python 3.4
+1) Install Python 3.4 (see:  https://www.python.org/downloads/windows/)
 2) Install virtualenv: pip install virtualenv (see: https://pypi.python.org/pypi/virtualenv)
 3) Install source for openssl, freetds, pymssl and build--by running: build_freetds_pymssql.bat (see detailed instructions for how-to)  This should copy files to the right places when done.
  
