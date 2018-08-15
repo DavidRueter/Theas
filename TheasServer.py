@@ -95,7 +95,7 @@ USE_SESSION_COOKIE = True
 REMEMBER_USER_TOKEN = False
 FORCE_REDIR_AFTER_POST = True
 
-USE_SECURE_COOKIES = False
+USE_SECURE_COOKIES = True
 SESSION_HEADER_NAME = 'X-Theas-Sesstoken'
 SESSION_COOKIE_NAME = 'theas:th:ST'
 USER_COOKIE_NAME = 'theas:th:UserToken'
@@ -856,6 +856,8 @@ class ThCachedResources:
             else:
                 ThSession.cls_log('Resource', log_msg)
 
+        # Careful:  we could be getting a cached resource in which case there may not yet be a session, in which
+        # case we can't update current_resource here!  It is up to the caller to update current_resource
         if th_session is not None and this_resource is not None and this_resource.exists and this_resource.resource_code != LOGIN_RESOURCE_CODE and this_resource.render_jinja_template:
             # we are assuming that only a jinja template page will have a stored procedure / can serve
             # as the current resource for a session.  (We don't want javascript files and the like
@@ -1258,10 +1260,11 @@ class ThSession:
     def log(self, category, *args, severity=10000):
         if LOGGING_LEVEL == 1 or 0 > severity >= LOGGING_LEVEL:
             if self.log_current_request:
-                print(datetime.datetime.now(), 'ThSession [{}:{}] ({}) - {} ({})'.format(
+                #print(datetime.datetime.now(), 'ThSession [{}:{}] ({}) - {} ({})'.format(
+                print(datetime.datetime.now(), 'ThSession [{}:{}] - {} ({})'.format(
                     self.session_token,
                     self.request_count,
-                    self.__locked_by,
+                    #self.__locked_by,
                     category,
                     self.comments if self.comments is not None else '',
                 ), *args)
@@ -1314,8 +1317,14 @@ class ThSession:
 
                     if LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in and self.current_handler is not None:
                         self.log('Auth', 'Authenticating as AUTO user (i.e. public)')
-                        self.authenticate(user_token=LOGIN_AUTO_USER_TOKEN)
-                        self.autologged_in = True
+                        try:
+                            self.authenticate(user_token=LOGIN_AUTO_USER_TOKEN)
+                        except:
+                            self.autologged_in = False
+
+                        if not self.autologged_in:
+                            self.log('Auth', 'Error: Authentication as AUTO user (i.e. public) FAILED.  Is your config file wrong?')
+                            self.log('Auth', 'Bad AUTO user token: {}'.format(LOGIN_AUTO_USER_TOKEN))
 
         return self
 
@@ -1368,6 +1377,8 @@ class ThSession:
 
         if self.current_handler is not None:
             if username is None and password is None and user_token is None and not retrieve_existing:
+                # caller didn't specify username/password or user-token, so check for a form
+                # post from the login page
                 if 'u' in self.current_handler.request.arguments:
                     username = self.current_handler.get_argument('u')[0]
                 elif 'theas:Login:UserName' in self.current_handler.request.arguments:
@@ -1378,16 +1389,15 @@ class ThSession:
                 elif 'theas:Login:Password' in self.current_handler.request.arguments:
                     password = self.current_handler.get_argument('theas:Login:Password')
 
-            # called due to login page being submitted
 
-            # theas:th:RememberUser is a checkbox (which will not be submitted if unchecked)--so default to '0'
-            temp_remember = '0'
+                # theas:th:RememberUser is a checkbox (which will not be submitted if unchecked)--so default to '0'
+                temp_remember = '0'
 
-            # see if form tells us whether to remember the user
-            temp_remember_arg = self.current_handler.get_arguments('theas:th:RememberUser')
-            if len(temp_remember_arg):
-                temp_remember = temp_remember_arg[0]
-            self.theas_page.set_value('theas:th:RememberUser', temp_remember)
+                # see if form tells us whether to remember the user
+                temp_remember_arg = self.current_handler.get_arguments('theas:th:RememberUser')
+                if len(temp_remember_arg):
+                    temp_remember = temp_remember_arg[0]
+                self.theas_page.set_value('theas:th:RememberUser', temp_remember)
 
         if self.theas_page:
             temp_remember = self.theas_page.get_value('theas:th:RememberUser', auto_create=False)
@@ -1411,8 +1421,9 @@ class ThSession:
                     proc.bind(password, _mssql.SQLVARCHAR, '@Password')
                 if user_token is not None:
                     proc.bind(user_token, _mssql.SQLVARCHAR, '@UserToken')
-
-            # proc.bind(self.session_token, _mssql.SQLVARCHAR, '@SessionToken')
+                if self.session_token is not None:
+                    # @SessionToken is informational only:  allows the web session to be logged in the database
+                    proc.bind(self.session_token, _mssql.SQLVARCHAR, '@SessionToken')
 
             try:
                 session_guid = None
@@ -1425,7 +1436,12 @@ class ThSession:
                     username = row['UserName']
 
                 if session_guid is not None:
-                    if (LOGIN_AUTO_USER_TOKEN is None or user_token != LOGIN_AUTO_USER_TOKEN):
+                    if user_token == LOGIN_AUTO_USER_TOKEN:
+                        self.logged_in = False
+                        self.autologged_in = True
+                        self.log('Auth', 'Authenticated as AUTO (public)... not a real login')
+
+                    else:
                         self.logged_in = True
 
                         # Store some user information (so the information can be accessed in templates)
@@ -1439,15 +1455,15 @@ class ThSession:
                             self.current_data['_Theas']['LoggedIn'] = self.logged_in
                             self.current_data['_Theas']['UserToken'] = self.user_token
 
-                        self.log('Auth', 'Authenticated as actual user')
-                    else:
-                        self.log('Auth', 'Authenticated as AUTO (public)')
+                        self.log('Auth', 'Authenticated as actual user {}'.format(self.username))
+
 
                 proc = None
                 del proc
 
             except Exception as e:
                 self.logged_in = False
+                self.user_token = None
                 self.log('Session', 'Authentication failed:', e)
                 error_message = 'Invalid username or password.'
         else:
@@ -1456,27 +1472,19 @@ class ThSession:
             error_message = 'Could not access SQL database server'
 
         if self.current_handler:
-            if USE_SESSION_COOKIE:
-                # If authentication was successful, we want to make sure the UserToken
-                # cookie is set properly.  (If authentication was not successful,
-                # we make no changes to the UserToken cookie.)
-                if self.logged_in:
-                    if self.current_handler.cookie_usertoken is None or\
-                                    self.current_handler.cookie_usertoken != self.user_token:
-                        self.current_handler.cookie_usertoken = None
-                        if self.logged_in and self.remember_user_token:
-                            if self.user_token is not None:
-                                self.current_handler.cookie_usertoken = self.user_token
+            # If authentication was successful, we want to make sure the UserToken
+            # cookie is set properly.  (If authentication was not successful,
+            # we make no changes to the UserToken cookie.)
+            self.current_handler.cookie_usertoken = None
 
-                        self.current_handler.write_cookies()
-                        self.log('Cookies',
-                                 'Updated cookie {} (authenticate() success)'.format(USER_COOKIE_NAME))
+            if self.logged_in and self.remember_user_token:
+                if self.user_token is not None:
+                    self.current_handler.cookie_usertoken = self.user_token
+                    self.log('Cookies',
+                             'Updated cookie {} (authenticate() success)'.format(USER_COOKIE_NAME))
 
-            else:
-                self.current_handler.cookie_st = None
-                self.current_handler.write_cookies()
-                self.log('Cookies',
-                         'Cleared cookie {} (authenticate() not using cookies)'.format(SESSION_COOKIE_NAME))
+            # always write the cookie...even if authentication failed (in which case we need to clear it)
+            self.current_handler.write_cookies()
 
         return self.logged_in, error_message
 
@@ -1674,7 +1682,10 @@ class ThHandler(tornado.web.RequestHandler):
 
     @cookie_st.setter
     def cookie_st(self, new_val):
-        if self.__cookie_st != (None if new_val == '' else new_val):
+        if new_val == '':
+            new_val = None
+
+        if new_val is not None and self.__cookie_st != new_val:
             self.__cookie_st = new_val
             self.cookies_changed = True
 
@@ -1702,18 +1713,26 @@ class ThHandler(tornado.web.RequestHandler):
         self.__cookie_st = None
         self.__cookie_usertoken = None
 
-        if USE_SECURE_COOKIES:
-            orig_cookie = self.get_secure_cookie(SESSION_COOKIE_NAME)
-            if orig_cookie is not None:
-                self.__cookie_st = orig_cookie.decode(encoding='ascii')
+        if USE_SESSION_COOKIE:
+            if USE_SECURE_COOKIES:
+                orig_cookie = self.get_secure_cookie(SESSION_COOKIE_NAME)
+                if orig_cookie is not None:
+                    self.__cookie_st = orig_cookie.decode(encoding='ascii')
 
-            orig_cookie = self.get_secure_cookie(USER_COOKIE_NAME)
-            if orig_cookie is not None:
-                self.__cookie_usertoken = orig_cookie.decode(encoding='ascii')
+            else:
+                self.__cookie_st = self.get_cookie(SESSION_COOKIE_NAME)
+                self.__cookie_usertoken = self.get_cookie(USER_COOKIE_NAME)
 
         else:
-            self.__cookie_st = self.get_cookie(SESSION_COOKIE_NAME)
-            self.__cookie_usertoken = self.get_cookie(USER_COOKIE_NAME)
+            self.current_handler.cookie_st = None
+            self.current_handler.write_cookies()
+            self.log('Cookies',
+                     'Cleared cookie {} because USE_SESSION_COOKIE is not true'.format(SESSION_COOKIE_NAME))
+
+        orig_cookie = self.get_secure_cookie(USER_COOKIE_NAME)
+        if orig_cookie is not None:
+            self.__cookie_usertoken = orig_cookie.decode(encoding='ascii')
+
 
     def write_cookies(self):
         if USE_SECURE_COOKIES:
@@ -1897,7 +1916,11 @@ class ThHandler(tornado.web.RequestHandler):
         else:
             template_str = resource.data
 
-            self.session.current_resource = resource
+            if resource is not None and resource.exists and resource.resource_code != LOGIN_RESOURCE_CODE and \
+                    resource.render_jinja_template and self.session.current_resource != resource:
+                # We may have retrieved a cached resource.  Set current_resource.
+                self.session.current_resource = resource
+
             self.session.current_template_str = template_str
 
             if template_str is None or len(template_str) == 0:
@@ -2715,15 +2738,12 @@ class ThHandler(tornado.web.RequestHandler):
 
                 self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
-                if resource is not None and resource.exists and self.session.logged_in and resource.render_jinja_template:
-                    # We retrieved a cached resource.  Set current_resource.
-                    self.session.current_resource = resource
-
                 if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
                     # resource_code was not provided and user is not logged in:  use default resource
                     # If the user is logged in, we want get_resource to select the appropriate
                     # resource for the user.
                     resource_code = DEFAULT_RESOURCE_CODE
+
 
                 if resource is None or not resource.exists:
                     # Call get_resources again, this time with a session
@@ -2737,6 +2757,10 @@ class ThHandler(tornado.web.RequestHandler):
                         resource = G_cached_resources.get_resource(resource_code, self.session, none_if_not_found=True,
                                                                    get_default_resource=self.session.logged_in)
 
+                if resource is not None and resource.exists and resource.resource_code != LOGIN_RESOURCE_CODE and \
+                        resource.render_jinja_template and self.session.current_resource != resource:
+                    # We may have retrieved a cached resource.  Set current_resource.
+                    self.session.current_resource = resource
 
                 if resource is not None and resource.exists:
                     if resource.on_before:
@@ -3178,7 +3202,7 @@ class ThHandler_Async(ThHandler):
                              if self.session.current_resource
                              else 'No current resource for this session!')
 
-            # update theas parameters based on this post...even if thre is not an async stored proc
+            # update theas parameters based on this post...even if there is not an async stored proc
             self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
 
             self.process_uploaded_files()
@@ -3855,7 +3879,7 @@ def run():
         print(msg)
     write_winlog(msg)
 
-    msg = 'Theas app: program parammeters: {}'.format(str(sys.argv[1:]))
+    msg = 'Theas app: program parameters: {}'.format(str(sys.argv[1:]))
     if LOGGING_LEVEL:
         print(msg)
     write_winlog(msg)
