@@ -22,34 +22,24 @@ __author__ = 'DavidRueter'
  Note that when run as a service, Theas settings must come from the settings.cfg file.  (It is not possible to
  pass in command-line parameters to Theas when running as a service.)
 
+ See:  http://timgolden.me.uk/pywin32-docs/servicemanager.html
+
 '''
 
 SERVICE_NAME_PREFIX = 'Theas'
-
-import win32serviceutil
-import win32service
-
-import os
-import sys
-import time
+MESSAGE_FILE_DLL = 'TheasMessages.dll'
+# see: https://www.eventsentry.com/blog/2010/11/creating-your-very-own-event-m.html
 
 from win32 import servicemanager
-
-
-import win32api
+import sys
 import win32event
+import win32service
+import win32serviceutil
 
 import TheasServer
-import winreg
-
-
-def write_winlog(*args):
-    if len(args) >= 2:
-        servicemanager.LogInfoMsg(args[1])
-    else:
-        servicemanager.LogInfoMsg(args[0])
-
-
+#import winreg
+import win32evtlogutil
+import os
 
 def get_program_directory():
     program_cmd = sys.argv[0]
@@ -84,80 +74,55 @@ def get_program_directory():
 
     return program_directory, program_filename
 
+# Declare some globals
+G_program_directory, G_program_filename = get_program_directory()
+G_program_name, G_extension = os.path.splitext(G_program_filename)
+G_service_name = SERVICE_NAME_PREFIX + '_' + G_program_name
 
 
+def write_winlog(*args):
+    # for convenience, wrap LogInfoMsg
+    servicemanager.LogInfoMsg(G_service_name + ': ' + args[0])
+
+'''
 def RegisterEventLogMessage(program_name, program_directory):
+
     key = None
 
-    key_val = 'SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Theas_' + program_name
+    key_val = 'SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\' + program_name
     orig_key_value = ''
+
+    write_winlog('Trying to register {} as the event message file'.format(G_message_file))
 
     try:
         try:
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_val, 0, winreg.KEY_ALL_ACCESS)
             orig_key_value, this_type = winreg.QueryValueEx(key, 'EventMessageFile')
-            if orig_key_value != 'TheasMessages.dll':
-                winreg.SetValueEx(key, 'EventMessageFile', None, winreg.REG_SZ, program_directory + 'TheasMessages.dll')
+            if orig_key_value != G_message_file:
+                winreg.SetValueEx(key, 'EventMessageFile', None, winreg.REG_SZ, G_message_file)
                 winreg.SetValueEx(key, 'TypesSupported', None, winreg.REG_DWORD, 7)
-        except Exception as e:
-            print(e)
+        except Exception as e2:
+            print(e2)
             key = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_val)
-            winreg.SetValueEx(key, 'EventMessageFile', None, winreg.REG_SZ, program_directory + 'TheasMessages.dll')
+            winreg.SetValueEx(key, 'EventMessageFile', None, winreg.REG_SZ, G_message_file)
             winreg.SetValueEx(key, 'TypesSupported', None, winreg.REG_DWORD, 7)
     finally:
         try:
             winreg.CloseKey(key)
         finally:
             pass
-
+'''
 
 
 class TheasServerSvc(win32serviceutil.ServiceFramework):
-    #_svc_name_ = 'DefaultServiceName'
-    #_svc_display_name_ = 'Default Service Display Name'
-    #_svc_description_ = 'Default Service Description'
+    # Make sure that globals G_service_name is populated before
+    # this declaration
 
-    _exe_name = sys.argv[0]
-    p = _exe_name.rfind('\\')
-    if p > 0:
-        _exe_name = _exe_name[p + 1:]
-
-    p = _exe_name.find('.')
-    if p > 0:
-        _exe_name = _exe_name[0 : p]
-
-    _svc_name_ = SERVICE_NAME_PREFIX + '_' + _exe_name
-    _svc_display_name_ = SERVICE_NAME_PREFIX + '_' + _exe_name
+    _svc_name_ = G_service_name
+    _svc_display_name_ = G_service_name
     _svc_description_ = SERVICE_NAME_PREFIX + ' web application server. See: https://github.com/davidrueter/Theas'
 
-
-    def RegisterEventLogMessage(self, message_dll='TheasMessages.dll', prefix='Theas_'):
-        program_directory, program_filename = get_program_directory()
-        program_name, extension = os.path.splitext(program_filename)
-        key = None
-
-        key_val = 'SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\' + prefix + program_name
-        orig_key_value = ''
-
-        try:
-            try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_val, 0, winreg.KEY_ALL_ACCESS)
-                orig_key_value, this_type = winreg.QueryValueEx(key, 'EventMessageFile')
-                if orig_key_value != message_dll:
-                    winreg.SetValueEx(key, 'EventMessageFile', None, winreg.REG_SZ, program_directory + message_dll)
-                    winreg.SetValueEx(key, 'TypesSupported', None, winreg.REG_DWORD, 7)
-            except:
-                try:
-                    key = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_val)
-                    winreg.SetValueEx(key, 'EventMessageFile', None, winreg.REG_SZ, program_directory + message_dll)
-                    winreg.SetValueEx(key, 'TypesSupported', None, winreg.REG_DWORD, 7)
-                except:
-                    pass
-        finally:
-            try:
-                winreg.CloseKey(key)
-            finally:
-                pass
+    # save the service name in a global, to facilitate logging
 
 
     def __init__(self, args):
@@ -172,16 +137,14 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         # Check to see if self.hWaitStop happened
         if rc == win32event.WAIT_OBJECT_0:
             # Stop signal encountered
-            servicemanager.LogInfoMsg(self._svc_name_ + ' - STOPPING')
+            write_winlog('Stopping')
         else:
-            servicemanager.LogInfoMsg(self._svc_name_ + ' - is alive and well')
+            write_winlog('Alive and well')
 
     def SvcStop(self):
 
-        servicemanager.LogInfoMsg(self._svc_name_ + ' - Service stop request received')
+        write_winlog('Service stop request received')
 
-        #import servicemanager
-        #ask TheasServer server to stop
         TheasServer.StopServer()
 
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
@@ -190,34 +153,80 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         # Clean up
         #TheasServer.cleanup()
 
-        #servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE, servicemanager.PYS_SERVICE_STOPPED, (self._svc_name_, ''))
+        servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE,
+                              servicemanager.PYS_SERVICE_STOPPED,
+                              (self._svc_name_, ''))
 
     def SvcDoRun(self):
 
-        try:
-            msg = 'Trying to register event log messages'
-            write_winlog(msg)
-            self.RegisterEventLogMessage()
-        except Exception as e:
-            msg = 'Theas app: Failed to RegisterEventLogMessage: {}'.format(e)
-            write_winlog(msg)
-            pass
-
-        #import servicemanager
-        servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE, servicemanager.PYS_SERVICE_STARTED, (self._svc_name_, ''))
+        servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE,
+                              servicemanager.PYS_SERVICE_STARTED,
+                              (self._svc_name_, ''))
 
         self.timeout = 3000
 
-        #start TheasServer server
-        TheasServer.run()
+        # start TheasServer server
+        TheasServer.run(run_as_svc=True)
 
-
-
-def ctrlHandler(ctrlType):
-    return True
 
 
 if __name__ == '__main__':
-    #RegisterEventLogMessage()
-    win32api.SetConsoleCtrlHandler(ctrlHandler, True)
-    win32serviceutil.HandleCommandLine(TheasServerSvc)
+    # Note:  we assume that the class declaration of TheasServerSvc
+    # will populate the global variables (G_program_filename, etc.)
+    # Those must be populated before anything else happens (i.e.
+    # can't change the values in initialize, etc.)
+
+
+    # if called without argvs, let's run !
+    if len(sys.argv) == 1:
+        try:
+            servicemanager.PrepareToHostSingle(TheasServerSvc)
+            servicemanager.Initialize('TheasServerSvc', G_program_directory + MESSAGE_FILE_DLL)
+
+            servicemanager.StartServiceCtrlDispatcher()
+
+        #except win32service.error:
+        except Exception as e:
+            msg = 'Error: {}'.format(e)
+            servicemanager.LogErrorMsg(G_service_name + ': ' + msg)
+            print(msg)
+            win32serviceutil.usage()
+
+    else:
+        win32serviceutil.HandleCommandLine(TheasServerSvc)
+        if sys.argv[1] in ("install", "update"):
+
+            msg = 'Performing installation tasks'
+            servicemanager.LogInfoMsg(G_program_filename + ': ' + msg)
+
+            try:
+                msg = 'About to SetEventSourceName'
+                servicemanager.LogInfoMsg(G_program_filename + ': ' + msg)
+
+                servicemanager.SetEventSourceName(G_service_name, True)
+            except Exception as e:
+                msg = 'Failed to SetEventSourceName: {}'.format(e)
+                servicemanager.LogErrorMsg(G_program_filename + ': ' + msg)
+                print(msg)
+                pass
+
+            try:
+                msg = 'About to register event log messages'
+                servicemanager.LogInfoMsg(G_program_filename + ': ' + msg)
+
+
+                win32evtlogutil.AddSourceToRegistry(SERVICE_NAME_PREFIX + G_program_name,
+                                                    msgDLL=G_program_directory + MESSAGE_FILE_DLL,
+                                                    eventLogType="Application",
+                                                    eventLogFlags=None)
+
+                #RegisterEventLogMessage(SERVICE_NAME_PREFIX + G_program_name, G_program_directory)
+
+                msg = 'Event log message registration appears to have succeeded'
+                servicemanager.LogInfoMsg(G_program_filename + ': ' + msg)
+            except Exception as e:
+                msg = 'Failed to RegisterEventLogMessage: {}'.format(e)
+                servicemanager.LogErrorMsg(G_program_filename + ': ' + msg)
+                print(msg)
+                pass
+
