@@ -16,7 +16,6 @@ import tornado.web
 import tornado.ioloop
 import tornado.options
 import tornado.httpserver
-import tornado.ioloop
 
 from multiprocessing import Lock
 from concurrent.futures import ThreadPoolExecutor
@@ -86,7 +85,6 @@ LOGIN_RESOURCE_CODE = 'login'
 LOGIN_AUTO_USER_TOKEN = None
 DEFAULT_RESOURCE_CODE = None
 
-PERFORM_SQL_IS_OK_CHECK = True
 FULL_SQL_IS_OK_CHECK = False
 
 USE_WORKER_THREADS = False
@@ -100,6 +98,7 @@ SESSION_HEADER_NAME = 'X-Theas-Sesstoken'
 SESSION_COOKIE_NAME = 'theas:th:ST'
 USER_COOKIE_NAME = 'theas:th:UserToken'
 
+COOKIE_SECRET = 'tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay='
 
 
 # NOTE:
@@ -120,7 +119,7 @@ G_sessions = None  # Global list of sessions
 G_cached_resources = None  # Global list of cached resources
 G_program_options = None
 G_server_is_running = False
-
+G_break_handler = None
 
 class BreakHandler:
     """
@@ -145,6 +144,15 @@ class BreakHandler:
     # Back to usual operation...
 
     from:  http://stacyprowell.com/blog/2009/03/trapping-ctrlc-in-python/
+
+    Also, consider:
+            # see: https://docs.microsoft.com/en-us/windows/console/registering-a-control-handler-function
+            import win32api
+
+            def ctrlHandler(ctrlType):
+                return True
+
+            win32api.SetConsoleCtrlHandler(ctrlHandler, True)
     """
 
     def __init__(self, emphatic=9):
@@ -249,15 +257,16 @@ class TheasServerSQLError(TheasServerError):
 
 
 def StopServer():
-    # global G_server_is_running
+    global G_server_is_running
+
+    G_server_is_running = False
+
     msg = 'StopServer() called'
     ThSession.cls_log('Shutdown', msg)
     write_winlog(msg)
 
-    # G_server_is_running = False
-
-    this_ioloop = tornado.ioloop.IOLoop.current()
-    this_ioloop.add_callback(this_ioloop.stop)
+    #this_ioloop = tornado.ioloop.IOLoop.current()
+    #this_ioloop.add_callback(this_ioloop.stop)
 
 
 # def set_exit_handler(func):
@@ -276,7 +285,7 @@ def do_periodic_callback():
     # Called by Tornado once a second.
     # ThSession.cls_log('Periodic', 'do_periodic_callback() called')
 
-    if G_break_handler.trapped:
+    if G_break_handler and G_break_handler.trapped:
         # Ctrl-C pressed
         G_server_is_running = False
 
@@ -310,7 +319,7 @@ class ThStoredProc:
 
     @property
     def is_ok(self):
-        if not PERFORM_SQL_IS_OK_CHECK:
+        if not FULL_SQL_IS_OK_CHECK:
             return True
         else:
             self.th_session.log('StoredProc', 'Checking is_ok:', self.stored_proc_name)
@@ -863,6 +872,7 @@ class ThCachedResources:
             # as the current resource for a session.  (We don't want javascript files and the like
             # to be recorded as the current resource.)
             th_session.current_resource = this_resource
+            th_session.theas_page.set_value('th:CurrentPage', this_resource.resource_code)
 
         return this_resource
 
@@ -1229,12 +1239,16 @@ class ThSession:
         elif not failed_to_lock:
             if inhibit_create:
                 # not allowed to start new session
-                cls.cls_log('Sessions', 'Need to create new session, but inhibit_create prevents new session')
+                cls.cls_log('Sessions', 'Need to create new session, but inhibit_crecate prevents new session')
             else:
                 # start new session
                 session_token = str(uuid.uuid4())
                 this_sess = ThSession(session_token)
-                this_sess.theas_page.set_value(SESSION_COOKIE_NAME, session_token)
+                if USE_SECURE_COOKIES:
+                    secval = tornado.web.create_signed_value(COOKIE_SECRET, SESSION_COOKIE_NAME, session_token)
+                    this_sess.theas_page.set_value(SESSION_COOKIE_NAME, secval)
+                else:
+                    this_sess.theas_page.set_value(SESSION_COOKIE_NAME, session_token)
                 this_sess.log_current_request = do_log
 
                 G_sessions.add_session(session_token, this_sess)
@@ -1673,6 +1687,10 @@ class ThHandler(tornado.web.RequestHandler):
         self.__cookie_st = None
         self.__cookie_usertoken = None
 
+        # Retrieve session and user token cookie values and save
+        # them in the new session in __cookie_st and __cookie_usertoken
+        self.retrieve_cookies()
+
     def __del__(self):
         self.session = None
 
@@ -1719,6 +1737,10 @@ class ThHandler(tornado.web.RequestHandler):
                 if orig_cookie is not None:
                     self.__cookie_st = orig_cookie.decode(encoding='ascii')
 
+                orig_cookie = self.get_secure_cookie(USER_COOKIE_NAME)
+                if orig_cookie is not None:
+                    self.__cookie_usertoken = orig_cookie.decode(encoding='ascii')
+
             else:
                 self.__cookie_st = self.get_cookie(SESSION_COOKIE_NAME)
                 self.__cookie_usertoken = self.get_cookie(USER_COOKIE_NAME)
@@ -1728,10 +1750,6 @@ class ThHandler(tornado.web.RequestHandler):
             self.current_handler.write_cookies()
             self.log('Cookies',
                      'Cleared cookie {} because USE_SESSION_COOKIE is not true'.format(SESSION_COOKIE_NAME))
-
-        orig_cookie = self.get_secure_cookie(USER_COOKIE_NAME)
-        if orig_cookie is not None:
-            self.__cookie_usertoken = orig_cookie.decode(encoding='ascii')
 
 
     def write_cookies(self):
@@ -1761,7 +1779,6 @@ class ThHandler(tornado.web.RequestHandler):
         checking to be skiped, the requestor must indicate skipXSRF=1 AND the resource
         must be configured to accept SkipXSRF as well.)
         """
-        self.retrieve_cookies()
 
         if self.get_argument('skipXSRF', default='0') == '1':
             self.deferred_xsrf = True
@@ -2474,14 +2491,34 @@ class ThHandler(tornado.web.RequestHandler):
 
         orig_cookie_session_token = self.cookie_st
 
+        # We might have a session token in a cookie.  But we might also have a session token in
+        # a form field, or in an HTTP header.  Which one do we trust?  Rationale:  We'd like the
+        # most explicit one to be used, i.e.: query string, form field, header, cookie in that
+        # order.
+
+        # But in the case of an async request from a stale browser request the session token
+        # provided in the form field might be old, and the cookie value might be new.
+        # The browser really must update the session token in the form if an async response
+        # provides an updated cookie value.
+
+        '''
         if self.get_arguments(SESSION_COOKIE_NAME):
             # Look for session token in request
             this_session_token = self.get_argument(SESSION_COOKIE_NAME)
+            if USE_SECURE_COOKIES:
+                this_session_token = tornado.web.decode_signed_value(COOKIE_SECRET, SESSION_COOKIE_NAME, this_session_token)
+
         elif SESSION_HEADER_NAME in self.request.headers:
             this_session_token = self.request.headers[SESSION_HEADER_NAME]
         else:
             # fall back to cookie
             this_session_token = orig_cookie_session_token
+        '''
+
+        # The rudimentary partial support for session tokens via forms or headers was removed on 9/7/2018, pending
+        # reconsideration of the best way to handle this.
+
+        this_session_token = orig_cookie_session_token
 
         give_up = False
         failed_to_lock = False
@@ -2510,6 +2547,16 @@ class ThHandler(tornado.web.RequestHandler):
                                       'Updating cookie {} wait_for_session() gave different token ({} vs {})'.format(
                                        SESSION_COOKIE_NAME, orig_cookie_session_token, this_sess.session_token))
 
+
+            # silently re-authenticate if needed and there is a user cookie
+            if not this_sess.logged_in and REMEMBER_USER_TOKEN:
+                # try to auto-login if there is a user cookie
+                if self.cookie_usertoken:
+                    ThSession.cls_log('Sessions', 'Reauthenticating user from usertoken cookie')
+                    this_sess.authenticate(user_token=self.cookie_usertoken)
+                    if not this_sess.logged_in:
+                        ThSession.cls_log('Sessions', 'FAILED to reauthenticate user from usertoken cookie')
+
             else:
                 self.cookie_st = None
 
@@ -2526,9 +2573,6 @@ class ThHandler(tornado.web.RequestHandler):
     @tornado.gen.coroutine
     def post(self, *args, **kwargs):
         # MAIN ENTRY POINT FOR HTTP POST REQUEST
-
-        # note:  cookies retrieved in check_xsrf_cookie()
-        # self.retrieve_cookies()
 
         ThSession.cls_log('POST', '*******************************')
 
@@ -2640,8 +2684,6 @@ class ThHandler(tornado.web.RequestHandler):
         ##########################################################
         global G_cached_resources
 
-        self.retrieve_cookies()
-
         if self.session:
             self.session.comments = 'ThHandler.get'
 
@@ -2731,11 +2773,6 @@ class ThHandler(tornado.web.RequestHandler):
                 self.session.log('GET', 'Have session')
                 self.session.log('GET', 'Received request for: {}'.format(self.request.path))
 
-                if not self.session.logged_in:
-                    # try to auto-login if there is a user cookie
-                    if self.cookie_usertoken:
-                        self.session.authenticate(user_token=self.cookie_usertoken)
-
                 self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
                 if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
@@ -2758,7 +2795,7 @@ class ThHandler(tornado.web.RequestHandler):
                                                                    get_default_resource=self.session.logged_in)
 
                 if resource is not None and resource.exists and resource.resource_code != LOGIN_RESOURCE_CODE and \
-                        resource.render_jinja_template and self.session.current_resource != resource:
+                        resource.render_jinja_template:
                     # We may have retrieved a cached resource.  Set current_resource.
                     self.session.current_resource = resource
 
@@ -2775,6 +2812,12 @@ class ThHandler(tornado.web.RequestHandler):
                             self.session.bookmark_url = resource.resource_code
                             # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
                             self.session.current_resource = resource
+
+                            # NOTE:  this needs further thought.
+                            # Sometimes it is nice to send the login screen in response to a request
+                            # for an auth-required resource if the user is not logged in.
+                            # Other times, we might prefer to send a 404 error, or to navigate
+                            # to index, etc. (consider <img src="xxx">, <audio>, etc.)
                             buf = self.session.build_login_screen()
 
                             write_log(self.session, 'Response', 'Sending login screen')
@@ -2784,6 +2827,7 @@ class ThHandler(tornado.web.RequestHandler):
                             buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
                         else:
                             # note:  resource.data will usually be str but might be bytes
+                            buf = resource.data
                             buf = resource.data
 
                     if resource.on_after:
@@ -2949,8 +2993,6 @@ class ThHandler_Attach(ThHandler):
     def get(self, *args, **kwargs):
         # MAIN ENTRY POINT FOR ATTACH HTTP GET REQUEST
 
-        self.retrieve_cookies()
-
         # retrieve or create session
         ThSession.cls_log('Attach', '*******************************')
         ThSession.cls_log('Attach', args[0])
@@ -3025,8 +3067,6 @@ class TestThreadedHandler(ThHandler):
     @tornado.gen.coroutine
     def get(self, *args, **kwargs):
 
-        self.retrieve_cookies()
-
         if USE_WORKER_THREADS:
             buf = yield self.process_request_background()
         else:
@@ -3052,12 +3092,17 @@ class ThHandler_Logout(ThHandler):
     def get(self, *args, **kwargs):
         global G_sessions
 
-        self.retrieve_cookies()
-
         if self.session is None:
             self.session = yield self.wait_for_session()
 
+        nextURL = '/'
+
         if self.session is not None:
+            # after logout, try to navigate to the same page
+            if self.session.current_resource:
+                nextURL = self.session.current_resource.resource_code
+
+
             self.session.logout()
             G_sessions.remove_session(self.session.session_token)
 
@@ -3068,11 +3113,11 @@ class ThHandler_Logout(ThHandler):
                           'Clearing cookies {} and {} in Logout'.format(SESSION_COOKIE_NAME, USER_COOKIE_NAME))
 
         if self.cookies_changed:
-            self.write(self.session.clientside_redir('/'))
+            self.write(self.session.clientside_redir(nextURL))
             self.session.finished()
             self.finish()
         else:
-            self.redirect('/')
+            self.redirect(nextURL)
             self.session = None
             # no self.finish needed, due to redirect
             # self.finish()
@@ -3094,8 +3139,6 @@ class ThHandler_Login(ThHandler):
     @tornado.gen.coroutine
     def get(self, *args, **kwargs):
         global G_sessions
-
-        self.retrieve_cookies()
 
         if self.session is None:
             self.session = yield self.wait_for_session()
@@ -3136,8 +3179,6 @@ class ThHandler_Login(ThHandler):
     def post(self, *args, **kwargs):
         global G_sessions
 
-        self.retrieve_cookies()
-
         if self.session is None:
             self.session = yield self.wait_for_session()
 
@@ -3145,6 +3186,7 @@ class ThHandler_Login(ThHandler):
         error_message = ''
 
         success, error_message = self.session.authenticate()
+        self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
 
         resource = G_cached_resources.get_resource(None, self.session, none_if_not_found=True,
                                                    get_default_resource=self.session.logged_in)
@@ -3177,13 +3219,16 @@ class ThHandler_Async(ThHandler):
         self.session = None
 
     @tornado.gen.coroutine
-    def post(self, resource_code=None, *args, **kwargs):
+    def post(self, *args, **kwargs):
+
         global G_cached_resources
 
-        self.retrieve_cookies()
-
         ThSession.cls_log('Async', '*******************************')
-        #ThSession.cls_log('Attach', args[0])
+
+        # Note:  The async request is to a generic url of /async
+        # To determine what type of async request is being made, we look to the session's current_resource
+        # If current_resource is not set (such as due to a new session), we look to the Theas param
+        # th:CurrentPage
 
         buf = ''
 
@@ -3196,17 +3241,38 @@ class ThHandler_Async(ThHandler):
         self.session = yield self.wait_for_session()
 
         if self.session is not None:
+
+            # update theas parameters based on this post...even if there is not an async stored proc
+            self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
+
+
+            if self.session.current_resource is None:
+
+                if cmd == 'resetPassword':
+                    resource_code = 'login'
+                else:
+                    # Request may have provided Theas param 'th:CurrentPage'
+                    # If session does not have current_resource set, trust 'th:CurrentPage'
+                    # This allows us to process the async request in situations where the session went away due
+                    # to timeout or server restart (assuming "remember me" / user token in cookie is enabled)
+
+                    resource_code = self.session.theas_page.get_value('th:CurrentPage')
+                    if resource_code.strip() == '':
+                        resource_code = None
+
+                if resource_code is not None:
+                    self.session.current_resource = G_cached_resources.get_resource(resource_code, self.session)
+
             self.session.log('Async:',
                              'Current Resource Code',
                              self.session.current_resource.resource_code
                              if self.session.current_resource
                              else 'No current resource for this session!')
 
-            # update theas parameters based on this post...even if there is not an async stored proc
-            self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
 
             self.process_uploaded_files()
             # process uploaded files, even if there is no async proc
+
 
             # do_log=(not cmd == 'heartbeat'))
 
@@ -3235,11 +3301,6 @@ class ThHandler_Async(ThHandler):
                     try:
 
                         if self.session.current_resource is None:
-                            if resource_code is None and cmd == 'resetPassword':
-                                resource_code = 'login'
-                            self.session.current_resource = G_cached_resources.get_resource(resource_code, self.session)
-
-                        if self.session.current_resource is None:
                             # Something is wrong.  Perhaps the async request came in before a resource had been served?
                             # This could happen if the TheasServer was restarted after a page was sent to the browser,
                             # Javascript on the page could submit an async requests...which we can't handle, because
@@ -3247,8 +3308,8 @@ class ThHandler_Async(ThHandler):
 
                             raise TheasServerError(
                                 'There is a problem with your session. Click the "reload" button in your browser.' +
-                                '\n\n (Async request was received before a SysWebResource was served.  Perhaps ' +
-                                'your session expired, or the server was restarted after this page was loaded.)')
+                                '|Invalid Session|Async request was received before a SysWebResource was served.  Perhaps ' +
+                                'your session expired, or the server was restarted after this page was loaded.')
                         else:
 
                             async_proc_name = self.session.current_resource.api_async_stored_proc
@@ -3422,9 +3483,9 @@ class ThHandler_Async(ThHandler):
                 self.finish()
 
     @tornado.gen.coroutine
-    def get(self, resource_code=None, *args, **kwargs):
+    def get(self, *args, **kwargs):
 
-        return self.post(resource_code, *args, **kwargs)
+        return self.post(*args, **kwargs)
 
     def data_received(self, chunk):
         pass
@@ -3694,8 +3755,9 @@ class ThHandler_Async(ThHandler):
 
 
         @tornado.gen.coroutine
-        def get(self, resource_code=None, *args, **kwargs):
-            return self.post(resource_code, *args, **kwargs)
+        def get(self, *args, **kwargs):
+
+            return self.post(*args, **kwargs)
 
         def data_received(self, chunk):
             pass
@@ -3712,7 +3774,6 @@ class ThHandler_Back(ThHandler):
 
     @tornado.gen.coroutine
     def get(self, *args, **kwargs):
-        self.retrieve_cookies()
 
         if self.session is None:
             # try to get the session, but do not wait for it
@@ -3769,8 +3830,6 @@ class ThHandler_PurgeCache(ThHandler):
     @tornado.gen.coroutine
     def get(self, *args, **kwargs):
         global G_cached_resources
-
-        self.retrieve_cookies()
 
         message = 'No resource code specified.  Nothing to do.'
 
@@ -3837,11 +3896,12 @@ def get_program_directory():
     return program_directory, program_filename
 
 
-def run():
+def run(run_as_svc=False):
     global G_program_options
     global G_server_is_running
     global G_cached_resources
     global G_sessions
+    global G_break_handler
 
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
@@ -3850,7 +3910,7 @@ def run():
     global LOGIN_AUTO_USER_TOKEN
     global REMEMBER_USER_TOKEN
     global DEFAULT_RESOURCE_CODE
-    global PERFORM_SQL_IS_OK_CHECK
+
     global FULL_SQL_IS_OK_CHECK
     global FORCE_REDIR_AFTER_POST
 
@@ -3866,6 +3926,13 @@ def run():
     if LOGGING_LEVEL:
         print(msg)
     write_winlog(msg)
+
+    if not run_as_svc:
+        # Trap breaks.
+        G_break_handler = BreakHandler()
+
+    if G_break_handler:
+        G_break_handler.enable()
 
     program_directory, program_filename = get_program_directory()
 
@@ -3891,11 +3958,11 @@ def run():
                              help="The path to the folder with configuration files.", type=str)
 
     G_program_options.define("server_prefix",
-                             default="http://192.168.7.83:8082",
+                             default="locaohost:8881",
                              help="The web server address prefix to prepend to URLs that need it.", type=str)
 
     G_program_options.define("port",
-                             default=8082,
+                             default=8881,
                              help="The TCP/IP port that the web server will listen on", type=int)
 
     G_program_options.define("sql_server",
@@ -3964,7 +4031,7 @@ def run():
 
     G_program_options.define("full_sql_is_ok_check",
                              default=FULL_SQL_IS_OK_CHECK,
-                             help="Resource code of the login screen template.",
+                             help="Explicitly test SQL connection before each call.",
                              type=bool)
 
     G_program_options.define("force_redir_after_post",
@@ -3974,7 +4041,7 @@ def run():
 
     G_program_options.define("use_secure_cookies",
                              default=USE_SECURE_COOKIES,
-                             help="When storing session and user tokens in cookies, use secure cookies. ",
+                             help="When storing session and user tokens in cookies, use secure cookies.",
                              type=bool)
 
     G_program_options.define("session_header_name",
@@ -3989,7 +4056,7 @@ def run():
 
     G_program_options.define("user_cookie_name",
                              default=USER_COOKIE_NAME,
-                             help="Name of cookie used to store user token (if applicable).)",
+                             help="Name of cookie used to store user token (if applicable).",
                              type=str)
 
     G_program_options.define("use_worker_threads",
@@ -4024,17 +4091,31 @@ def run():
         tornado.options.print_help()
         sys.exit()
 
-    SESSION_MAX_IDLE = G_program_options.session_max_idle_minutes  # Max idle time (in minutes) before TheasServer session is terminated
-    REMOVE_EXPIRED_THREAD_SLEEP = G_program_options.session_expired_poll_seconds  # Seconds to sleep in between polls in background thread to check for expired sessions
-    LOGGING_LEVEL = int(
-        G_program_options.logging_level)  # 0 to disable all, 1 to enable all, other value for threshold to exceed.
+    # Now we have settings set in G_program_options elements.
+    # Some of these used a hard-coded constant as the default. (For example, we don't want to have hard-coded
+    # constants for credentials, and we don't need them for certain other values that are retrieved only
+    # once in our code.  But other non-sensitive settings, a constant is used.)
+    # But these values could have been changed by settings in the config file.
+
+    # In our code we can directly use G_program_options.xxx to access the configured values.  But for readability
+    # (and possibly other reasons) in some cases we prefer to access the global constants directly.  So we now
+    # want to update the value of the global constants based on what has been configured.
+
+    SESSION_MAX_IDLE = G_program_options.session_max_idle_minutes
+    REMOVE_EXPIRED_THREAD_SLEEP = G_program_options.session_expired_poll_seconds
+    LOGGING_LEVEL = int(G_program_options.logging_level)
     LOGIN_RESOURCE_CODE = G_program_options.login_resource_code
     LOGIN_AUTO_USER_TOKEN = G_program_options.login_auto_user_token
     REMEMBER_USER_TOKEN = G_program_options.remember_user_token
     DEFAULT_RESOURCE_CODE = G_program_options.default_resource_code
     FULL_SQL_IS_OK_CHECK = G_program_options.full_sql_is_ok_check
-    if FULL_SQL_IS_OK_CHECK:
-        PERFORM_SQL_IS_OK_CHECK = True
+    FORCE_REDIR_AFTER_POST = G_program_options.force_redir_after_post
+    USE_SECURE_COOKIES = G_program_options.use_secure_cookies
+    SESSION_HEADER_NAME = G_program_options.session_header_name
+    SESSION_COOKIE_NAME = G_program_options.session_cookie_name
+    USER_COOKIE_NAME = G_program_options.user_cookie_name
+    USE_WORKER_THREADS = G_program_options.use_worker_threads
+    MAX_WORKERS = G_program_options.max_worker_threads
 
     msg = 'Starting Theas server {} (in {}) on port {}.'.format(
         program_filename, program_directory, G_program_options.port)
@@ -4062,6 +4143,11 @@ def run():
 
     _mssql.set_max_connections(G_program_options.sql_max_connections)
 
+    if run_as_svc:
+        # make sure there is an ioloop in this thread (needed for Windows service)
+        io_loop = tornado.ioloop.IOLoop()
+        io_loop.make_current()
+
     application = tornado.web.Application([
         (r'/attach', ThHandler_Attach),
         (r'/attach/(.*)', ThHandler_Attach),
@@ -4080,15 +4166,15 @@ def run():
         debug=False,
         autoreload=False,
         xsrf_cookies=True,
-        cookie_secret='tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay=')
+        cookie_secret=COOKIE_SECRET)
 
     http_server = tornado.httpserver.HTTPServer(application)
 
     try:
         http_server.listen(G_program_options.port)
-    except Exception:
-        msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port?'.format(
-            G_program_options.port)
+    except Exception as e:
+        msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port? {}'.format(
+            G_program_options.port, e)
         print(msg)
         write_winlog(msg)
         sys.exit()
@@ -4100,6 +4186,7 @@ def run():
     logging.getLogger('tornado.access').disabled = True
 
     G_sessions.start_cleanup_thread()
+
 
     tornado.ioloop.PeriodicCallback(do_periodic_callback, 2000).start()
 
@@ -4141,6 +4228,9 @@ def run():
 
     ThSession.cls_log('Shutdown', 'Winding down #5')
 
+    if G_break_handler:
+        G_break_handler.disable()
+
     msg = 'Stopped Theas server {} (in {}) on port {}.'.format(
         program_filename, program_directory, G_program_options.port)
 
@@ -4148,11 +4238,8 @@ def run():
     write_winlog(msg)
 
 
-if __name__ == "__main__":
 
-    # Trap break.
-    G_break_handler = BreakHandler()
-    G_break_handler.enable()
+if __name__ == "__main__":
 
     try:
         # all_objects = muppy.get_objects()
@@ -4171,7 +4258,6 @@ if __name__ == "__main__":
         # os.kill(0, signal.CTRL_BREAK_EVENT)
     finally:
         pass
-        G_break_handler.disable()
 
         # Clean up _mssql resources
 # _mssql.exit_mssql()
