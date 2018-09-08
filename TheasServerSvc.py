@@ -169,7 +169,6 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         TheasServer.run(run_as_svc=True)
 
 
-
 if __name__ == '__main__':
     # Note:  we assume that the class declaration of TheasServerSvc
     # will populate the global variables (G_program_filename, etc.)
@@ -180,9 +179,8 @@ if __name__ == '__main__':
     # if called without argvs, let's run !
     if len(sys.argv) == 1:
         try:
-            servicemanager.PrepareToHostSingle(TheasServerSvc)
             servicemanager.Initialize('TheasServerSvc', G_program_directory + MESSAGE_FILE_DLL)
-
+            servicemanager.PrepareToHostSingle(TheasServerSvc)
             servicemanager.StartServiceCtrlDispatcher()
 
         #except win32service.error:
@@ -194,6 +192,7 @@ if __name__ == '__main__':
 
     else:
         win32serviceutil.HandleCommandLine(TheasServerSvc)
+
         if sys.argv[1] in ("install", "update"):
 
             msg = 'Performing installation tasks'
