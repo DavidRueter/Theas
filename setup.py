@@ -73,22 +73,24 @@ class Target:
 
 # create an instance of class Target
 # and give it additional needed info
+'''
 target = Target(
     description="Theas Web Application Server",
     # this is your code file
     script='TheasServer.py',
-    #cmdline_style='pywin32',
+    cmdline_style='pywin32',
     # this will form TestProgram.exe
     dest_base="TheasServer",
     icon_resources=[(1, "Theas.ico")],
     dll_excludes=['MSVCR100D.dll'],
 )
+'''
 
 target_svc = Target(
     description="Theas Web Application Server (service)",
     # this is your code file
     modules='TheasServerSvc',
-    #cmdline_style='pywin32',
+    cmdline_style='pywin32',
     # this will form TestProgram.exe
     dest_base="TheasServerSvc",
     icon_resources=[(1, "Theas.ico")],
@@ -117,7 +119,7 @@ setup(
 
     # List of scripts to convert into console .EXEs
     #console=['TheasServer.py'],
-    console=[target],
+    ##console=[target],
 
 
 
@@ -135,6 +137,7 @@ setup(
 
     data_files=[('', ['SAMPLE_settings.cfg', #Sample configuration file
                       'Theas.js', # Javascript file served up by TheasServer
+                      'TheasVue.js', # Javascript file for vue.js served up by TheasServer
                       'bin/TheasMessages.dll',  # Windows event viewer message resources
 
                       #If FreeTDS is dynamically linked in pymssql:
