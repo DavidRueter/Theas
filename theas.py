@@ -121,7 +121,7 @@ import base64
 from time import struct_time, strptime, strftime
 import datetime
 
-from jinja2 import Template, Undefined, environmentfilter  #, Markup, escape
+from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
 from jinja2.environment import Environment
 
 ALLOW_UNSAFE_FUNCTIONS = False
@@ -136,60 +136,63 @@ def format_str_if(this_str, fmt_str):
     return buf
 
 
-#-----Jinja2 undefined variable class-----
+# -----Jinja2 undefined variable class-----
 class SilentUndefined(Undefined):
     def _fail_with_undefined_error(self, *args, **kwargs):
         return ''
 
+
 class TheasException(Exception):
     pass
 
+
 class TheasControl:
     def __init__(self):
-        #self.control_nv = None
+        # self.control_nv = None
         self.id = None
-        #self.authenticator = None
+        # self.authenticator = None
         self.checked = ''
         self.value = ''
         self.caption = ''
         self.attribs = OrderedDict()
 
-    #def __del__(self):
-        #self.control_nv = None
+        # def __del__(self):
+        # self.control_nv = None
+
 
 noneTheasControl = TheasControl()
+
 
 class TheasControlNV:
     def __init__(self, name='', control_type=None):
         self.name = name
-            # Name of the name/value pair (i.e. the HTML "name" attribute of an input control, etc.)
+        # Name of the name/value pair (i.e. the HTML "name" attribute of an input control, etc.)
         self.controls = OrderedDict()
-            # List of controls that share this name.  Radio buttons and checkboxes can have multiple
-            # controls.  Inputs and TextAreas can have only one control.  Selects are a special case
-            # because we use self.control to store the list of HTML <Options> (name/value pairs of
-            # every option in the dropdown)...but these aren't real controls because they do not accept
-            # HTML attributes such as class, style, etc.
+        # List of controls that share this name.  Radio buttons and checkboxes can have multiple
+        # controls.  Inputs and TextAreas can have only one control.  Selects are a special case
+        # because we use self.control to store the list of HTML <Options> (name/value pairs of
+        # every option in the dropdown)...but these aren't real controls because they do not accept
+        # HTML attributes such as class, style, etc.
         self.control = None
-            #Needed for select
+        # Needed for select
         self.__datavalue = ''
-            # For internal use (to aid in setting the value of this name-value pair when the value must
-            # correspond to a child control, such as radio, checkbox, or select
+        # For internal use (to aid in setting the value of this name-value pair when the value must
+        # correspond to a child control, such as radio, checkbox, or select
         self.value = ''
-            # The current value, i.e. what jquery .val() would return for this name
+        # The current value, i.e. what jquery .val() would return for this name
         self.control_type = control_type
-            # Type of control:  'hidden', 'text', 'password', 'radio', 'checkbox', 'select', 'textarea', etc.
+        # Type of control:  'hidden', 'text', 'password', 'radio', 'checkbox', 'select', 'textarea', etc.
         self.include_in_json = False
-            # if set, this control will be included in the filter TheasValues
+        # if set, this control will be included in the filter TheasValues
         self.name_prefix = 'theas:'
-            # may contain 'Theas:' for controls saved in Theas Params, or may be empty for ad-hoc controls
+        # may contain 'Theas:' for controls saved in Theas Params, or may be empty for ad-hoc controls
 
     def __del__(self):
-        #for ctrl_value in self.controls:
+        # for ctrl_value in self.controls:
         #    self.controls[ctrl_value] = None
 
         self.controls = None
         del self.controls
-
 
     @property
     def datavalue(self):
@@ -212,15 +215,14 @@ class TheasControlNV:
 class Theas:
     def __init__(self, theas_session=None, jinja_environment=None):
 
-        #if not isinstance(jinja_environment, Environment):
+        # if not isinstance(jinja_environment, Environment):
         if True:
-            #set up new jinja environment
+            # set up new jinja environment
             self.jinja_env = Environment()
 
             self.jinja_env.theas_page = self
 
             self.jinja_env.undefined = SilentUndefined
-
 
             self.jinja_env.filters['theasSessionToken'] = self.theas_sessiontoken
             # Ouputs the current session token as a hidden form field.  This is required for normal
@@ -282,13 +284,18 @@ class Theas:
             self.jinja_env.filters['theasDefineFilter'] = self.theas_define_filter
 
         else:
-            #reuses existing jinja environment
+            # reuses existing jinja environment
             self.jinja_env = jinja_environment
-
 
         self.th_session = theas_session
         self.control_names = {}
-        self.set_value('theas:th:ErrorMessage', '');
+
+        self.set_value('th:SessionToken', str(self.th_session.session_token))
+        self.set_value('th:ErrorMessage', '')
+        self.set_value('th:CurrentPage',
+                       self.th_session.current_resource.resource_code if self.th_session.current_resource is not None else '')
+        self.set_value('th:PerformUpdate', '0')
+
         self.functions = {}
         self.authenicator = None
 
@@ -315,7 +322,6 @@ class Theas:
 
         self.jinja_env = None
         del self.jinja_env
-
 
     @classmethod
     def mimetype_for_extension(cls, filename):
@@ -426,8 +432,7 @@ class Theas:
 
         return s
 
-
-    def get_control(self, ctrl_name, control_type=None, id=None, auto_create=True, **kwargs):
+    def get_control(self, ctrl_name, control_type=None, id=None, auto_create=True, include_in_json=True, **kwargs):
         # NOTE:  pass in datavalue='xxx' to set the value of the control.
         # Does NOT need to be URL-encoded:  we do that here.
 
@@ -469,7 +474,7 @@ class Theas:
                 ctrl_name = ctrl_name[6:]
 
             if ctrl_name in (self.control_names):
-                #look up exisitng control by name
+                # look up exisitng control by name
                 this_ctrl_nv = self.control_names[ctrl_name]
 
             if this_ctrl_nv is None:
@@ -488,6 +493,8 @@ class Theas:
                 if control_type != 'hidden':
                     this_ctrl_nv.control_type = control_type
 
+            if this_ctrl_nv is not None and include_in_json:
+                this_ctrl_nv.include_in_json = True
 
             value_param = None
             if 'value' in kwargs:
@@ -512,20 +519,20 @@ class Theas:
                 if ctrl_name == 'th:ErrorMessage':
                     self.th_session.log('Theas', 'th:ErrorMessage value set={}'.format(datavalue_param))
 
-
             if this_ctrl_nv is not None:
                 this_ctrl = this_ctrl_nv.control
 
-                if this_ctrl is None and this_ctrl_nv.control_type not in ('radio', 'select') and len(this_ctrl_nv.controls) == 1:
+                if this_ctrl is None and this_ctrl_nv.control_type not in ('radio', 'select') and len(
+                        this_ctrl_nv.controls) == 1:
                     this_ctrl = this_ctrl_nv.controls[list(this_ctrl_nv.controls.keys())[0]]
                     if this_ctrl is not None and value_param != this_ctrl.value:
                         this_ctrl = None
 
                 if this_ctrl is None:
                     if this_ctrl_nv.control_type != 'select' and (value_param or len(this_ctrl_nv.controls) == 0):
-                        #We must create a new control.  Value and other attributes will be set below.
+                        # We must create a new control.  Value and other attributes will be set below.
                         this_ctrl = TheasControl()
-                        #this_ctrl.control_nv = this_ctrl_nv
+                        # this_ctrl.control_nv = this_ctrl_nv
 
                         this_ctrl.value = value_param
                         this_ctrl_nv.controls[value_param] = this_ctrl
@@ -546,7 +553,6 @@ class Theas:
 
                 this_attribs = {}
 
-
                 for this_key, this_paramvalue in kwargs.items():
 
                     if this_key == 'options_dict':
@@ -554,14 +560,14 @@ class Theas:
 
                     elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label',
                                       'escaping', 'persist'):
-                        #this kwarg does not apply or has already been handled
+                        # this kwarg does not apply or has already been handled
                         pass
 
                     else:
-                        #HTML attributes that have a - are a problem, because this is not a valid character for a
-                        #Python identifier.  In particular, the HTML5 data-xxx="yyy" tag is a problem.
-                        #It is up to the user to replace - with _ in attribute names, however Theas does
-                        #treat data_ as data- internally
+                        # HTML attributes that have a - are a problem, because this is not a valid character for a
+                        # Python identifier.  In particular, the HTML5 data-xxx="yyy" tag is a problem.
+                        # It is up to the user to replace - with _ in attribute names, however Theas does
+                        # treat data_ as data- internally
                         if this_key.startswith('data_'):
                             this_key = this_key.replace('data_', 'data-')
                         elif this_key.lower() == 'class' and this_key != 'class':
@@ -591,11 +597,11 @@ class Theas:
                         this_attribs['style'] = style_str
 
                 if this_ctrl_nv.control_type == 'select' and this_options_dict is not None:
-                    #create pseudo control for each select option
+                    # create pseudo control for each select option
                     for this_opt, this_caption in this_options_dict.items():
                         if this_opt not in this_ctrl_nv.controls:
                             temp_ctrl = TheasControl()
-                            #temp_ctrl.control_nv = this_ctrl_nv
+                            # temp_ctrl.control_nv = this_ctrl_nv
                             temp_ctrl.value = this_opt
                             temp_ctrl.caption = this_caption
 
@@ -611,15 +617,16 @@ class Theas:
 
                 if this_ctrl is None:
                     this_ctrl = noneTheasControl
-                #else:
-                  #this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
+                    # else:
+                    # this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
 
                 if this_ctrl is not None:
                     this_ctrl.attribs = this_attribs
                     if id:
                         this_ctrl.id = id
 
-                if control_type is not None and control_type != this_ctrl_nv.control_type and (not this_ctrl_nv.control_type or this_ctrl_nv.control_type=='hidden'):
+                if control_type is not None and control_type != this_ctrl_nv.control_type and (
+                    not this_ctrl_nv.control_type or this_ctrl_nv.control_type == 'hidden'):
                     # Even on an existing control we want to update control_type if it is provided, because
                     # the control could have been created from TheasParams from a stored procedure and defaulted
                     # to hidden...but now a filter or something else is specifying the "real" type.
@@ -627,17 +634,16 @@ class Theas:
 
         return this_ctrl_nv, this_ctrl, value_changed
 
-
     def get_controls(self, include_in_json_only=False):
-        #return dictionary of control name-value pairs
+        # return dictionary of control name-value pairs
         this_result = {}
         for this_ctrl_name, this_nv in self.control_names.items():
             if include_in_json_only:
                 if this_nv.include_in_json:
                     this_ctrl_name = this_ctrl_name.replace(':', '$')
-                    this_result[this_ctrl_name] = this_nv.value
+                    this_result[this_ctrl_name] = str(this_nv.value)
             else:
-                this_result[this_ctrl_name] = this_nv.value
+                this_result[this_ctrl_name] = str(this_nv.value)
 
         return this_result
 
@@ -660,11 +666,10 @@ class Theas:
 
         return this_result, value_changed
 
-
-
-    def process_client_request(self, request_handler = None, accept_any = False, buf = None, escaping='default', from_stored_proc=False, *args, **kwargs):
-        #handle updating theas_page controls
-        #('Theas: process_client_request starting')
+    def process_client_request(self, request_handler=None, accept_any=False, buf=None, escaping='default',
+                               from_stored_proc=False, *args, **kwargs):
+        # handle updating theas_page controls
+        # ('Theas: process_client_request starting')
 
         perform_processing = True
 
@@ -675,7 +680,6 @@ class Theas:
                 perform_processing = this_func(self, request_handler=None, accept_any=accept_any)
 
         changed_controls = []
-
 
         if buf and buf.index('=') > 0:
             # process from a string buf (typically returned by a stored procedure)
@@ -741,8 +745,8 @@ class Theas:
         return changed_controls
 
 
-    #@environmentfilter
-    #def theas_hidden(self, this_env, ctrl_name, *args, **kwargs):
+        # @environmentfilter
+        # def theas_hidden(self, this_env, ctrl_name, *args, **kwargs):
         # This filter is called like:
         #         {{ "theas:HelloWorld"|hidden(my_param="abc"}}
         # As of Jinja 2.8 this requires a fix to nodes.py (see: https://github.com/pallets/jinja/issues/548)
@@ -753,19 +757,18 @@ class Theas:
         # With the fix, the order of the arguments is correct (with the Jinja environment first, and the
         # static string second.
         # Additional arguments inside the parenthesis are passed in args[] or kwargs[] as expected.
-     #   this_page = this_env.theas_page
+        #   this_page = this_env.theas_page
 
-     #   assert ctrl_name, 'Filter theas_hidden requires the id or name be provided as the first argument.'
+        #   assert ctrl_name, 'Filter theas_hidden requires the id or name be provided as the first argument.'
 
-     #   this_ctrl = this_page.get_control(ctrl_name, **kwargs)
+        #   this_ctrl = this_page.get_control(ctrl_name, **kwargs)
 
-     #   buf = '<input name="{}" type="hidden" value="{}"/>'.format(
-     #       this_ctrl.name,
-     #       this_ctrl.value
-     #   )
+        #   buf = '<input name="{}" type="hidden" value="{}"/>'.format(
+        #       this_ctrl.name,
+        #       this_ctrl.value
+        #   )
 
-     #   return buf
-
+        #   return buf
 
     @environmentfilter
     def theas_values_json(self, this_env, this_value, *args, **kwargs):
@@ -774,7 +777,8 @@ class Theas:
 
     @environmentfilter
     def theas_base64(self, this_env, this_value, *args, **kwargs):
-        buf = base64.b64encode(this_value.encode(encoding='utf-8', errors='strict')).decode(encoding='ascii', errors='strict')
+        buf = base64.b64encode(this_value.encode(encoding='utf-8', errors='strict')).decode(encoding='ascii',
+                                                                                            errors='strict')
         return "'{}'".format(buf)
 
     @environmentfilter
@@ -806,6 +810,8 @@ class Theas:
             segments = this_value.split('.')
             busted_filename = '.'.join(segments[:-1]) + '.ver.' + this_version + '.' + '.'.join(segments[-1:])
 
+        busted_filename = '/' + busted_filename
+
         return json.dumps(busted_filename)
 
     @environmentfilter
@@ -824,8 +830,6 @@ class Theas:
 
         return buf
 
-
-
     @environmentfilter
     def theas_xsrf(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
@@ -834,11 +838,10 @@ class Theas:
         # This filter is just for convenience and consistency:  The user could directly use
         # {{ data._Theas.xsrf_formHTML }} instead.
 
-        #buf = this_env.theas_page.th_session.current_data['_Theas']['xsrf_formHTML']
+        # buf = this_env.theas_page.th_session.current_data['_Theas']['xsrf_formHTML']
         buf = this_env.theas_page.th_session.current_xsrf_form_html
 
         return buf
-
 
     @environmentfilter
     def theas_sessiontoken(self, this_env, this_value, vuejs=False, *args, **kwargs):
@@ -846,41 +849,46 @@ class Theas:
         #         {{ "_th"|theasST }}
         # No arguments are required.  The "_th" can be any value (i.e. the value is ignored)
 
-        buf = '<input name="{}" type="hidden" value="{}"/>'.format(
-            'theas:th:ST',
-            this_env.theas_page.th_session.session_token
-        )
+        buf = ''
 
+        if not vuejs:
+            buf = '<input name="{}" type="hidden" {}value="{}"/>'.format(
+                'theas:th:ST',
+                ':' if vuejs else '',  # bound attribute in vuejs
+                'theasParams.th$ST' if vuejs else str(this_env.theas_page.th_session.session_token)
+            )
 
         # sneak in hidden field to pass ErrorMessage
         buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
             'theas:th:ErrorMessage',
-            ':' if vuejs else '',
-            'theas.th$ErrorMessage' if vuejs else self.get_value('theas:th:ErrorMessage')
+            ':' if vuejs else '',  # bound attribute in vuejs
+            'theasParams.th$ErrorMessage' if vuejs else self.get_value('theas:th:ErrorMessage')  # bind to json in vuejs
         )
 
-        self.get_control('th:ErrorMessage')[0].include_in_json = True
+        # sneak in hidden field to pass CurrentPage
+        buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
+            'theas:th:CurrentPage',
+            ':' if vuejs else '',  # bound attribute in vuejs
+            'theasParams.th$CurrentPage' if vuejs else self.get_value('theas:th:CurrentPage')  # bind to json in vuejs
+        )
 
         # sneak in hidden field to pass PerformUpdate
         buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
             'theas:th:PerformUpdate',
-            ':' if vuejs else '',
-            'theas.th$PerformUpdate' if vuejs else '0'
+            ':' if vuejs else '',  # bound attribute in vuejs
+            'theasParams.th$PerformUpdate' if vuejs else '0'  # bind to json in vuejs
         )
-
-        self.get_control('th:PerformUpdate')[0].include_in_json = True
 
         return buf
 
-
     @environmentfilter
     def theas_hidden(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
-        #This filter is called like:
+        # This filter is called like:
         #         {{ data._Theas.osST|hidden(name="theas:HelloWorld") }}
-        #The arguments  behave as documented at: http://jinja.pocoo.org/docs/dev/api/#custom-filters
-        #The environment is passed as the first argument.  The value that the fitler was called on is
-        #passed as the second argument (this_value).  Additional arguments inside the parenthesis are
-        #passed in args[] or kwargs[]
+        # The arguments  behave as documented at: http://jinja.pocoo.org/docs/dev/api/#custom-filters
+        # The environment is passed as the first argument.  The value that the fitler was called on is
+        # passed as the second argument (this_value).  Additional arguments inside the parenthesis are
+        # passed in args[] or kwargs[]
 
         this_page = this_env.theas_page
 
@@ -893,8 +901,9 @@ class Theas:
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        #id is not used for hidden
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='hidden', **kwargs)
+        # id is not used for hidden
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+                                                                       control_type='hidden', **kwargs)
 
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
@@ -914,7 +923,6 @@ class Theas:
         this_ctrl_nv.include_in_json = True
 
         return buf
-
 
     @environmentfilter
     def theas_input(self, this_env, this_value, escaping="urlencode", vuejs=False, *args, **kwargs):
@@ -937,21 +945,22 @@ class Theas:
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        #id not used for looking up (but might be provided and might need to be rendered)
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type=type, **kwargs)
+        # id not used for looking up (but might be provided and might need to be rendered)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+                                                                       control_type=type, **kwargs)
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
             this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{}'.format(
-                this_ctrl_nv.name_prefix + this_ctrl_nv.name,
-                format_str_if(this_ctrl.id, ' id="{}"'),
-                this_ctrl_nv.control_type,
-                this_attribs_str
-            )
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
+            format_str_if(this_ctrl.id, ' id="{}"'),
+            this_ctrl_nv.control_type,
+            this_attribs_str
+        )
 
-        #include value="" attribute, but only if we have a value
+        # include value="" attribute, but only if we have a value
 
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
@@ -974,7 +983,6 @@ class Theas:
 
         return buf
 
-
     @environmentfilter
     def theas_radio(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
@@ -990,9 +998,10 @@ class Theas:
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        #id should be specified for clarity.  If id is not provided, will try to find the correct control
-        #based on name + value
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='radio', **kwargs)
+        # id should be specified for clarity.  If id is not provided, will try to find the correct control
+        # based on name + value
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+                                                                       control_type='radio', **kwargs)
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1010,7 +1019,6 @@ class Theas:
         this_ctrl_nv.include_in_json = True
 
         return buf
-
 
     @environmentfilter
     def theas_select(self, this_env, this_options, this_value, *args, **kwargs):
@@ -1059,9 +1067,9 @@ class Theas:
             for this_row in kwargs['source_list']:
                 this_options_dict[this_row[kwargs['source_value']]] = this_row[kwargs['source_label']]
 
-
-
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='select', options_dict=this_options_dict, **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+                                                                       control_type='select',
+                                                                       options_dict=this_options_dict, **kwargs)
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1071,12 +1079,13 @@ class Theas:
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_attribs_str
-            )
+        )
 
         for temp_optval, temp_optctrl in this_ctrl_nv.controls.items():
             buf = buf + '\n<option value="{}"{}{}>{}</option>'.format(
                 temp_optval,
-                ' selected="selected"' if ((temp_optctrl.checked) or (not this_ctrl_nv.value and not temp_optval)) else '',
+                ' selected="selected"' if (
+                (temp_optctrl.checked) or (not this_ctrl_nv.value and not temp_optval)) else '',
                 ' disabled="disabled"' if not temp_optval else '',
                 temp_optctrl.caption
             )
@@ -1085,7 +1094,6 @@ class Theas:
         this_ctrl_nv.include_in_json = True
 
         return buf
-
 
     @environmentfilter
     def theas_textarea(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
@@ -1103,7 +1111,8 @@ class Theas:
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='textarea', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+                                                                       control_type='textarea', **kwargs)
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1130,8 +1139,6 @@ class Theas:
 
         return buf
 
-
-
     @environmentfilter
     def theas_checkbox(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
@@ -1147,7 +1154,8 @@ class Theas:
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value, control_type='checkbox', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+                                                                       control_type='checkbox', **kwargs)
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1166,7 +1174,6 @@ class Theas:
 
         return buf
 
-
     @environmentfilter
     def theas_define_functions(self, ctrl_name, this_env, *args, **kwargs):
 
@@ -1176,7 +1183,6 @@ class Theas:
         this_page.create_functions(python_source)
 
         return ''
-
 
     @environmentfilter
     def theas_define_filter(self, ctrl_name, this_env, *args, **kwargs):
@@ -1226,7 +1232,6 @@ class Theas:
 
         '''
 
-
         buf = ''
 
         this_page = this_env.theas_page
@@ -1267,7 +1272,6 @@ class Theas:
         else:
             buf = this_value
 
-
         if buf:
             buf = buf + append_str
         else:
@@ -1278,10 +1282,8 @@ class Theas:
 
         return buf
 
-
-
-    def render(self, template_str, data = {}):
-        #Call doOnBeforeRender function(s) if provided
+    def render(self, template_str, data={}):
+        # Call doOnBeforeRender function(s) if provided
         if len(self.doOnBeforeRender):
             for this_func in self.doOnBeforeRender:
                 result_template_str, result_data = this_func(self, template_str=template_str, data=data)
@@ -1290,10 +1292,10 @@ class Theas:
                 if result_data:
                     data = result_data
 
-        #self.authenicator = str(uuid.uuid4())  #set a new authenticator GUID
+        # self.authenicator = str(uuid.uuid4())  #set a new authenticator GUID
 
         # render "function_def" template to define functions
-        #if self.template_function_def_str:
+        # if self.template_function_def_str:
         #    function_def_template = self.jinja_env.from_string(self.template_function_def_str)
         #    function_def_template.render()
 
@@ -1305,11 +1307,11 @@ class Theas:
         this_template = self.jinja_env.from_string(template_str)
         buf = this_template.render(data=data)
 
-
-        #Call doOnAfterRender function(s) if provided
+        # Call doOnAfterRender function(s) if provided
         if len(self.doOnAfterRender):
             for this_func in self.doOnAfterRender:
-                result_template_str, result_data, result_buf = this_func(self, buf=buf, template_str=template_str, date=data)
+                result_template_str, result_data, result_buf = this_func(self, buf=buf, template_str=template_str,
+                                                                         date=data)
                 if result_template_str:
                     template_str = result_template_str
                 if result_data:
@@ -1318,7 +1320,6 @@ class Theas:
                     buf = result_buf
 
         return buf
-
 
     def theas_exec(self, function_name):
         this_function = None
@@ -1333,7 +1334,6 @@ class Theas:
         if this_function is not None:
             this_result = this_function()
         return this_result
-
 
     def create_functions(self, python_source):
         """  This method allows the caller to create a new Theas method from Python source code
@@ -1350,7 +1350,8 @@ class Theas:
              to avoid name collisions.
         """
         if not ALLOW_UNSAFE_FUNCTIONS:
-            raise Exception('Error in Theas.create_functions:  ALLOW_UNSAFE_FUCTIONS = False, so this method may not be called.')
+            raise Exception(
+                'Error in Theas.create_functions:  ALLOW_UNSAFE_FUCTIONS = False, so this method may not be called.')
 
         new_functions = {}
 
@@ -1391,7 +1392,7 @@ class Theas:
 
             # store method as an attribute of this object
             # note:  this is not necessary, as the function object is saved to the .functions dictionary
-            #setattr(self, '_unsafe_' + k, mf)
+            # setattr(self, '_unsafe_' + k, mf)
 
             # clear out the temporary global function
             exec(v + ' = None', globals())
@@ -1480,7 +1481,7 @@ MIME_TYPE_EXTENSIONS = {
     '.mid': 'audio/midi',
     '.mny': 'application/x-msmoney',
     '.mov': 'video/quicktime',
-    '.mp3': 'audio/x-mpeg-3', #'audio/mpeg',
+    '.mp3': 'audio/x-mpeg-3',  # 'audio/mpeg',
     '.mp4': 'video/mp4',
     '.mp4a': 'audio/mp4',
     '.mpeg': 'video/mpeg',
@@ -1556,4 +1557,3 @@ MIME_TYPE_EXTENSIONS = {
     '.csv': 'text/csv'
 
 }
-
