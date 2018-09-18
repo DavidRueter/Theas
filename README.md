@@ -1,4 +1,4 @@
-![Theas: Business-class web apps](resources/TheasLogo.jpg?raw=true "Theas")
+![Theas: Business-class web apps](resources/TheasLogo_wTag.jpg?raw=true "Theas")
 # Theas
 
 Theas is a full-stack business-class web application solution.
