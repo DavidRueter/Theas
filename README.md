@@ -1,4 +1,4 @@
-![Theas: Business-class web apps](resources/TheasLogo.jp?raw=true "Theas")
+![Theas: Business-class web apps](resources/TheasLogo.jpg?raw=true "Theas")
 # Theas
 
 Theas is a server-side web application framework that provides:
