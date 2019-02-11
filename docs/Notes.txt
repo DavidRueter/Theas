@@ -1,0 +1,19 @@
+th:NextPage may be set by the web page--either hard-coded in static HTML, or set programatically by Javascript.
+
+On submit of the page, the value of th:NextPage will be written into the server-side copy of the Theas parameters (just as any other Theas control is updated).
+
+All Theas parameters will be serialized and passed into the Theas resource stored procedure.  This means the the stored procedure can inspect the value of th:NextPage, and can update that value--by updating @TheasParameters and returning in the first resultset (assuming that is identified as a resultset named "general" in the resource configuration.
+
+Upon completion of the execution of the stored procedure , the server-side copy of Theas paremeters will be updated according to what the stored procedure returned (just as any other Theas control is updated).
+
+It is not until after execution of the stored procedure that th:NextPage is considered.
+
+However, there are several complexities that confuse things:
+
+1) If th:PerformUpdate is set, the current resource's stored procedure will be executed (to process the update), and this procedure may return either an updated th:NextPage or RedirURL.
+
+RedirURL should have priority over th:NextPage.  If RedirURL is set, no resource should be loaded:  a 302 redirect should be issued... unless a cookie had been updated, in which case a client-side redirect to RedirURL should be issued.
+
+Currently the client-side redirect is via sn HTTP POST.  This was to support a cookie-free means of persisting the session token--i.e. a POST-only approach in which each request contains the session token in a hidden form field.  However, this approach is not fully implemented, is probably not required, and has a number of intrinsic problems.  Consequently, we should switch the client-side redirect to be via an HTTP GET.
+
+2) If th:NextPage is set to a page other than the current resource upon comletion of the update processing, the specified resource much be loaded.

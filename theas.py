@@ -290,7 +290,7 @@ class Theas:
         self.th_session = theas_session
         self.control_names = {}
 
-        self.set_value('th:SessionToken', str(self.th_session.session_token))
+        self.set_value('th:SessionToken', str(self.th_session.session_token), include_in_json=False)
         self.set_value('th:ErrorMessage', '')
         self.set_value('th:CurrentPage',
                        self.th_session.current_resource.resource_code if self.th_session.current_resource is not None else '')
@@ -657,8 +657,8 @@ class Theas:
 
         return this_result
 
-    def set_value(self, ctrl_name, new_value):
-        this_ctrl_nv, this_ctrl, value_changed = self.get_control(ctrl_name, datavalue=new_value)
+    def set_value(self, ctrl_name, new_value, include_in_json=True):
+        this_ctrl_nv, this_ctrl, value_changed = self.get_control(ctrl_name, datavalue=new_value, include_in_json=include_in_json)
 
         this_result = None
         if this_ctrl_nv is not None:
@@ -771,9 +771,17 @@ class Theas:
         #   return buf
 
     @environmentfilter
-    def theas_values_json(self, this_env, this_value, *args, **kwargs):
+    def theas_values_json(self, this_env, this_value, as_string=False, *args, **kwargs):
         this_th = self.get_controls(include_in_json_only=True)
-        return json.dumps(this_th)
+
+        result = json.dumps(this_th)
+
+        if as_string:
+            if len(result) > 2:
+                result = '{' + result[1:-1] + '}'
+            else:
+                result = ''
+        return result
 
     @environmentfilter
     def theas_base64(self, this_env, this_value, *args, **kwargs):
@@ -782,7 +790,7 @@ class Theas:
         return "'{}'".format(buf)
 
     @environmentfilter
-    def theas_resource(self, this_env, this_value, *args, **kwargs):
+    def theas_resource(self, this_env, this_value, quotes=True, *args, **kwargs):
 
         this_value = this_value.lstrip('/')
 
@@ -804,6 +812,9 @@ class Theas:
 
         # We do need to retrieve the current version number of the resource.
 
+        # Can pass in an optional parameter quotes=False to say No Quotes, which will strip out leading
+        # and trailing quotes from the result.
+
         if this_value in this_env.theas_page.th_session.resource_versions:
             this_version = str(this_env.theas_page.th_session.resource_versions[this_value]['Revision'])
 
@@ -812,7 +823,12 @@ class Theas:
 
         busted_filename = '/' + busted_filename
 
-        return json.dumps(busted_filename)
+        result = json.dumps(busted_filename)
+
+        if not quotes:
+            result = result[1:-1]
+
+        return result
 
     @environmentfilter
     def theas_include(self, this_env, this_value, output=False, delims=('[[', ']]'), *args, **kwargs):
@@ -1531,6 +1547,7 @@ MIME_TYPE_EXTENSIONS = {
     '.ttf': 'application/x-font-ttf',
     '.txt': 'text/plain',
     '.vsd': 'application/vnd.visio',
+    '.vue': 'application/javascript',
     '.wav': 'audio/x-wav',
     '.weba': 'audio/webm',
     '.webm': 'video/webm',

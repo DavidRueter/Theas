@@ -1,10 +1,9 @@
-############
 Introduction to Theas
-############
+#####################
 
-************
+
 What is Theas?
-************
+**************
 
 Theas is a turn-key web application server and development platform for building database-driven web applications.
 
@@ -23,11 +22,10 @@ Theas is a server-side web application framework that provides:
 .. note::   
     Theas does not impose any restrictions on client-side development: you are free to use whatever tools and frameworks you like.
 
-Theas is built in Python 3.4, using Tornado for the web server, Jinja2 for templating, and pymssql for MS SQL connectivity. Theas was built to work with Microsoft SQL, and in particular, the SQL-based OpsStream business execution platform, but can be used with other database platforms as well.
+Theas is built in Python (currently 3.6), using Tornado for the web server, Jinja2 for templating, and pymssql for MS SQL connectivity. Theas was built to work with Microsoft SQL, and in particular, the SQL-based OpsStream business execution platform, but can be used with other database platforms as well.
 
-*******
 Overview
-*******
+********
 
 Theas (Greek word for goddess) is a server-side web application framework for building database-driven web applications to be used by authenticated users. Theas is not designed for public facing websites.
 
@@ -43,9 +41,9 @@ Theas can be extended to use any database engine, but it was written to use Micr
 
 Though Theas is a valuable framework for web application development on its own, it was developed as a front end for the commercially-available OpsStream business execution platform. When paired with OpsStream, Theas can provide a great deal of functionality including dynamic database schema modification (configured from a browser), robust business process execution / workflow capabilities, and comprehensive role-based security.
 
-*******
+
 Getting started
-*******
+***************
 
 Theas requires a handful of configuration settings be set. These are stored in the file settings.cfg but they can also be passed in as command-line parameters when Theas is launched. Settings include things like the HTTP port Theas is to use and the database connection information.
 
@@ -85,11 +83,13 @@ Theas was designed to work with and empower Jinja to do more.
 If Jinja is a temple, Theas (goddess) seems like an appropriate name to convey the relationship between Jinja and Theas.
 
 Theas not only controls Jinja, but provides power to Jinja. Theas is the goddess of the temple.
-*******
+
+
 Architecture
-*******
+************
+
 Database Overview
-=======
+=================
 
 Theas is designed to work with Microsoft SQL (version 2008R2 or later). More specifically, Theas was designed with the MSSQL-based OpsStream (http://opsstream.com) business process execution system in mind--but Theas can be run with or without OpsStream.
 
@@ -129,7 +129,7 @@ All other stored procedures are web resource-specific. These are created to retu
 
 
 Jinja Environment
-=======
+=================
 
 The Jinja templating engine uses an "environment" that is often instantiated as a global environment used for rendering all templates in an application.
 
@@ -148,38 +148,46 @@ So in Theas, the Jinja environment is handled kind of like the SQL connection: t
 
 UX Flow
 =======
+
 Page Lifecycle
-=======
+==============
 Theas Controls
 
-*******
-Using Theas
-*******
-Working with Forms
-=======
-Async Requests
-=======
-Resources
-=======
-Request Lifecycle
-=======
-Error Handling
-=======
-Client-side Javascript
-=======
-Controlling Navigation
-=======
 
-*******
+Using Theas
+***********
+
+Working with Forms
+==================
+
+Async Requests
+==============
+
+Resources
+=========
+
+Request Lifecycle
+=================
+
+Error Handling
+==============
+
+Client-side Javascript
+======================
+
+Controlling Navigation
+======================
+
+
 Session Management
-*******
+******************
 
 One essential aspect of a web application is “session state management”. HTTP is sessionless: the browser makes a request, the web server sends a response, end of story. There is nothing in HTTP that ties a subsequent request together with the first, and nothing that manages a “session” of interactions with the same user within a period of time. Sessions often involve authentication (logging in with a username and password, for example). Sessions always involve preserving some data between multiple requests.
 
 Theas does a number of things to take care of session state management for your applications.
 
 Establishment of a session
-----------
+--------------------------
 
 When a browser makes a request to Theas, the Theas server first checks for the presence of a SessionToken sent by the browser. Theas looks for the session token in a request argument named theas:th:ST (either POST or GET). If it doesn’t find a session token there, Theas then looks in a cookie named theas:th:ST.
 
@@ -188,7 +196,7 @@ If Theas cannot find a SessionToken and a corresponding valid session in memory 
 If Theas does find a valid session in memory at the Theas server corresponding to the SessionToken from the browser, Theas retrieves that session and locks it for the duration of the processing of the request. During this time the server can access built-in Theas information and functionality, the values of Theas controls created by the web application, and a persistent SQL connection dedicated to this session.
 
 Authentication
-----------
+--------------
 
 There are several ways the developer can use authentication. It might be that some pages should be viewable by public, non-authenticated users, while some pages might require authentication to view.
 
@@ -225,7 +233,7 @@ Note that other combinations of these flags is possible. IsPublic = false and Re
 If IsPublic = true and RenderJinjaTemplate = true, the IsPublic = true flag would take priority, and the resource would be served up directly without template processing occurring. This combination has no useful purpose. To avoid confusion, RenderJinjaTemplate never be set to true if IsPublic is set to true. There is no way to render a jinja template for a public resource. (But you can render a Jinja template for a non-authenticated user.)
 
 SQL Connection management
-----------
+-------------------------
 
 Theas works with Microsoft SQL Server. Resources are stored in the database, and many resource records contain references to stored procedures that are executed when processing requests for these resources.
 
@@ -236,7 +244,7 @@ Theas takes a different approach. Each session will establish a SQL connection. 
 This approach of session-centric SQL connection management provides the benefits of connection pooling (i.e. reusing a SQL connection for multiple requests), but additionally provides the benefit of being able to easily manage session state in SQL: information stored in the SQL connection (such as CONTEXT_INFO) is available to each SQL call made. This provides a way for SQL to securely know the authenticated user on each call, without having to have the web server pass in this information with each call.
 
 Theas Controls (aka Theas Params)
-----------
+---------------------------------
 
 Theas provides a simple way to set server-side session-scoped variables. This can be done from a SQL stored procedure, a tag in an HTML template, a JavaScript call, or an HTTP form post.
 
@@ -257,14 +265,13 @@ Set the parameter value from a SQL stored procedure and return as part of TheasP
 Have JavaScript make an async call to a Theas resource...in which the SQL stored proc can update the parameter value as above, and in which the async response can automatically have a payload that will automatically update the JavaScript / HTML copies of these parameters.
 
 Files / Binary data
-----------
+-------------------
 
 The Theas server can receive HTTP form posts containing files. When received, the Theas server automatically inserts the data received into an internal temporary SQL table. In this way, the Theas resource stored procedures have direct access to both metadata about the file and the actual binary data itself.
 
 
-*******
 URL Routing
-*******
+***********
 
 A website is generally comprised of a number of HTML pages. Each page generally has one or more link to a different page. These links are generally a URL to a specific location, and may either be absolute (and thus contain the complete URL beginning with HTTP://) or relative to the site (containing no leading slash).
 
@@ -331,48 +338,4 @@ An alternate approach that is sometimes used in modern web applications and some
 For example, this application might display some menu buttons. When a button is clicked, instead of the browser navigating to a different URL, no request is sent to the web server at all. Instead, the JavaScript application that is running simply take appropriate action based on the click, and updates the window accordingly. Some people think that SPA’s are a good thing and think that they provide a better user experience. Some people think that they are a bad thing, saying that they are more complicated to create, harder to support, face challenges with search engines, don’t work natively with the browser’s “back” button, and don’t deliver as good of a user experience.
 
 In a single-page application, there aren’t really “pages” to route to. (I guess it would be possible to have a JavaScript router load pages from URLs and make these available inside a SPA…but this doesn’t seem to be too useful.) Instead, the JavaScript app would simply update the browser window with new content as needed. If using Vue.js (a JavaScript library for updating the browser window) you could use a router to route URLs to Vue “components”. Each Vue component would be responsible for generating content for the view indicated by the route.
-
-Section
-=======
-SubSection
-----------
-SubSection2
-^^^^^^^^^^^
-
-Paragraph title
-"""""""""""""""""
-
-Pargraph
-*****************
-
-
-``Monospace``
-
-
-    Indent a
-
-    Indent b
-
-    Indent C
-
-
-- List 1
-- List 2
-- List 3
-- List 4
-
-
-    #. Num 1
-    #. Num 2
-    #. Num 3
-
-        #. Num 3a
-        #. Num 3b
-    
-    #. Num 4
-
-`abc <http://xxx>`_
-
-.. image:: http://myimage.com
-
 

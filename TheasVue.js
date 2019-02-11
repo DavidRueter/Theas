@@ -1,3 +1,8 @@
+// iOS does not support FormData.set(), so we replace it with FormData.append()
+if (!FormData.prototype.set) {
+   FormData.prototype.set = FormData.prototype.append;
+}
+
 function Theas(vue) {
     // save reference to Vue object that can be used in async callbacks
     this.thatVue = vue;
@@ -815,7 +820,7 @@ Theas.prototype.submitForm = function (v, config) {
 
 };
 
-Theas.prototype.clearError = function (suppressFetch) {
+Theas.prototype.clearError = function (doFetchData) {
     // save reference to Theas object
     let thatTheas = this;
 
@@ -826,7 +831,7 @@ Theas.prototype.clearError = function (suppressFetch) {
                     onResponse: function (rd, response) {
                         thatTheas.thatVue.theasParams.th$ErrorMessage = '';
 
-                        if (typeof thatTheas.thatVue.fetchData == 'function' && !suppressFetch) {
+                        if (typeof thatTheas.thatVue.fetchData == 'function' && doFetchData) {
                             // try to immediately do a fetch
                             thatTheas.thatVue.fetchData();
                         }

@@ -140,9 +140,12 @@ $RECYCLE.BIN/
 
 .idea/
 venv_py*/
+/debug/
 /HTMLFiles/
 /misc/
 /node_modules/
+*.zip
+*.exe
 
 settings.cfg
 TheasServer.exe
