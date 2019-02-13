@@ -776,7 +776,7 @@ class ThCachedResources:
                             this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
                             this_static_blocks_dict['thInclude_' + row['ResourceCode']] = buf
 
-                if resource_code and row_count == 0:
+                if resource_code and resource_code != '~' and row_count == 0:
                     # do negative cache
                     this_resource = ThResource()
                     this_resource.exists = False
