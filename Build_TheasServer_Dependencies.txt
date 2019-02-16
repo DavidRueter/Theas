@@ -22,7 +22,7 @@ To set up TheasServer dev environment:
 3e) Install CMake (from https://cmake.org/download/)
 3f) Install git (from https://git-scm.com/download)
 3g) Copy C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\vcvars32.bat to \Prog\vc32.bat
-3h) C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\x86_amd64\vcvarsx86_amd64.bat to \Prog\vc32.bat
+3h) C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\x86_amd64\vcvarsx86_amd64.bat to \Prog\vc64.bat
 3i) In files copied in 3g and 3h, edit and add to the path the appropriate Visual Studio .\bin folder
 3j) Also, add paths to NASM, MINGW, CMAKE, GIT, and PERL in that order
 
