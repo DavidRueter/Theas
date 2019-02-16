@@ -2,6 +2,7 @@
 
 import sys
 import os
+import platform
 import datetime
 import threading
 import time
@@ -27,7 +28,9 @@ import theas
 
 import _mssql
 
-from win32 import servicemanager
+if platform.system() == 'Windows':
+    from win32 import servicemanager
+
 import logging
 
 import TheasCustom
@@ -4024,10 +4027,11 @@ class ThHandler_PurgeCache(ThHandler):
 
 
 def write_winlog(*args):
-    if len(args) >= 2:
-        servicemanager.LogInfoMsg(args[1])
-    else:
-        servicemanager.LogInfoMsg(args[0])
+    if platform.system() == 'Windows':
+        if len(args) >= 2:
+            servicemanager.LogInfoMsg(args[1])
+        else:
+            servicemanager.LogInfoMsg(args[0])
 
 
 def get_program_directory():
