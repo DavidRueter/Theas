@@ -2,6 +2,7 @@
 
 import sys
 import os
+import platform
 import datetime
 import threading
 import time
@@ -32,7 +33,15 @@ import logging
 import TheasCustom
 import urllib.parse as urlparse
 
-from TheasServerSvc import write_winlog
+if platform.system() == 'Windows':
+    from TheasServerSvc import write_winlog
+else:
+    def write_winlog(*args):
+        if len(args) >= 2:
+            print(args[1])
+        else:
+            print(args[0])
+
 
 # import asyncio
 # import msvcrt
@@ -4102,12 +4111,11 @@ def run(run_as_svc=False):
     global USE_WORKER_THREADS
     global MAX_WORKERS
 
-    msg = 'Theas app getting ready...'
-    write_winlog(msg)
 
     if LOGGING_LEVEL:
+        msg = 'Theas app getting ready...'
+        write_winlog(msg)
         print(msg)
-    write_winlog(msg)
 
     if not run_as_svc:
         # Trap breaks.
