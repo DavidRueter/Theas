@@ -27,11 +27,12 @@ import theas
 
 import _mssql
 
-from win32 import servicemanager
 import logging
 
 import TheasCustom
 import urllib.parse as urlparse
+
+from TheasServerSvc import write_winlog
 
 # import asyncio
 # import msvcrt
@@ -4023,12 +4024,6 @@ class ThHandler_PurgeCache(ThHandler):
         self.finish()
 
 
-def write_winlog(*args):
-    if len(args) >= 2:
-        servicemanager.LogInfoMsg(args[1])
-    else:
-        servicemanager.LogInfoMsg(args[0])
-
 
 def get_program_directory():
     program_cmd = sys.argv[0]
@@ -4081,8 +4076,6 @@ class ThWSHandler_Test(tornado.websocket.WebSocketHandler):
         ThSession.cls_log('WebSocket', 'Client disconnected')
 
 
-
-
 def run(run_as_svc=False):
     global G_program_options
     global G_server_is_running
@@ -4110,6 +4103,8 @@ def run(run_as_svc=False):
     global MAX_WORKERS
 
     msg = 'Theas app getting ready...'
+    write_winlog(msg)
+
     if LOGGING_LEVEL:
         print(msg)
     write_winlog(msg)
