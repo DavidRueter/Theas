@@ -153,6 +153,8 @@ class TheasControl:
         # self.authenticator = None
         self.checked = ''
         self.value = ''
+        self.default_value = ''
+        self.unchecked_value = ''
         self.caption = ''
         self.attribs = OrderedDict()
 
@@ -164,7 +166,7 @@ noneTheasControl = TheasControl()
 
 
 class TheasControlNV:
-    def __init__(self, name='', control_type=None):
+    def __init__(self, name='', control_type=None, default_value=None):
         self.name = name
         # Name of the name/value pair (i.e. the HTML "name" attribute of an input control, etc.)
         self.controls = OrderedDict()
@@ -180,6 +182,8 @@ class TheasControlNV:
         # correspond to a child control, such as radio, checkbox, or select
         self.value = ''
         # The current value, i.e. what jquery .val() would return for this name
+        self.__default_value = default_value
+        # For checkbox, radio, and select, the default value to use if __datavalue is not set
         self.control_type = control_type
         # Type of control:  'hidden', 'text', 'password', 'radio', 'checkbox', 'select', 'textarea', etc.
         self.include_in_json = False
@@ -205,9 +209,16 @@ class TheasControlNV:
         if self.control_type in ('radio', 'checkbox', 'select'):
             for temp_ctrlvalue, temp_ctrl in self.controls.items():
                 if temp_ctrl is not None:
-                    temp_ctrl.checked = (str(self.__datavalue) == str(temp_ctrl.value))
+                    temp_ctrl.checked = (str(self.__datavalue) == str(temp_ctrl.value)) or \
+                                        (
+                                            (self.__datavalue is None or str(self.__datavalue) == '') and
+                                            str(self.__default_value) == str(temp_ctrl.value)
+                                        )
+
                     if temp_ctrl.checked:
                         self.value = temp_ctrl.value
+                    else:
+                        self.value = temp_ctrl.unchecked_value
         else:
             self.value = self.datavalue
 
@@ -438,7 +449,7 @@ class Theas:
 
         # If control is a radio, checkbox or select, you can pass in value='yyy' which does
         # not set the value of the control but merely defines the value that will be used if the
-        # control element ins checked.
+        # control element is checked.
 
         # For other types, it is an error to pass in value='yyy'
 
@@ -460,12 +471,20 @@ class Theas:
         this_ctrl = None
         this_ctrl_nv = None
         value_changed = False
+        is_new_control = False
 
         save_param = True
         if 'persist' in kwargs:
             if kwargs['persist'] in ('0', 'false', 'False', 'no'):
                 save_param = False
-        # Note: in the future we may implement other values for persit (session, user, page, pageview, etc.)
+        # Note: in the future we may implement other values for persist (session, user, page, pageview, etc.)
+
+        default_value_param = None
+        if 'default' in kwargs:
+            default_value_param = kwargs['default']
+
+            if isinstance(default_value_param, (str, bytes, bytearray)):
+                urlparse.quote(default_value_param)
 
         if ctrl_name:
             # The HTML <input> names begin with theas:, but in Python and elsewhere
@@ -482,7 +501,9 @@ class Theas:
                     control_type = 'hidden'
 
                 if auto_create:
-                    this_ctrl_nv = TheasControlNV(name=ctrl_name, control_type=control_type)
+                    this_ctrl_nv = TheasControlNV(name=ctrl_name, control_type=control_type,
+                                                  default_value=default_value_param)
+                    is_new_control = True
                     if save_param:
                         self.control_names[ctrl_name] = this_ctrl_nv
                     else:
@@ -614,6 +635,15 @@ class Theas:
                     # datavalue property setter will set .checked which will not yet be set in the case of a new
                     # auto-created control.
                     this_ctrl_nv.datavalue = datavalue_param
+                else:
+                    if is_new_control and default_value_param is not None:
+                        if this_ctrl_nv.datavalue != default_value_param:
+                            value_changed = True
+                        # We want to go ahead and assign this value even if we don't think it has changed, because the
+                        # datavalue property setter will set .checked which will not yet be set in the case of a new
+                        # auto-created control.
+                        this_ctrl_nv.datavalue = default_value_param
+
 
                 if this_ctrl is None:
                     this_ctrl = noneTheasControl
@@ -741,6 +771,12 @@ class Theas:
         if len(self.doOnAfterProcessRequest):
             for this_func in self.doOnAfterProcessRequest:
                 this_func(self, request_handler=request_handler, accept_any=accept_any)
+
+        if len(changed_controls) > 0:
+            for this_ctrl_nv in changed_controls:
+                self.th_session.log('Theas', 'TheasParams ' + this_ctrl_nv.name + '=' + this_ctrl_nv.value)
+        else:
+            self.th_session.log('Theas', 'No TheasParams were updated')
 
         return changed_controls
 
@@ -902,7 +938,7 @@ class Theas:
         # This filter is called like:
         #         {{ data._Theas.osST|hidden(name="theas:HelloWorld") }}
         # The arguments  behave as documented at: http://jinja.pocoo.org/docs/dev/api/#custom-filters
-        # The environment is passed as the first argument.  The value that the fitler was called on is
+        # The environment is passed as the first argument.  The value that the filter was called on is
         # passed as the second argument (this_value).  Additional arguments inside the parenthesis are
         # passed in args[] or kwargs[]
 
@@ -918,7 +954,7 @@ class Theas:
             ctrl_name = ctrl_name[6:]
 
         # id is not used for hidden
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, default=this_value,
                                                                        control_type='hidden', **kwargs)
 
         value_str = ''
