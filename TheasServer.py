@@ -1,4 +1,4 @@
-#!usr/bin/python
+#usr/bin/python
 
 import sys
 import os
@@ -13,11 +13,13 @@ import traceback
 import string
 import json
 
-import tornado.web
+
+import tornado.httpserver
 import tornado.websocket
 import tornado.ioloop
+import tornado.web
 import tornado.options
-import tornado.httpserver
+
 
 
 from multiprocessing import Lock
@@ -30,17 +32,26 @@ import _mssql
 
 import logging
 
-import TheasCustom
 import urllib.parse as urlparse
 
-if platform.system() == 'Windows':
-    from TheasServerSvc import write_winlog
-else:
+import TheasCustom
+
+# We may be run directly, or we may be run via TheasServerSvc
+if __name__ == "__main__":
     def write_winlog(*args):
         if len(args) >= 2:
             print(args[1])
         else:
             print(args[0])
+else:
+    if platform.system() == 'Windows':
+        from TheasServerSvc import write_winlog
+    else:
+        def write_winlog(*args):
+            if len(args) >= 2:
+                print(args[1])
+            else:
+                print(args[0])
 
 
 # import asyncio
@@ -88,7 +99,8 @@ __author__ = 'DavidRueter'
 #    except Exception:
 #        print('ERROR: ' + str(value.args[0][1]))
 
-THEAS_VERSION = '0.90.1.50'  # from version.cfg
+THEAS_VERSION = '0.90.1.255'  # from version.cfg
+THEAS_VERSION_INT = '255'
 
 SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
 REMOVE_EXPIRED_THREAD_SLEEP = 60  # Seconds to sleep in between polls in background thread to check for expired sessions, 0 to disable
@@ -112,6 +124,9 @@ USER_COOKIE_NAME = 'theas:th:UserToken'
 
 COOKIE_SECRET = 'tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay='
 
+MAX_CACHE_ITEM_SIZE = 1024 * 1024 * 100      # Only cache SysWebResources that are less than 100 Meg in size
+MAX_CACHE_SIZE = 1024 * 1024 * 1024 * 2      # Use a maximum of 2 GB of cache
+
 # NOTE:
 # 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
 #    class that uses background threads via the @run_on_executor decorator has its own thread pool.  Thus the
@@ -124,7 +139,6 @@ COOKIE_SECRET = 'tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay='
 #    Tornado's module thread.py, class ThreadPoolExecutor._adjust_thread_count, and in particular, this comment:
 #        # TODO(bquinlan): Should avoid creating new threads if there are more
 #        # idle threads than items in the work queue.
-
 
 G_sessions = None  # Global list of sessions
 G_cached_resources = None  # Global list of cached resources
@@ -497,16 +511,43 @@ class ThStoredProc:
 
                 this_sql = 'EXEC ' + self.stored_proc_name
 
+                # NOTE:  We don't want a SQL injection risk.  (We'd prefer to let the _mssql library
+                # execute the stored procedure and be responsible for escaping parameter values.)
+                # But given the limitations mentioned above, this is not an option at this time.
+                # We must build our own string that performs the EXEC myproc @Param1='abc'.
+                # Our parameter values are already split into separate dictionary items
+                # in self.parameters.  Now we need to turn each parameter into a string like
+                # @Param1='abc' and concatenate these together.
+                # As long as any single quotes embedded in the parameter values are replaced with
+                # 2 single quotes, and that there are no single quotes at all in parameter names,
+                # we should be safe.
+
+                this_params_str = ''
+
                 for this_name, this_value in self.parameters.items():
                     if isinstance(this_name, str) and this_name.startswith('@'):
-                        this_sql += ' ' + this_name + '='
-                        this_sql += 'NULL' if this_value is None else '\'' + str(this_value) + '\''
-                        this_sql += ', '
+                        # Strip out single quotes from parameter name.  (Shouldn't be any, but we don't
+                        # want someone to try to use this as a SQL injection vector.)
+                        this_params_str += ' ' + this_name.replace('\'', '') + '='
 
-                if this_sql.endswith(', '):
-                    this_sql = this_sql[:-2]
+                        # Replace each single quote with two single quotes.  If param value is None
+                        # output NULL (with no quotes)
+                        this_params_str += '\'' + str(this_value).replace('\'', '\'\'') + '\''\
+                            if this_value is not None else 'NULL'
 
-                self.th_session.sql_conn.execute_query(this_sql)
+                        this_params_str += ','
+
+                if this_params_str.endswith(','):
+                    this_params_str = this_params_str[:-1]
+
+                # Note that we could instead have built the string as '@Param1=%s, @Param2=%s, @Param3=%s'
+                # Then theoretically we could then pass in list(self.parameters.values())
+                # This way _mssql could do the quoting of param values for us, and dwe wouldn't need
+                # to concatenate all the values.  But null values would be a problem
+                # self.th_session.sql_conn.execute_query(
+                #   this_sql + '@Param1=%s, @Param2=%s', list(self.parameters.values()))
+
+                self.th_session.sql_conn.execute_query(this_sql + ' ' + this_params_str)
 
                 if fetch_rows:
                     self.resultset = [row for row in self.th_session.sql_conn]
@@ -608,19 +649,31 @@ class ThCachedResources:
         self.__static_blocks_dict = {}
         self.__resource_versions_dict = {}
         self.default_path = G_program_options.settings_path
+        self.cache_bytes_used = 0
 
     def __del__(self):
         self.lock()
 
         try:
             for resource_code in self.__resources:
+
+                this_resource = self.__resources[resource_code]
+                if this_resource.data is not None:
+                    self.cache_bytes_used = self.cache_bytes_used - len(this_resource.data)
+                this_resource = None
+
                 self.__resources[resource_code] = None
 
             self.__resources = None
             del self.__resources
 
             for resource_code in self.__static_blocks_dict:
-                self.__resources[resource_code] = None
+                this_resource = self.__static_blocks_dict[resource_code]
+                if this_resource.data is not None:
+                    self.cache_bytes_used = self.cache_bytes_used - len(this_resource.data)
+                this_resource = None
+
+                self.__static_blocks_dict[resource_code] = None
 
             self.__static_blocks_dict = None
             del self.__static_blocks_dict
@@ -651,11 +704,16 @@ class ThCachedResources:
         return len(self.__resources)
 
     def add_resource(self, resource_code, resource_dict):
-        self.lock()
-        try:
-            self.__resources[resource_code] = resource_dict
-        finally:
-            self.unlock()
+
+        if resource_dict.data is None or\
+                (len(resource_dict.data) < MAX_CACHE_ITEM_SIZE and self.cache_bytes_used < MAX_CACHE_SIZE):
+            self.lock()
+            try:
+                self.__resources[resource_code] = resource_dict
+                if resource_dict.data is not None:
+                    self.cache_bytes_used = self.cache_bytes_used + len(resource_dict.data)
+            finally:
+                self.unlock()
 
     def load_resource(self, resource_code, th_session, all_static_blocks=False, sessionless=False, from_filename=None,
                       is_public=False, is_static=False, get_default_resource=False):
@@ -683,8 +741,10 @@ class ThCachedResources:
                 this_resource.is_public = is_public
                 this_resource.is_static = is_static
                 this_resource.requires_authentication = False
+                this_resource.revision = THEAS_VERSION_INT  # use Theas version
 
                 self.add_resource(resource_code, this_resource)
+
             else:
                 raise TheasServerError(
                     'Error due to request of file {} from the file system.  Server is configured to server resources only from the database.'.format(
@@ -778,8 +838,8 @@ class ThCachedResources:
                         if 'Revision' in row:
                             this_resource.revision = row['Revision']
 
-                        if this_resource.resource_code and \
-                                        this_resource.resource_code != '~':  # added 2/11/2019:  don't want to cache default resource
+                        if this_resource.resource_code and this_resource.resource_code != '~':
+                            # added 2/11/2019:  don't want to cache default resource
                             self.add_resource(row['ResourceCode'], this_resource)
 
                         if all_static_blocks:
@@ -801,9 +861,9 @@ class ThCachedResources:
                             # note:  should only be one row
                             row_count += 1
                             buf = row['JSON_CurResourceRevisions']
-                            ThCachedResources.resource_versions_dict = dict(
-                                (v["ResourceCode"], v) for v in json.loads(buf))
 
+                            new_dict = dict((v["ResourceCode"], v) for v in json.loads(buf))
+                            ThCachedResources.resource_versions_dict = new_dict
                 this_proc = None
                 del this_proc
 
@@ -900,7 +960,70 @@ class ThCachedResources:
         self.load_resource(None, None, all_static_blocks=True, sessionless=True)
 
 
+
 # -------------------------------------------------
+# NOT FULLY IMPLEMENTED support for Service Broker
+# -------------------------------------------------
+class SBMonitor:
+
+    def __init__(self):
+        self.waiting_for_busy = {}
+        self.background_thread_running = False
+
+        # ThStoredProc will create a SQL connection for us in a ThSession
+        # This is not a normal user session, so we create the session with
+        # sessionless=True
+        self.th_session = ThSession(None, sessionless=True)
+
+        self.queue_root = 'TheasWebSocks'
+        self.auto_reply = 0
+        self.wait_length = 2000 # wait for 2 seconds for a message.  App needs to wait this long to shut down too!
+
+        self.spname_listen = 'opsstream.spsysEventsSBHandle'
+        self.spname_reply = 'opsstream.spsysEventsSBReply'
+
+    def _process_message(self):
+        pass
+
+    def _exec_sb_monitor(self):
+        self.th_session = datetime.datetime.now() + datetime.timedelta(minutes=SESSION_MAX_IDLE)
+
+        sp_listen = ThStoredProc(self.spname_listen, self.th_session)
+        sp_reply = ThStoredProc(self.spname_reply, self.th_session)
+
+
+        if sp_listen.is_ok:
+            sp_listen.bind(self.queue_root, _mssql.SQLVARCHAR, '@SBRootName')
+            sp_listen.bind(self.auto_reply, _mssql.SQLVARCHAR, '@AutoReply')
+            sp_listen.bind(self.wait_length, _mssql.SQLVARCHAR, '@Timeout')
+
+        if sp_reply.is_ok:
+            sp_reply.bind(self.queue_root, _mssql.SQLVARCHAR, '@SBRootName')
+
+        result_value = sp_listen.execute()
+
+        for row in sp_listen.resultset:
+            dialog_handle = row['DlgHandle']
+
+            # received a message
+            self._process_message()
+
+        dialog_handle = None
+
+        for row in sp_listen.resultset:
+            dialog_handle = row['DlgHandle']
+            user_token = row['UserToken']
+            username = row['UserName']
+
+
+    def start_sb_thread(self):
+        self.background_thread_running = True
+        expire_thread = threading.Thread(target=self._poll_remove_expired, name='ThSessions Cleanup')
+        expire_thread.start()
+
+
+
+    # -------------------------------------------------
 # Global session list
 # -------------------------------------------------
 class ThSessions:
@@ -1254,7 +1377,7 @@ class ThSession:
             this_sess = G_sessions.retrieve_session(session_token, comments=comments, do_log=do_log)
 
         if this_sess is not None:
-            this_sess.log('Session', 'Obtained existing session', this_sess.session_token)
+            this_sess.log('Session', 'Obtained existing session.  Attempting lock.', this_sess.session_token)
             lock_succeeded = this_sess.get_lock(handler_guid=handler_guid)
 
             if not lock_succeeded:
@@ -1267,7 +1390,7 @@ class ThSession:
         elif not failed_to_lock:
             if inhibit_create:
                 # not allowed to start new session
-                cls.cls_log('Sessions', 'Need to create new session, but inhibit_crecate prevents new session')
+                cls.cls_log('Sessions', 'Need to create new session, but inhibit_create prevents new session')
             else:
                 # start new session
                 session_token = str(uuid.uuid4())
@@ -1353,6 +1476,9 @@ class ThSession:
                         # Initialize theas session:  stored proc returns SQL statements we need to execute
                         proc = ThStoredProc('theas.spgetInitSession', self)  # SOS Agri:  must be spInitSession2
                         if proc.is_ok:
+                            if '@ServerPrefix' in proc.parameter_list:
+                                proc.bind(G_program_options.server_prefix, _mssql.SQLCHAR, '@ServerPrefix')
+
                             result_value = proc.execute()
                             for row in proc.resultset:
                                 self.sql_conn.execute_non_query(row['SQLToExecute'])
@@ -1425,12 +1551,12 @@ class ThSession:
                 # caller didn't specify username/password or user-token, so check for a form
                 # post from the login page
                 if 'u' in self.current_handler.request.arguments:
-                    username = self.current_handler.get_argument('u')[0]
+                    username = self.current_handler.get_argument('u')
                 elif 'theas:Login:UserName' in self.current_handler.request.arguments:
                     username = self.current_handler.get_argument('theas:Login:UserName')
 
                 if 'pw' in self.current_handler.request.arguments:
-                    password = self.current_handler.request.get_argument('pw')
+                    password = self.current_handler.get_argument('pw')
                 elif 'theas:Login:Password' in self.current_handler.request.arguments:
                     password = self.current_handler.get_argument('theas:Login:Password')
 
@@ -1571,7 +1697,7 @@ class ThSession:
             elif self.current_resource and self.current_resource.resource_code:
                 url = self.current_resource.resource_code
             else:
-                url = '/'
+                url = '~'
 
         if action == 'get':
             buf = '''<!doctype html>
@@ -1768,7 +1894,6 @@ class ThHandler(tornado.web.RequestHandler):
             ThSession.cls_log('Cookies', 'Flag cookies_changed set to {}'.format(new_val))
             self.__cookies_changed = new_val
 
-
     def get_response_info(self, resource_code, th_session, sessionless=False):
         '''
         Determine response length and content type.  Used for HEAD requests.
@@ -1826,7 +1951,6 @@ class ThHandler(tornado.web.RequestHandler):
 
         return response_info
 
-
     def retrieve_cookies(self):
         self.__cookie_st = None
         self.__cookie_usertoken = None
@@ -1866,7 +1990,6 @@ class ThHandler(tornado.web.RequestHandler):
                 self.set_secure_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
             else:
                 self.set_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
-
 
     def check_xsrf_cookie(self):
         """
@@ -1950,6 +2073,191 @@ class ThHandler(tornado.web.RequestHandler):
 
             if self.session is not None:
                 self.session.finished()
+
+    def exec_stored_proc(self, stored_proc_name, cmd='', path_params=''):
+        buf = None
+
+        if stored_proc_name:
+
+            row_count = 0
+
+            self.session.log('Handler', 'Handler stored proc is: {}'.format(stored_proc_name))
+            self.session.log('Handler',
+                             'Resource code is: {}'.format(self.session.current_resource.resource_code))
+
+            proc = ThStoredProc(stored_proc_name, self.session)
+
+            if not proc.is_ok:
+                self.session.log('Handler',
+                                 'ERROR: stored_proc_name {} is not valid. in ThHandler.exec_stored_proc'.format(
+                                     stored_proc_name))
+            else:
+                form_params = self.request.body_arguments
+
+                # We want to serialize form data (excluding theas: fields)
+                form_params_str = ''
+                for key in form_params:
+                    if not key.startswith('theas:'):
+                        this_val = form_params[key]
+
+                        if isinstance(this_val, list) and len(this_val) > 0:
+                            this_val = this_val[0]
+
+                        if isinstance(this_val, bytes):
+                            this_val = this_val.decode('utf-8')
+                        elif this_val:
+                            this_val = str(this_val)
+
+                        form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
+
+                # We also want to serialize all Theas controls
+                theas_params_str = self.session.theas_page.serialize()
+
+                proc.refresh_parameter_list()
+
+                if '@Command' in proc.parameter_list and cmd:
+                    proc.bind(cmd, _mssql.SQLCHAR, '@Command')
+
+                if '@Document' in proc.parameter_list:
+                    proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
+
+                if '@RawHTTPCommand' in proc.parameter_list:
+                    proc.bind(self.request.uri, _mssql.SQLCHAR, '@RawHTTPCommand')
+
+                if '@PathFull' in proc.parameter_list:
+                    proc.bind(self.request.path, _mssql.SQLCHAR, '@PathFull')
+
+                if '@PathParams' in proc.parameter_list and path_params:
+                    proc.bind(path_params, _mssql.SQLCHAR, '@PathParams')
+
+                if '@HTTPParams' in proc.parameter_list:
+                    proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
+
+                if '@FormParams' in proc.parameter_list:
+                    proc.bind(form_params_str, _mssql.SQLCHAR, '@FormParams')
+
+                if '@TheasParams' in proc.parameter_list:
+                    proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams')
+
+                if '@HTTPHeaders' in proc.parameter_list:
+                    headers_str = ''
+                    this_dict = dict(self.request.headers)
+                    for key in this_dict:
+                        this_val = this_dict[key]
+
+                        if isinstance(this_val, list) and len(this_val) > 0:
+                            this_val = this_val[0]
+
+                        if isinstance(this_val, bytes):
+                            this_val = this_val.decode('utf-8')
+                        elif this_val:
+                            this_val = str(this_val)
+
+                        headers_str = headers_str + '&' + key + '=' + urlparse.quote(this_val)
+
+                    proc.bind(headers_str, _mssql.SQLCHAR, '@HTTPHeaders')
+
+                if '@RemoteIP' in proc.parameter_list:
+                    proc.bind(self.request.remote_ip, _mssql.SQLCHAR, '@RemoteIP')
+
+                if '@UserAgent' in proc.parameter_list:
+                    proc.bind(self.request, _mssql.SQLCHAR, '@UserAgent')
+
+                # Execute stored procedure
+                proc_result = proc.execute(fetch_rows=False)
+
+                redirect_to = None
+                theas_params_str = ''
+                new_cookies_str = ''
+                header_str = ''
+
+                buf = ''
+
+                # For the async stored proc, we are expecting it to return only a single resultset, and in most
+                # cases to return only a single row.
+
+                # We watch for a few special column names:  TheasParams is a column the stored proc can use to
+                # return name/value pairs that should update the theas_page.controls.  AsyncResponse is a column
+                # that the stored proc can use to return raw data that will be passed on to the browser as the
+                # response to the async request.
+
+                # If the async stored proc does return multiple rows, these column values from each row are
+                # concatenated together.
+
+                if proc.th_session.sql_conn is not None:
+
+                    for row in proc.th_session.sql_conn:
+                        row_count += 1
+
+                        if row_count > 1:
+                            buf = buf + '&'
+
+                        if 'ErrorMessage' in row:
+                            if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
+                                # self.session.theas_page.set_value('theas:th:ErrorMessage', row['ErrorMessage'])
+                                # the stored proc can set th:ErrorMessage in TheasParams if it wants.
+                                # If the stored proc returns an ErrorMessage column, we send that as the response
+                                # without updating the TheasParam at the server
+                                buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(row['ErrorMessage'])) + '&'
+
+                        if 'TheasParams' in row:
+                            if row['TheasParams'] is not None:
+                                theas_params_str = theas_params_str + row['TheasParams']
+
+                        if 'Cookies' in row:
+                            if row['Cookies'] is not None:
+                                new_cookies_str = new_cookies_str + row['Cookies']
+
+                        # Check to see if stored proc indicates we should redirect
+                        if 'RedirectTo' in row:
+                            redirect_to = row['RedirectTo']
+
+                        if 'HTTPHeaders' in row:
+                            header_str = row['HTTPHeaders']
+
+                        if 'AsyncResponse' in row:
+                            if row['AsyncResponse'] is not None:
+                                buf = buf + row['AsyncResponse']
+
+                self.session.log('Handler', '{row_count} rows returned by handler stored proc'.format(
+                    row_count=row_count))
+
+                changed_controls = None
+
+                if theas_params_str:
+                    changed_controls = self.session.theas_page.process_client_request(
+                        buf=theas_params_str, accept_any=True, from_stored_proc=True)
+
+                    # let stored proc create any desired Theas controls, so these values can be used
+                    # when rendering the template.
+
+                if new_cookies_str:
+                    for this_pair in new_cookies_str.split('&'):
+                        this_name, this_value = this_pair.split('=')
+                        this_value = urlparse.unquote(this_value)
+
+                        if this_name == SESSION_COOKIE_NAME:
+                            self.cookie_st = this_value
+                        elif this_name == USER_COOKIE_NAME:
+                            self.cookie_usertoken = this_value
+                        else:
+                            self.clear_cookie(this_name, path='/')
+                            self.set_cookie(this_name, this_value, path='/')
+
+                    self.write_cookies()
+                    self.session.log('Cookies', 'Updating cookies as per stored procedure')
+                    self.cookies_changed = True
+
+                if header_str:
+                    # HTTPHeaders returns a string like name1=value1&name2=value2...
+                    for this_pair in header_str.split('&'):
+                        this_name, this_value = this_pair.split('=')
+                        self.set_header(this_name, this_value)
+
+                    self.session.log('Headers',
+                                     'Updating HTTP headers as per stored procedure')
+
+        return buf, changed_controls, redirect_to
 
     def process_uploaded_files(self):
 
@@ -2069,6 +2377,8 @@ class ThHandler(tornado.web.RequestHandler):
         # serialize form parameters (excluding theas: parameters) to pass into the stored procedure
         form_params = self.request.body_arguments
 
+        cookies_str = ''
+
         form_params_str = ''
         for key in form_params:
             if not key.startswith('theas:'):
@@ -2084,12 +2394,13 @@ class ThHandler(tornado.web.RequestHandler):
 
                 form_params_str = form_params_str + key + '=' + urlparse.unquote(this_val) + '&'
 
-        # serialize theas paramters to pass into the stored procedure
+        # serialize theas parameters to pass into the stored procedure
         theas_params_str = self.session.theas_page.serialize()
 
         proc = None
 
         if resource and resource.api_stored_proc:
+            # get_data should probably be refactored to use exec_stored_proc (which is used for async calls)
             proc = ThStoredProc(resource.api_stored_proc, self.session)
 
             try:
@@ -2119,7 +2430,12 @@ class ThHandler(tornado.web.RequestHandler):
                     else:
                         this_document = self.request.path
 
+                    if len(this_document) == 0:
+                        this_document = None
+
                     if this_document is not None:
+                        if this_document[0] == '/':
+                            this_document = this_document[1:]
                         proc.bind(this_document, _mssql.SQLCHAR, '@Document')
 
                 if '@PathFull' in proc.parameter_list:
@@ -2159,6 +2475,16 @@ class ThHandler(tornado.web.RequestHandler):
 
                     proc.bind(headers_str, _mssql.SQLCHAR, '@HTTPHeaders')
 
+                if '@RemoteIP' in proc.parameter_list:
+                    proc.bind(self.request.remote_ip, _mssql.SQLCHAR, '@RemoteIP')
+
+                if '@Cookies' in proc.parameter_list:
+                    cookies_str = ''
+                    for key in self.cookies.keys():
+                        cookies_str += key + '=' + urlparse.quote(self.cookies.get(key).value) + '&'
+
+                    proc.bind(cookies_str, _mssql.SQLCHAR, '@Cookies')
+
                 if '@TheasParams' in proc.parameter_list:
                     # proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams', output=proc.parameter_list['@TheasParams']['is_output'])
                     # Would prefer to use output parameter, but this seems not to be supported by FreeTDS.  So
@@ -2175,7 +2501,8 @@ class ThHandler(tornado.web.RequestHandler):
                 had_error = True
 
                 # err_msg = self.format_error(e)
-                err_msg = e.text.decode('ascii')
+                #err_msg = e.text.decode('ascii')
+                err_msg = str(e)
 
                 self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(urlparse.quote(err_msg)))
 
@@ -2304,12 +2631,13 @@ class ThHandler(tornado.web.RequestHandler):
                                 self.session.theas_page.set_value('theas:th:ErrorMessage', row['ErrorMessage'])
 
                         if 'Cookies' in row:
-                            cookies_str = row['Cookies']
+                            new_cookies_str = row['Cookies']
                             # Cookies returns a string like name1=value1&name2=value2...
 
-                            if cookies_str:
-                                for this_pair in cookies_str.split('&'):
+                            if new_cookies_str and cookies_str != new_cookies_str:
+                                for this_pair in new_cookies_str.split('&'):
                                     this_name, this_value = this_pair.split('=')
+                                    this_value = urlparse.unquote(this_value)
 
                                     if this_name == SESSION_COOKIE_NAME:
                                         self.cookie_st = this_value
@@ -2409,11 +2737,6 @@ class ThHandler(tornado.web.RequestHandler):
     def do_render_response_background(self, this_resource=None):
         return self.do_render_response(this_resource=this_resource)
 
-    # @run_on_executor
-    # def get_resource_background(self, resource_code, th_session, for_public_use=False, all_static_blocks=False, none_if_not_found=True, from_file=None):
-    #    global G_cached_resources
-    #    return G_cached_resources.get_resource(resource_code, th_session, for_public_use=for_public_use, all_static_blocks=all_static_blocks, none_if_not_found=none_if_not_found, from_file=from_file)
-
     # Background disabled
     def get_resource_background(self, resource_code, th_session, for_public_use=False, all_static_blocks=False,
                                 none_if_not_found=True, from_file=None):
@@ -2468,7 +2791,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         if cmd is not None:
             pass
-            buf = '<html><body>Parameter cmd provided, but not implemented.</body></html>'
+            #buf = '<html><body>Parameter cmd provided, but not implemented.</body></html>'
         else:
             if self.session.theas_page.get_value('th:PerformUpdate') == '1':
                 # Before we can process next_page, we need to submit to process this_page post
@@ -2567,7 +2890,8 @@ class ThHandler(tornado.web.RequestHandler):
                                     self.session.log('Data', 'Calling get_data')
                                     this_data, redirect_to, history_go_back = self.get_data(this_resource)
 
-                                if this_resource and this_resource.render_jinja_template and redirect_to is None and not history_go_back:
+                                if this_resource and this_resource.render_jinja_template and\
+                                        redirect_to is None and not history_go_back:
                                     self.session.log('Render', 'Calling theas_page.render')
                                     buf = self.session.theas_page.render(template_str, data=this_data)
                                     self.session.log('Render', 'Done with theas_page.render')
@@ -2631,7 +2955,7 @@ class ThHandler(tornado.web.RequestHandler):
                                                               comments='ThHandler.wait_for_session')
             if failed_to_lock and this_sess is None:
                 yield tornado.gen.sleep(.500)
-                give_up = (time.time() - start_waiting) / 1000 > seconds_to_wait
+                give_up = time.time() - start_waiting> seconds_to_wait
             else:
                 give_up = True
 
@@ -2724,7 +3048,6 @@ class ThHandler(tornado.web.RequestHandler):
             self.set_header('Content-Disposition', 'inline; filename="{}"'.format(response_info.content_filename))
             if response_info.etag:
                 self.set_header('Etag', response_info.etag)
-
 
     @tornado.gen.coroutine
     def post(self, *args, **kwargs):
@@ -3035,12 +3358,15 @@ class ThHandler(tornado.web.RequestHandler):
                     self.set_header('Content-Type', theas.Theas.mimetype_for_extension(self.filename))
                     self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
 
-                elif resource is not None and resource.filename:
-                    if resource.filetype:
-                        self.set_header('Content-Type', resource.filetype)
-                    else:
-                        self.set_header('Content-Type', theas.Theas.mimetype_for_extension(resource.filename))
+                elif resource is not None:
+                    if resource.filename:
+                        if resource.filetype:
+                            self.set_header('Content-Type', resource.filetype)
+                        else:
+                            self.set_header('Content-Type', theas.Theas.mimetype_for_extension(resource.filename))
                     self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
+                else:
+                    self.set_header('Content-Type', theas.Theas.mimetype_for_extension(resource.resource_code))
 
                 self.finish()
 
@@ -3209,9 +3535,9 @@ class ThHandler_Attach(ThHandler):
                     if attachment['filetype']:
                         self.set_header('Content-Type', attachment['filetype'])
                     else:
-                        self.set_header('Content-Type', theas.Theas.mimetype_for_extension(attachment['filename']))
-
-                    self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
+                        if attachment['filename']:
+                            self.set_header('Content-Type', theas.Theas.mimetype_for_extension(attachment['filename']))
+                            self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
                     self.finish()
                 else:
                     self.send_error(status_code=404)
@@ -3353,6 +3679,9 @@ class ThHandler_Login(ThHandler):
 
     @tornado.gen.coroutine
     def post(self, *args, **kwargs):
+        # Note:  As of 1/7/2021 the preferred way of performing authentication is via Async (cmd='login')
+        # Posting to special login URL is deprecated.
+
         global G_sessions
 
         if self.session is None:
@@ -3417,6 +3746,27 @@ class ThHandler_Async(ThHandler):
         # th:CurrentPage
 
         buf = ''
+        changed_controls = None
+        redirect_to = None
+
+        resource_code = None
+        this_resource = None
+
+        this_document = None
+        path_params = None
+
+        first_path_elem = self.request.path.split('/')[1]
+
+        if first_path_elem == 'async':
+            # this_document = self.request.path.split('/')[2]
+            # resource_code = "/".join(self.request.path.split('/')[3:])
+
+            # The rest of the path (after async) is taken to be the resource code.
+            # The resource code may contain /'s
+            # Therefore it is not possible to pass in path params on a request to async
+            this_document = "/".join(self.request.path.split('/')[2:])
+        else:
+            this_document = self.request.path
 
         cmd = None
         if self.get_arguments('cmd'):
@@ -3429,45 +3779,71 @@ class ThHandler_Async(ThHandler):
         if self.session is not None:
 
             # update theas parameters based on this post...even if there is not an async stored proc
-            self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
+            th_params = None
 
-            if self.session.current_resource is None:
+            # If parameter th is present, use this as Theas param data, else look to the request_handler
+            if self.get_arguments('th'):
+                th_params = self.get_argument('th')
 
-                if cmd == 'resetPassword':
-                    resource_code = 'login'
-                else:
-                    # Request may have provided Theas param 'th:CurrentPage'
-                    # If session does not have current_resource set, trust 'th:CurrentPage'
-                    # This allows us to process the async request in situations where the session went away due
-                    # to timeout or server restart (assuming "remember me" / user token in cookie is enabled)
+            self.session.theas_page.process_client_request(request_handler=self, buf=th_params, accept_any=False)
 
-                    resource_code = self.session.theas_page.get_value('th:CurrentPage')
-                    if resource_code.strip() == '':
-                        resource_code = None
+            # Resource code is determined by:
+            #   1) Specific resource that pertains to cmd, i.e. resetPassword -> login
+            #   2) path parameters, i.e. this_document
+            #   3) Theas param th:CurrentPage
+            #   4) Session's current_resource, i.e. last resource requested
 
-                if resource_code is not None:
-                    self.session.current_resource = G_cached_resources.get_resource(resource_code, self.session)
+            if cmd == 'resetPassword':
+                resource_code = 'login'
+            elif this_document:
+                resource_code = this_document
+            elif self.session.current_resource is not None:
+                resource_code = self.session.current_resource.resource_code
+            else:
+                resource_code = self.session.theas_page.get_value('th:CurrentPage').strip()
+                # Request may have provided Theas param 'th:CurrentPage'
+                # If session does not have current_resource set, trust 'th:CurrentPage'
+                # This allows us to process the async request in situations where the session went away due
+                # to timeout or server restart (assuming "remember me" / user token in cookie is enabled)
+
+            if self.session.current_resource is None or resource_code != self.session.current_resource.resource_code:
+                # Note that an async request will NOT change the session's current_resource
+                this_resource = G_cached_resources.get_resource(resource_code, self.session)
+            else:
+                this_resource = self.session.current_resource
 
             self.session.log('Async:',
-                             'Current Resource Code',
-                             self.session.current_resource.resource_code
-                             if self.session.current_resource
+                             'Resource Code',
+                             resource_code
+                             if resource_code
                              else 'No current resource for this session!')
 
             self.process_uploaded_files()
             # process uploaded files, even if there is no async proc
 
-
             # do_log=(not cmd == 'heartbeat'))
 
             if cmd == 'heartbeat':
                 if self.session is not None and self.session.sql_conn is not None:
-                    self.write('sessionOK')
+                    buf = None
+                    changed_controls = None
+                    redirect_to = None
+
+                    buf, changed_controls, redirect_to = self.exec_stored_proc('theas.spapiHeartbeat', cmd='')
+
+                    if changed_controls:
+                        buf = buf + '&' + self.session.theas_page.serialize(control_list=changed_controls)
+
+                    if buf:
+                        self.write(buf)
+                    else:
+                        self.write('sessionOK')
                 else:
                     self.write('invalidSession')
 
                 if self.session is not None:
                     self.session.finished()
+
             if cmd == 'clearError':
                 if self.session is not None and self.session.sql_conn is not None:
                     self.session.theas_page.set_value('th:ErrorMessage', '')
@@ -3475,16 +3851,57 @@ class ThHandler_Async(ThHandler):
                 self.write('clearError')
 
                 self.session.finished()
+
+            if cmd == 'theasParams':
+                if self.session is not None:
+                    # send ALL Theas controls
+                    self.write(self.session.theas_page.serialize())
+                    self.session.finished()
+
+
+            if cmd == 'login':
+
+                success = False
+                error_message = ''
+                redirect_to = ''
+
+                success, error_message = self.session.authenticate()
+                self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
+
+                resource = G_cached_resources.get_resource(None, self.session, none_if_not_found=True,
+                                                           get_default_resource=self.session.logged_in)
+
+                self.write_cookies()
+
+                next_page = ''
+                if self.session.logged_in:
+                    if resource:
+                        next_page = resource.resource_code
+                    else:
+                        next_page = DEFAULT_RESOURCE_CODE
+                else:
+                    next_page = ''
+
+                if self.session is not None:
+                    self.session.finished()
+
+                buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
+                    '1' if self.session.logged_in else '0',
+                    error_message,
+                    next_page)
+
+                self.write(buf)
+                self.finish()
+
             else:
                 async_proc_name = None
-                theas_params_str = ''
 
                 if self.session is not None:
                     self.session.log('Async', str(self.request.body_arguments))
 
                     try:
 
-                        if self.session.current_resource is None:
+                        if this_resource is None:
                             # Something is wrong.  Perhaps the async request came in before a resource had been served?
                             # This could happen if the TheasServer was restarted after a page was sent to the browser,
                             # Javascript on the page could submit an async requests...which we can't handle, because
@@ -3496,129 +3913,11 @@ class ThHandler_Async(ThHandler):
                                 'your session expired, or the server was restarted after this page was loaded.')
                         else:
 
-                            async_proc_name = self.session.current_resource.api_async_stored_proc
+                            async_proc_name = this_resource.api_async_stored_proc
 
                         if async_proc_name:
-
-                            # 5/11/2018 moved up, to as soon as we have a session.  We want to update theas parameters
-                            # even if there is no async stored proc.
-                            # self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
-
-                            row_count = 0
-
-                            form_params = self.request.body_arguments
-
-                            # We want to serialize form data (excluding theas: fields)
-                            form_params_str = ''
-                            for key in form_params:
-                                if not key.startswith('theas:'):
-                                    this_val = form_params[key]
-
-                                    if isinstance(this_val, list) and len(this_val) > 0:
-                                        this_val = this_val[0]
-
-                                    if isinstance(this_val, bytes):
-                                        this_val = this_val.decode('utf-8')
-                                    elif this_val:
-                                        this_val = str(this_val)
-
-                                    form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
-
-                            # We also want to serialize all Theas controls
-                            theas_params_str = self.session.theas_page.serialize()
-
-                            self.session.log('Async', 'Async stored proc is: {}'.format(async_proc_name))
-                            self.session.log('Async',
-                                             'Resource code is: {}'.format(self.session.current_resource.resource_code))
-
-                            proc = ThStoredProc(async_proc_name, self.session)
-
-                            if not proc.is_ok:
-                                self.session.log('Async',
-                                                 'ERROR: AsyncProcName {} is not valid. in ThHandler_Async.Post'.format(
-                                                     async_proc_name))
-                            else:
-                                proc.refresh_parameter_list()
-
-                                # if '@QuestGUID' in proc.parameter_list and self.session.theas_page.get_value('questGUID') is not None:
-                                #    proc.bind(self.session.theas_page.get_value('questGUID'), _mssql.SQLCHAR, '@QuestGUID')
-
-                                # if '@StepGUID' in proc.parameter_list and self.session.theas_page.get_value('stepGUID') is not None:
-                                #    proc.bind(self.session.theas_page.get_value('stepGUID'), _mssql.SQLCHAR, '@StepGUID')
-
-                                # if '@StepDefID' in proc.parameter_list and self.session.theas_page.get_value('stepDefID') is not None:
-                                #    proc.bind(self.session.theas_page.get_value('stepDefID'), _mssql.SQLCHAR, '@StepDefID')
-
-                                if '@Command' in proc.parameter_list:
-                                    proc.bind(cmd, _mssql.SQLCHAR, '@Command')
-
-                                if '@Document' in proc.parameter_list:
-                                    proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
-
-                                if '@HTTPParams' in proc.parameter_list:
-                                    proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
-
-                                if '@FormParams' in proc.parameter_list:
-                                    proc.bind(form_params_str, _mssql.SQLCHAR, '@FormParams')
-
-                                if '@TheasParams' in proc.parameter_list:
-                                    # proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams', output=proc.parameter_list['@TheasParams']['is_output'])
-                                    # Would prefer to use output parameter, but this seems not to be supported by FreeTDS.  So
-                                    # we look to the resultest(s) returned by the stored proc instead.
-                                    proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams')
-
-                                # Execute stored procedure
-                                proc_result = proc.execute(fetch_rows=False)
-
-                                # For the async stored proc, we are expecting it to return only a single resultset, and in most
-                                # cases to return only a single row.
-
-                                # We watch for a few special column names:  TheasParams is a column the stored proc can use to
-                                # return name/value pairs that should update the theas_page.controls.  AsyncResponse is a column
-                                # that the stored proc can use to return raw data that will be passed on to the browser as the
-                                # response to the async request.
-
-                                # If the async stored proc does return multiple rows, these column values from each row are
-                                # concatenated together.
-
-                                theas_params_str = ''
-                                if proc.th_session.sql_conn is not None:
-                                    theas_params_str = ''
-                                    buf = ''
-
-                                    for row in proc.th_session.sql_conn:
-                                        row_count += 1
-
-                                        if 'ErrorMessage' in row:
-                                            if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
-                                                # self.session.theas_page.set_value('theas:th:ErrorMessage',
-                                                #                                  row['ErrorMessage'])
-                                                buf = 'theas:th:ErrorMessage=' + \
-                                                      urlparse.quote(format_error(row['ErrorMessage'])) + '&'
-
-                                        if 'TheasParams' in row:
-                                            if row['TheasParams'] is not None:
-                                                theas_params_str = theas_params_str + row['TheasParams']
-
-                                        if 'AsyncResponse' in row:
-                                            if row['AsyncResponse'] is not None:
-                                                buf = buf + row['AsyncResponse'] + '&'
-
-                                self.session.log('Async', '{row_count} rows returned by async stored proc'.format(
-                                    row_count=row_count))
-
-                                if row_count == 0:
-                                    raise (TheasServerError('No result row returned by async stored proc.'))
-                                changed_controls = None
-
-                                if theas_params_str:
-                                    changed_controls = self.session.theas_page.process_client_request(
-                                        buf=theas_params_str, accept_any=True, from_stored_proc=True)
-
-                                    # let stored proc create any desired Theas controls, so these values can be used
-                                    # when rendering the template.
-
-
+                            buf, changed_controls, redirect_to =\
+                                self.exec_stored_proc(async_proc_name, cmd=cmd, path_params=path_params)
 
                     except TheasServerError as e:
                         # e = sys.exc_info()[0]
@@ -3631,34 +3930,47 @@ class ThHandler_Async(ThHandler):
                         # in _mssql.pyx ... so they are not exported to python.  Should these be declared
                         # with cpdef?
 
-
                         err_msg = None
 
-                        err_msg = e.text.decode('ascii')
+                        err_msg = str(e)
 
                         buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(err_msg))
                         self.session.log('Async',
                                          'ERROR when executing stored proc {}: {}'.format(
                                              async_proc_name, err_msg))
 
-                if len(buf) > 0:
-                    # stored proc specified an explicit response
-                    self.write(buf)
+                if redirect_to:
+                    # redirect as the stored procedure told us to
+                    self.session.finished()
+                    self.session = None
+                    self.redirect(redirect_to)
                 else:
-                    # stored proc did not specify an explicit response:  send updated controls only
-                    # if there are any, otherwise send all controls
-                    # self.write(self.session.theas_page.serialize(control_list = changed_controls))
+                    if len(buf) > 0:
+                        # stored proc specified an explicit response
+                        try:
+                            json_buf = json.loads(buf)
+                            # buf looks like it contains JSON.  Add an element containing TheasParams
+                            json_buf['theasParams'] = self.session.theas_page.serialize(control_list=changed_controls)
+                            self.write(json.dumps(json_buf))
+                        except ValueError as e:
+                            # buf does not look like it contains JSON.  Just send the string.
+                            self.write(buf)
 
-                    # send ALL Theas controls
-                    self.write(self.session.theas_page.serialize())
+                    else:
+                        # Stored proc did not specify an explicit response, but may have updated TheasParams.
+                        # Send updated TheasParams only.
+                        self.write(self.session.theas_page.serialize(control_list=changed_controls))
 
-                # CORS
-                self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-                self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+                        # send ALL TheasParams
+                        #self.write(self.session.theas_page.serialize())
 
-                self.session.finished()
-                self.session = None
-                self.finish()
+                    # CORS
+                    self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                    self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
+                    self.session.finished()
+                    self.session = None
+                    self.finish()
 
     @tornado.gen.coroutine
     def get(self, *args, **kwargs):
@@ -3670,7 +3982,7 @@ class ThHandler_Async(ThHandler):
 
 
 # -------------------------------------------------
-# ThHandler_REST async (AJAX) handler
+# ThHandler_REST handler
 # -------------------------------------------------
 '''
 ThHandler_REST is similar to ThHandler_Async, except for:
@@ -3685,10 +3997,7 @@ uses SysRequestTypes instead)
 3) By default, REST will destroy the session after each
 request.
 
-4) REST does not do anything with Theas Params
-
 '''
-
 
 class ThHandler_REST(ThHandler):
     def __init__(self, application, request, **kwargs):
@@ -3697,83 +4006,12 @@ class ThHandler_REST(ThHandler):
     def __del__(self):
         self.session = None
 
-    def get_rest_resource(self, resource_code, th_session):
-        this_resource = None
-
-        if resource_code:
-            resource_code = resource_code.strip()
-
-        if resource_code == '':
-            resource_code = None
-
-        # load resource from database
-        th_session.log('Resource', 'ThCachedResources.get_rest_resource fetching from database',
-                       resource_code if resource_code is not None else 'None')
-
-        # Get SysWebResourcesdata from database
-        this_proc = ThStoredProc('theas.spgetSysWebResources', th_session)
-
-        if this_proc.is_ok:
-
-            # Note:  we could check for existence of @GetDefaultResource down below to help with backwards
-            # compatibility ... but that would mean having to call refresh_parameter_list, which is
-            # unnecessary overhead.
-            # this_proc.refresh_parameter_list()
-
-            this_proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
-
-            proc_result = this_proc.execute(fetch_rows=False)
-            assert proc_result, 'ThCachedResources.load_resource received error result from call to theas.spgetSysWebResources in the SQL database.'
-
-            row_count = 0
-
-            this_static_blocks_dict = {}
-
-            if this_proc.th_session.sql_conn is not None:
-                for row in this_proc.th_session.sql_conn:
-                    row_count += 1
-                    buf = row['ResourceText']
-                    if not buf:
-                        buf = row['ResourceData']
-                        if buf:
-                            buf = bytes(buf)
-
-                    this_resource = ThResource()
-
-                    this_resource.resource_code = row['ResourceCode']
-                    this_resource.filename = row['Filename']
-                    this_resource.data = buf
-                    this_resource.api_stored_proc = row['APIStoredProc']
-                    this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
-                    this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
-                    this_resource.is_public = row['IsPublic']
-                    this_resource.is_static = row['IsStaticBlock']
-                    this_resource.requires_authentication = row['RequiresAuthentication']
-                    this_resource.render_jinja_template = row['RenderJinjaTemplate']
-                    this_resource.skip_xsrf = row['SkipXSRF']
-
-                    if 'OnBefore' in row:
-                        this_resource.on_before = row['OnBefore']
-
-                    if 'OnAfter' in row:
-                        this_resource.on_after = row['OnAfter']
-
-                    if 'Revision' in row:
-                        this_resource.revision = row['Revision']
-
-                    if this_resource.resource_code:
-                        self.add_resource(row['ResourceCode'], this_resource)
-
-            this_proc = None
-            del this_proc
-
-        return this_resource
-
     @tornado.gen.coroutine
-    def post(self, resource_code=None, *args, **kwargs):
+    def post(self, *args, **kwargs):
         global G_cached_resources
 
         buf = ''
+        rest_proc_name = 'theas.spdoRESTRequest'
 
         try:
             # spin up a new session
@@ -3782,12 +4020,13 @@ class ThHandler_REST(ThHandler):
             if self.session is None:
                 raise TheasServerError('Session could not be established for REST request.')
 
-            # try to find required resource
-            resource_code = None
-            resource = None
+            requesttype_guid_str = None
+            requesttype_code = None
+            buf = None
+
 
             request_path = None
-            if len(args) >= 0:
+            if len(args) > 0:
                 request_path = args[0]
 
             if request_path is not None and request_path.split('/')[0] == 'r':
@@ -3797,37 +4036,22 @@ class ThHandler_REST(ThHandler):
                 # This allows URLs such as /r/img/myimg.jpg to be handled dynamically:  the resource img is
                 # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
                 # img/myimg.jpg
-                resource_code = request_path.split('/')[1]
+                requesttype_code = request_path.split('/')[1]
             else:
-                resource_code = request_path
-                if resource_code and resource_code.count('.') >= 2:
-                    # A versioned filename, i.e. my.23.css for version #23 of my.css
-                    # We just want to cut out the version, and return the unversioned
-                    # filename as the resource code (i.e. my.css)
+                requesttype_code = request_path
 
-                    # That is, Theas will always / only serve up the most recent version
-                    # of a resource.  There is not support for serving up a particular
-                    # historical version.  The version number in the file name is merely
-                    # for the browser's benefit, so that we can "cache bust" / have the
-                    # browser request the latest version even if it has an old version in
-                    # cache.
+            if requesttype_code:
+                requesttype_code = requesttype_code.strip()
 
-                    # For this reason, we don't really need to inspect the resources.
-                    # We need only manipulate the resource_code to strip out the version
-                    # number.
-                    segments = resource_code.split('.')
-                    if len(segments) >= 3 and 'ver' in segments:
-                        ver_pos = segments.index('ver')
-                        if ver_pos > 0:
-                            resource_code = '.'.join(segments[:ver_pos]) + '.' + '.'.join(segments[ver_pos + 2:])
+            if requesttype_code == '':
+                resource_code = None
 
-            resource = self.get_rest_resource(resource_code)
-
-            rest_proc_name = resource.api_async_stored_proc
+            requesttype_guid_str = self.request.query_arguments.get('rg')
 
             # allow REST to receive file uploads
             self.process_uploaded_files()
 
+            # serialize form parameters (excluding theas: parameters) to pass into the stored procedure
             form_params = self.request.body_arguments
 
             # We want to serialize form data
@@ -3845,9 +4069,18 @@ class ThHandler_REST(ThHandler):
 
                 form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
 
-            self.session.log('REST', 'REST stored proc is: {}'.format(rest_proc_name))
+            cookies_str = ''
+            for key in self.cookies.keys():
+                cookies_str += key + '=' + urlparse.quote(self.cookies.get(key).value) + '&'
 
+            # serialize theas parameters to pass into the stored procedure
+            theas_params_str = self.session.theas_page.serialize()
+
+            # Execute spDoRestRequest in the database
             proc = ThStoredProc(rest_proc_name, self.session)
+
+
+            self.session.log('REST', 'REST stored proc is: {}'.format(rest_proc_name))
 
             if not proc.is_ok:
                 self.session.log('REST',
@@ -3856,19 +4089,59 @@ class ThHandler_REST(ThHandler):
             else:
                 proc.refresh_parameter_list()
 
-                if '@Document' in proc.parameter_list:
-                    proc.bind(self.request.path.rsplit('/', 1)[1], _mssql.SQLCHAR, '@Document')
+                if '@RequestTypeGUIDStr' in proc.parameter_list:
+                    proc.bind(requesttype_guid_str, _mssql.SQLCHAR, '@RequestTypeGUIDStr', null=(requesttype_guid_str is None))
+
+                if '@RequestTypeCode' in proc.parameter_list:
+                    proc.bind(requesttype_code, _mssql.SQLCHAR, '@RequestTypeCode', null=(requesttype_code is None))
 
                 if '@HTTPParams' in proc.parameter_list:
                     proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
 
                 if '@FormParams' in proc.parameter_list:
                     proc.bind(form_params_str, _mssql.SQLCHAR, '@FormParams')
+                    # proc.bind(urlparse.urlencode(self.request.body_arguments, doseq=True), _mssql.SQLCHAR, '@FormParams')
 
-                # Execute stored procedure
+                if '@TheasParams' in proc.parameter_list:
+                    proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams')
+
+                if '@HTTPHeaders' in proc.parameter_list:
+                    headers_str = ''
+                    this_dict = dict(self.request.headers)
+                    for key in this_dict:
+                        this_val = this_dict[key]
+
+                        if isinstance(this_val, list) and len(this_val) > 0:
+                            this_val = this_val[0]
+
+                        if isinstance(this_val, bytes):
+                            this_val = this_val.decode('utf-8')
+                        elif this_val:
+                            this_val = str(this_val)
+
+                        headers_str = headers_str + '&' + key + '=' + urlparse.quote(this_val)
+
+                    proc.bind(headers_str, _mssql.SQLCHAR, '@HTTPHeaders')
+
+                if '@Cookies' in proc.parameter_list:
+                    proc.bind(cookies_str, _mssql.SQLCHAR, '@Cookies')
+
+                if '@RemoteIP' in proc.parameter_list:
+                    proc.bind(self.request.remote_ip, _mssql.SQLCHAR, '@RemoteIP')
+
+                if '@InhibitResultset' in proc.parameter_list:
+                    proc.bind('0', _mssql.SQLCHAR, '@InhibitResultset')
+
                 proc_result = proc.execute(fetch_rows=False)
+                assert proc_result, 'ThHandler_REST.get_rest_requestype received error result from call to theas.spDoRestRequest in the SQL database.'
 
-                # For the rest stored proc, we are expecting it to return only a single resultset that
+                this_response_no = None
+                this_redir_url = None
+                new_cookies_str = None
+
+                row_count = 0
+
+                # For the REST stored proc, we are expecting it to return only a single resultset that
                 # contains only a single row.
 
                 # We watch for a few special column names: RESTResponse is a column
@@ -3877,56 +4150,139 @@ class ThHandler_REST(ThHandler):
                 # to send to the browser.  (If present and not null, RESTResponseBin will be served
                 # instead of RestResponse.)
 
-                row_count = 0
 
-                if proc.th_session.sql_conn is not None:
-                    buf = ''
+                try:
+                    if proc.th_session.sql_conn is not None:
+                        for row in proc.th_session.sql_conn:
+                            # note:  should only be one row
+                            row_count += 1
 
-                    for row in proc.th_session.sql_conn:
-                        row_count += 1
+                            if 'ResponseNo' in row:
+                                this_response_no = row['ResponseNo']
 
-                        if 'ErrorMessage' in row:
-                            if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
-                                buf = 'Stored procedure returned an error:' + \
-                                      urlparse.quote(format_error(row['ErrorMessage']))
+                            if 'RedirURL' in row:
+                                this_redir_url = row['RedirURL']
 
-                        if 'RESTResponse' in row:
-                            if row['RESTResponse'] is not None:
-                                buf = row['RESTResponse']
+                            if 'Cookies' in row:
+                                new_cookies_str = row['Cookies']
+                                if new_cookies_str and cookies_str != new_cookies_str:
+                                    for this_pair in new_cookies_str.split('&'):
+                                        this_name, this_value = this_pair.split('=')
+                                        this_value = urlparse.unquote(this_value)
 
-                assert row_count > 0, 'No result row returned by REST stored proc.'
+                                        if this_name == SESSION_COOKIE_NAME:
+                                            self.cookie_st = this_value
+                                        elif this_name == USER_COOKIE_NAME:
+                                            self.cookie_usertoken = this_value
+                                        else:
+                                            self.clear_cookie(this_name, path='/')
+                                            self.set_cookie(this_name, this_value, path='/')
+
+                                    self.write_cookies()
+                                    self.session.log('Cookies', 'Updating cookies as per stored procedure F')
+                                    self.cookies_changed = True
+
+                            if 'Filename' in row:
+                                this_filename = row['Filename']
+                                if this_filename:
+                                    self.set_header('Content-Type', theas.Theas.mimetype_for_extension(this_filename))
+                                    self.set_header('Content-Disposition', 'inline; filename=' + this_filename)
+
+                            if 'ErrorMessage' in row:
+                                if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
+                                    buf = 'Stored procedure returned an error:' + \
+                                          urlparse.quote(format_error(row['ErrorMessage']))
+
+                            if 'RESTResponse' in row:
+                                if row['RESTResponse'] is not None:
+                                    buf = row['RESTResponse']
+
+                            if not buf and ('Content' in row):
+                                if not row['Content'] is None and row['Content'] != '':
+                                    buf = row['Content']
+
+                            if not buf and ('ContentBin' in row):
+                                if not row['ContentBin'] is None and row['ContentBin'] != '':
+                                    buf = row['ContentBin']
+                                    if buf:
+                                        buf = bytes(buf)
+
+                            if 'TheasParams' in row:
+                                theas_params_str = row['TheasParams']
+                                if theas_params_str:
+                                    # Incorporate any Theas control changes from SQL, so these values can be used
+                                    # when rendering the template.
+                                    self.session.theas_page.process_client_request(buf=theas_params_str,
+                                                                                   accept_any=True,
+                                                                                   from_stored_proc=True)
+
+                                    if theas_params_str.find('th:LoggedIn=') >= 0:
+                                        # Stored procedure is indicating authentication status changed.  Retrieve
+                                        # current session info.
+                                        perform_authenticate_existing = True
+
+                            # self.set_header('Date', response_info.current_date)
+                            # self.set_header('Expires', response_info.content_expires)
+
+                            # self.set_header('accept-ranges', 'bytes')  # but not really...
+                            # self.set_header('Content-Type', response_info.content_type)
+
+                            # self.set_header('Cache-Control', response_info.cache_control)
+                            # self.set_header('Last-Modified', response_info.date_updated)
+
+                            # CORS
+                            # self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                            # self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+                        assert row_count > 0, 'No result row returned by REST stored proc.'
+
+                    else:
+                        buf = None
+
+                except:
+                    buf = None
+
+                if this_redir_url:
+                    self.redirect(this_redir_url)
+                elif this_response_no >= 400:
+                    self.send_error(this_response_no)
+                elif buf is None:
+                    self.send_error(status_code=500)
+                else:
+                    if this_response_no:
+                        self.set_status(this_response_no)
+                    self.set_header('Content-Length', len(buf))
+                    self.write(buf)
+
+                    # CORS
+                    self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                    self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
+                    self.finish()
+
+                proc.th_session.sql_conn.close()
+                proc.th_session.sql_conn = None
+
+                proc = None
+
+                self.session.finished()
+                #note:  since sql_conn is None, finished() will destroy the session
+
+                self.session = None
 
 
-        except TheasServerError as e:
-            # e = sys.exc_info()[0]
-            err_msg = e.value if hasattr(e, 'value') else e
-
-            buf = 'theas:th:ErrorMessage=' + urlparse.quote(err_msg)
 
         except Exception as e:
             # We would like to catch specific MSSQL exceptions, but these are declared with cdef
             # in _mssql.pyx ... so they are not exported to python.  Should these be declared
             # with cpdef?
 
-
-            err_msg = None
-
             err_msg = str(e)
-
-            buf = 'theas:th:ErrorMessage=' + urlparse.quote(err_msg)
-            self.session.log('Async',
-                             'ERROR when executing stored proc {}: {}'.format(
+            self.session.log('REST',
+                             'ERROR when executing REST stored proc {}: {}'.format(
                                  rest_proc_name, err_msg))
 
-        self.write(buf)
 
-        # CORS
-        self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-        self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-        self.session.finished()
-        self.session = None
-        self.finish()
 
     @tornado.gen.coroutine
     def get(self, *args, **kwargs):
@@ -3973,7 +4329,7 @@ class ThHandler_Back(ThHandler):
 
             self.session.finished()
         else:
-            if self.cookies_changed():
+            if self.cookies_changed:
                 # must perform a client-side redirect in order to set cookies
                 self.session.finished()
                 # Could redirect if desired.  But instead, we'll send an error message and let the browser handle it
@@ -4033,7 +4389,6 @@ class ThHandler_PurgeCache(ThHandler):
         self.finish()
 
 
-
 def get_program_directory():
     program_cmd = sys.argv[0]
     program_directory = ''
@@ -4067,18 +4422,28 @@ def get_program_directory():
     return program_directory, program_filename
 
 
-
 # -------------------------------------------------
 # ThWSHandler test websocket handler
 # -------------------------------------------------
 class ThWSHandler_Test(tornado.websocket.WebSocketHandler):
+    # Note:  Client receives 403 error without the following check_origin
+    # https://stackoverflow.com/questions/24851207/tornado-403-get-warning-when-opening-websocket
+    # http://www.tornadoweb.org/en/stable/websocket.html#configuration
+    def check_origin(self, origin):
+        # This method is called when a new connection request is received
+        # but before the connection has been established.
+        # origin contains the value of the HTTP Origin header.
+        # This function can return True if we want to accept the new connection
+        # or False if we want to reject the connection (sends 403)
+        return True
+
     def open(self):
         ThSession.cls_log('WebSocket', 'New client connected')
         self.write_message("You are connected")
 
     # the client sent the message
     def on_message(self, message):
-        self.write_message('DoFetchData')
+        self.write_message('DoFetchData2')
 
     # client disconnected
     def on_close(self):
@@ -4111,6 +4476,8 @@ def run(run_as_svc=False):
     global USE_WORKER_THREADS
     global MAX_WORKERS
 
+    global MAX_CACHE_ITEM_SIZE
+    global MAX_CACHE_SIZE
 
     if LOGGING_LEVEL:
         msg = 'Theas app getting ready...'
@@ -4148,7 +4515,7 @@ def run(run_as_svc=False):
                              help="The path to the folder with configuration files.", type=str)
 
     G_program_options.define("server_prefix",
-                             default="locaohost:8881",
+                             default="localhost:8881",
                              help="The web server address prefix to prepend to URLs that need it.", type=str)
 
     G_program_options.define("port",
@@ -4259,6 +4626,16 @@ def run(run_as_svc=False):
                              help="If use_worker_threads is true, indicates the maximum number of worker threads allowed.",
                              type=int)
 
+    G_program_options.define("max_cache_item_size",
+                             default=MAX_CACHE_ITEM_SIZE,
+                             help="Maximum size in bytes of item that is allowed to be stored in cache.",
+                             type=int)
+
+    G_program_options.define("max_cache_size",
+                             default=MAX_CACHE_SIZE,
+                             help="Maximum total amount of bytes to use for cache storage.",
+                             type=int)
+
     G_program_options.parse_command_line()
 
     msg = 'Theas app: trying to use configuration from {}'.format(G_program_options.settings_path + 'settings.cfg')
@@ -4345,8 +4722,10 @@ def run(run_as_svc=False):
         (r'/login', ThHandler_Login),
         (r'/back', ThHandler_Back),
         (r'/purgecache', ThHandler_PurgeCache),
-        (r'/test', TestThreadedHandler),
-        (r'/testws', ThWSHandler_Test),
+        #(r'/test', TestThreadedHandler),
+        (r'/ws', ThWSHandler_Test),
+        (r'/rest', ThHandler_REST),
+        (r'/rest/(.*)', ThHandler_REST),
         (r'/async', ThHandler_Async),
         (r'/async/(.*)', ThHandler_Async),
         (r'/(.*)', ThHandler)
@@ -4359,7 +4738,7 @@ def run(run_as_svc=False):
         xsrf_cookies=True,
         cookie_secret=COOKIE_SECRET)
 
-    http_server = tornado.httpserver.HTTPServer(application)
+    http_server = tornado.httpserver.HTTPServer(application, xheaders=True)
 
     try:
         http_server.listen(G_program_options.port)
@@ -4449,4 +4828,4 @@ if __name__ == "__main__":
         pass
 
         # Clean up _mssql resources
-# _mssql.exit_mssql()
+        # _mssql.exit_mssql()
