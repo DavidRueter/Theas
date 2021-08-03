@@ -28,7 +28,7 @@ from tornado.concurrent import run_on_executor
 
 import theas
 
-import _mssql
+from pymssql import _mssql
 
 import logging
 
