@@ -1,7 +1,7 @@
 #!usr/bin/python
 # Filename: theas.py
 # -*- coding: utf-8 -*-
-version = '0.78'
+version = '0.81'
 
 '''Theas complements the Jinja2 template engine by providing persistent server-side state management,
 data binding, and event handling.
@@ -93,7 +93,6 @@ Within your template, you can also access access the values of Theas controls li
     ...but this would return the value of the session.theas_page.control, which a) would not exist unless the control
     had been previously created by a filter or by Python code prior to the start of template rendering.
 
-
 Originally Theas was created to support server-side rendering.  The above examples show how theas control values
 can be embedded in an HTML form and/or outputted in HTML.
 
@@ -109,7 +108,7 @@ HTTP POST of the actual Theas form.
 Theas is set to support both server-side rendering, and client-side rendering.  Which you use is up to you.
 '''
 import types
-import string
+#import string
 from collections import OrderedDict
 import ast
 import uuid
@@ -118,10 +117,12 @@ import html
 import json
 import base64
 
-from time import struct_time, strptime, strftime
+#from time import struct_time, strptime, strftime
+from time import strptime, strftime
 import datetime
 
-from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
+#from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
+from jinja2 import Undefined, environmentfilter  # , Markup, escape, Template,
 from jinja2.environment import Environment
 
 ALLOW_UNSAFE_FUNCTIONS = False
@@ -268,7 +269,7 @@ class Theas:
             # included in the output of the filter |theasValueJSON
 
             # By default this filter will not output anything (but instead merely affects the output of
-            # }theasValueJSON
+            # theasValueJSON)
 
             # Optionally, you can pass in (output=True) to have this filter output the javascript-friendly
             # version of the control name as a string as well, in which embedded : characters are translated
@@ -285,6 +286,9 @@ class Theas:
             # Conditionally echos the specified string.  For example:
             # {{'active' | theasEcho(if_curpage='mypage')}} would output the string 'active' if
             # the value of the Theas control named curpage was equal to 'mypage'
+
+            self.jinja_env.filters['ifNone'] = self.theas_if_none
+            # Specifies a value to emit if the input value is None
 
             self.jinja_env.filters['friendlydate'] = self.format_friendlydate
             # General date formatting routine.
@@ -531,9 +535,18 @@ class Theas:
 
             have_datavalue_param = False
             datavalue_param = ''
+
             if 'datavalue' in kwargs:
+                # datavalue parameter is explicitly provided
                 have_datavalue_param = True
                 datavalue_param = kwargs['datavalue']
+            elif 'overwrite' in kwargs and kwargs['overwrite']:
+                # datavalue parameter is NOT provided, but overwrite is provided...
+                # so we use the value of default_value_param
+                have_datavalue_param = True
+                datavalue_param = default_value_param
+
+            if have_datavalue_param:
                 if isinstance(datavalue_param, (str, bytes, bytearray)):
                     urlparse.quote(datavalue_param)
 
@@ -811,7 +824,8 @@ class Theas:
         this_th = self.get_controls(include_in_json_only=True)
 
         result = json.dumps(this_th)
-
+        result = str(result[1:-1])
+        result = '{"theasParams": {' + result + '}}'
         if as_string:
             if len(result) > 2:
                 result = '{' + result[1:-1] + '}'
@@ -954,9 +968,10 @@ class Theas:
             ctrl_name = ctrl_name[6:]
 
         # id is not used for hidden
+        # Note that **kwargs may contain persist=0 ...and this would be passed into this_page.get_control
+        # Note that **kwargs may contain overwrite=1 ...and this would be passed into this_page.get_control
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, default=this_value,
                                                                        control_type='hidden', **kwargs)
-
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
             if escaping == 'urlencode':
@@ -991,6 +1006,8 @@ class Theas:
         if 'type' in kwargs:
             if kwargs['type'].lower() == 'password':
                 type = 'password'
+            else:
+                type = kwargs['type']
 
         assert ctrl_name, 'Filter theas_input requires either id or name be provided.'
 
@@ -1000,10 +1017,10 @@ class Theas:
         # id not used for looking up (but might be provided and might need to be rendered)
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
                                                                        control_type=type, **kwargs)
-
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str += ' {}="{}"'.format(k, v)
+            if k.lower() != 'type':
+                this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{}'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
@@ -1057,7 +1074,8 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str += ' {}="{}"'.format(k, v)
+            if k.lower() != 'type':
+                this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
@@ -1122,10 +1140,10 @@ class Theas:
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
                                                                        control_type='select',
                                                                        options_dict=this_options_dict, **kwargs)
-
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str += ' {}="{}"'.format(k, v)
+            if k.lower() != 'type':
+                this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<select name="{}"{}{} >'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
@@ -1168,7 +1186,8 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str += ' {}="{}"'.format(k, v)
+            if k.lower() != 'type':
+                this_attribs_str += ' {}="{}"'.format(k, v)
 
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
@@ -1211,7 +1230,8 @@ class Theas:
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
-            this_attribs_str += ' {}="{}"'.format(k, v)
+            if k.lower() != 'type':
+                this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
@@ -1225,6 +1245,14 @@ class Theas:
         this_ctrl_nv.include_in_json = True
 
         return buf
+
+    @environmentfilter
+    def theas_if_none(self, this_env, this_value, *args, **kwargs):
+        result = this_value
+        if not this_value or (this_value.lower() == 'none'):
+            if len(args) > 0:
+                result = args[0]
+        return result
 
     @environmentfilter
     def theas_define_functions(self, ctrl_name, this_env, *args, **kwargs):
@@ -1522,6 +1550,7 @@ MIME_TYPE_EXTENSIONS = {
     '.jpeg': 'image/jpeg',
     '.jpgv': 'video/jpeg',
     '.js': 'application/javascript',
+    '.jsm': 'application/javascript',
     '.json': 'application/json',
     '.kml': 'application/vnd.google-earth.kml+xml',
     '.kmz': 'application/vnd.google-earth.kmz',

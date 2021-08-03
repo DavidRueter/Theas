@@ -11,8 +11,9 @@ TH = {
     */
 
     ////////////////////////////////////////////////////
-    heartbeatCommand: 'heartbeat',
-    heartbeatInterval: 30000,
+    heartbeatTimer: null,
+    currentHeartbeat: null,
+
     formID: 'theasForm',  //Value for id attribute of the Theas form
     lastError: null,
 
@@ -21,6 +22,7 @@ TH = {
 
     isReady: false,
     onReady: null,
+    pendingAsyncs: [],
 
     ready: function (func) {
         let that = this;
@@ -47,6 +49,31 @@ TH = {
         return d;
     },
 
+    uuidv4: function () {
+      return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+        (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+      )
+    },
+
+    isBase64: function(buf) {
+        // see:  https://stackoverflow.com/a/43279141
+        const notBase64 = /[^A-Z0-9+\/=]/i;
+
+        if (typeof buf != 'string') {
+            return false;
+        }
+
+        const len = buf.length;
+        if (!len || len % 4 !== 0 || notBase64.test(buf)) {
+        return false;
+        }
+
+        const firstPaddingChar = buf.indexOf('=');
+        return firstPaddingChar === -1 ||
+        firstPaddingChar === len - 1 ||
+        (firstPaddingChar === len - 2 && buf[len - 1] === '=');
+    },
+
     //Utility function to format a date provided by SQL
     mdyFromSQLString: function (s) {
         let that = this;
@@ -60,14 +87,14 @@ TH = {
     },
 
     //Return a theas control.  Optionally, sets the value of the control first.
-    get: function (ctrlName, newValue) {
+    get: function (ctrlName, newValue, persist=true) {
         let that = this;
 
         let thisCtrl;
 
         if (ctrlName) {
 
-            if (ctrlName.indexOf('theas:') !== 0) {
+            if (ctrlName.indexOf('theas:') !== 0 && persist) {
                 ctrlName = 'theas:' + ctrlName;
             }
 
@@ -99,9 +126,9 @@ TH = {
         return thisCtrl;
     },
 
-    getval: function (ctrlName) {
+    getval: function (ctrlName, newValue, persist=true) {
         let that = this;
-        let thisCtrl = that.get(ctrlName);
+        let thisCtrl = that.get(ctrlName, newValue, persist);
         let thisVal;
 
         if (thisCtrl) {
@@ -110,34 +137,54 @@ TH = {
         return thisVal;
     },
 
-    setval: function (ctrlName, newValue) {
+    setval: function (ctrlName, newValue, persist=true) {
         let that = this;
-        return that.get(ctrlName, newValue);
+        return that.get(ctrlName, newValue, persist);
     },
 
     //Update all theas controls as per the updateStr
     updateAll: function (updateStr) {
         let that = this;
+        let buf = '';
+
+        if (that.isBase64(updateStr)) {
+            buf = atob(updateStr)
+        }
+        else {
+            buf = updateStr
+        }
+
+
+        // updateStr might be either URL-encoded name/value pairs or JSON
+        // if JSON, we are looking for theasParams
         try {
-            let that = this;
-            let q = updateStr;
-            let hash;
-            if (q) {
-                q = q.split('&');
-                for (let i = 0; i < q.length; i++) {
-                    hash = q[i].split('=');
-                    if (hash[0]) {
-                        that.get(decodeURIComponent(hash[0]), decodeURIComponent(hash[1]));
+            let jsonBuf = JSON.parse(buf);
+            let theasDict = jsonBuf['theasParams'];
+            // https://stackoverflow.com/a/34913701 and https://stackoverflow.com/a/45731301
+            Object.keys(theasDict).forEach(function(key) {
+                th.setval(key, theasDict[key]);
+            });
+
+        }
+        catch {
+            try {
+                let that = this;
+                let nv;
+                if (buf) {
+                    buf = buf.split('&');
+                    for (let i = 0; i < buf.length; i++) {
+                        nv = buf[i].split('=');
+                        if (nv[0]) {
+                            that.get(decodeURIComponent(nv[0]), decodeURIComponent(nv[1]));
+                        }
                     }
                 }
+            } catch (e) {
+                th.get('th:ErrorMessage', 'TH.updateAll could not parse the TheasParams update string.');
+                that.haveError(true);
             }
-
-        } catch (e) {
-            th.get('th:ErrorMessage', 'TH.updateAll could not parse the string.  Expecting URL-encoded name-value ' +
-                'pairs but received ' + updateStr.substring(1, 50).replace('|', '/') +
-                '...|Unexpected data received from the server');
-            that.haveError(true);
         }
+
     },
 
 
@@ -223,30 +270,43 @@ TH = {
 
         if (dataReceived) {
             if (dataReceived === 'invalidSession') {
-                this.thisTheas.raiseError('Async response indicates invalidSession');
+                this.thisConfig.thisTheas.raiseError('Async response indicates invalidSession');
             } else if (dataReceived === 'sessionOK') {
                 let noop = null
             } else {
-                this.thisTheas.updateAll(dataReceived);
+                this.thisConfig.thisTheas.updateAll(dataReceived);
             }
         }
 
-        if (!this.thisTheas.haveError(true)){
+        if (!this.thisConfig.thisTheas.haveError(true)){
             if (this.afterSuccess) {
-              this.afterSuccess(this.thisTheas, dataReceived);
+              this.afterSuccess(dataReceived, this.thisConfig);
             }
         }
 
     },
 
-
     //Send Async request
-    sendAsync: function (cmd, origEvent, dataToSend, onSuccess, thisUrl) {
+    sendAsync: function (cmd,
+                         config = {
+                             onAfterSuccess: null,
+                             onSuccess: null,
+                             thisURL: 'async',
+                             origEvent: null,
+                             timeout: null
+                             },
+                          dataToSend,
+                          onSuccess
+                         ) {
         let that = this;
 
-        if (origEvent) {
+        if (!config) {
+            config = {};
+        }
+
+        if (config.origEvent) {
             //for convenience:  we don't want the button click to submit the form.
-            origEvent.preventDefault();
+            config.origEvent.preventDefault();
         }
 
         let buf = '';
@@ -261,29 +321,37 @@ TH = {
             buf = buf + '&' + dataToSend + '&';
         }
 
-        if (!thisUrl) {
-            thisUrl = 'async';
+        if (!config.thisUrl) {
+            config.thisUrl = 'async';
         }
 
-        if (!onSuccess) {
-            onSuccess = this.ReceiveAsync;
+        if (onSuccess) {
+            // respect positional parameter for backwards-compabibility,
+            // but coppy function reference to config.onSuccess
+            config.onSuccess = onSuccess;
         }
+
+        if (!config.onSuccess) {
+            config.onSuccess = that.receiveAsync;
+        }
+
+        config.requestID = that.uuidv4();
+        config.dateStart = Date.now();
+        config.thisTheas = that;
 
         $.ajax({
-            url: thisUrl,
+            url: config.thisUrl,
             type: 'POST',
             cache: false,
-            timeout: null, //30000,
+            timeout: config.timeout, //30000,
             dataType: 'text',
             contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
-            //context: workTimer,
             data: buf,
-            thisTheas: that,
-            //afterSuccess: onAfterSuccess,
-            success: onSuccess, //this.receiveAsync
-            //error: this.receiveAsyncError.bind(this)
-            //error: that.receiveAsyncError
+            thisConfig : config,
+            success: config.onSuccess,
+            afterSuccess: config.onAfterSuccess,
         });
+
     },
 
     beforeSubmit: function () {
@@ -364,15 +432,50 @@ TH = {
         return isOK;
     },
 
-    initHeartbeat: function (interval) {
+    receiveHeartbeat: function(dataReceived, thisConfig) {
         let that = this;
 
-        that.heartbeatInterval = interval;
-        window.setInterval(
-            (function () {
-                that.sendAsync(that.heartbeatCommand);
-            }),
-            that.heartbeatInterval)
+        //call the onHeartbeat function
+        thisConfig.onHeartbeat(dataReceived, thisConfig);
+
+        // clear the currentHeartbeat flag
+        thisConfig.thisTheas.currentHeartbeat = null;
+
+        // schedule our next beat
+        thisConfig.thisTheas.sendHeartbeat(thisConfig.onHeartbeat, thisConfig.thisTheas.heartbeatSeconds);
+    },
+
+    sendHeartbeat: function (onHeartbeat, delaySeconds) {
+        let that = this;
+
+        if (delaySeconds || delaySeconds == 0) {
+            that.heartbeatSeconds = delaySeconds;
+            that.heartbeatTimer = window.setTimeout(
+                (function () {
+                    if (!that.currentHeartbeat || (Date.now() - that.currentHeartbeat > 60)) {
+                        // If there is a pending request, and it is not "stuck" (not more than 60
+                        // seconds old), we don't want to send another heartbeat.
+                        that.currentHeartbeat = Date.now();
+                        that.sendHeartbeat(onHeartbeat);
+                    }
+                }),
+                that.heartbeatSeconds * 1000
+            );
+        }
+        else {
+            that.sendAsync('heartbeat',
+                           {
+                           onAfterSuccess: that.receiveHeartbeat,
+                           onHeartbeat: onHeartbeat
+                           },
+                           that.serialize()
+            );
+        }
+    },
+
+    sync: function () {
+        let that = this;
+        that.sendAsync('theasParams');
     },
 
     getModal: function () {

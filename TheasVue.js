@@ -222,6 +222,11 @@ Theas.prototype.sendAsync = function (config) {
 
     // access the HTML theasForm (that was rendered by the server)
     let theasForm = document.getElementById('theasForm');
+
+    if (!theasForm) {
+        return;
+    }
+
     let theasFormData = new FormData(theasForm);
 
     if (thatTheas.currentLocation) {
