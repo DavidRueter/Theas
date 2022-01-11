@@ -122,7 +122,7 @@ from time import strptime, strftime
 import datetime
 
 #from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
-from jinja2 import Undefined, environmentfilter  # , Markup, escape, Template,
+from jinja2 import Undefined, pass_environment #environmentfilter  # , Markup, escape, Template,
 from jinja2.environment import Environment
 
 ALLOW_UNSAFE_FUNCTIONS = False
@@ -795,6 +795,7 @@ class Theas:
 
 
         # @environmentfilter
+        # @pass_environment
         # def theas_hidden(self, this_env, ctrl_name, *args, **kwargs):
         # This filter is called like:
         #         {{ "theas:HelloWorld"|hidden(my_param="abc"}}
@@ -819,7 +820,8 @@ class Theas:
 
         #   return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_values_json(self, this_env, this_value, as_string=False, *args, **kwargs):
         this_th = self.get_controls(include_in_json_only=True)
 
@@ -833,14 +835,17 @@ class Theas:
                 result = ''
         return result
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_base64(self, this_env, this_value, *args, **kwargs):
         buf = base64.b64encode(this_value.encode(encoding='utf-8', errors='strict')).decode(encoding='ascii',
                                                                                             errors='strict')
         return "'{}'".format(buf)
 
-    @environmentfilter
-    def theas_resource(self, this_env, this_value, quotes=True, *args, **kwargs):
+
+    #@environmentfilter
+    @pass_environment
+    def theas_resource(self, this_env, this_value, quotes=False, relative=False, *args, **kwargs):
 
         this_value = this_value.lstrip('/')
 
@@ -862,8 +867,8 @@ class Theas:
 
         # We do need to retrieve the current version number of the resource.
 
-        # Can pass in an optional parameter quotes=False to say No Quotes, which will strip out leading
-        # and trailing quotes from the result.
+        # Can pass in an optional parameter quotes=True which will cause leading and trailing double
+        # quotes to be added to the result.  (The default is no quotes will be added to the result.
 
         if this_value in this_env.theas_page.th_session.resource_versions:
             this_version = str(this_env.theas_page.th_session.resource_versions[this_value]['Revision'])
@@ -871,7 +876,9 @@ class Theas:
             segments = this_value.split('.')
             busted_filename = '.'.join(segments[:-1]) + '.ver.' + this_version + '.' + '.'.join(segments[-1:])
 
-        busted_filename = '/' + busted_filename
+        if not relative:
+            busted_filename = '/' + busted_filename
+
 
         result = json.dumps(busted_filename)
 
@@ -880,7 +887,8 @@ class Theas:
 
         return result
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_include(self, this_env, this_value, output=False, delims=('[[', ']]'), *args, **kwargs):
         this_control_nv = self.get_control(this_value)[0]
         this_control_nv.include_in_json = True
@@ -896,7 +904,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_xsrf(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
         #         {{ "_th"|theasXSRF }}
@@ -909,7 +918,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_sessiontoken(self, this_env, this_value, vuejs=False, *args, **kwargs):
         # This filter is called like:
         #         {{ "_th"|theasST }}
@@ -947,7 +957,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_hidden(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
         # This filter is called like:
         #         {{ data._Theas.osST|hidden(name="theas:HelloWorld") }}
@@ -991,7 +1002,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_input(self, this_env, this_value, escaping="urlencode", vuejs=False, *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.Company | theasInput(id="company", name="ejCompany", placeholder="", class ="form control input-md", required="")}}
@@ -1052,7 +1064,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_radio(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.JobApplicationsVia_code | theasRadio(id="email-app", name="ejReceiveAppsBy", class ="trigger", required="", data_rel="emailapp" checked_value="email", value="email")}}
@@ -1090,7 +1103,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_select(self, this_env, this_options, this_value, *args, **kwargs):
         '''theas_select() : Jinja filter for rendering an HTML select, with options
         Options can be provided either via a string (i.e. hard-coded in the HTML template)
@@ -1165,7 +1179,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_textarea(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.BasicQualifications | theasTextarea(id="basicQualifications", name="ejBasicQualifications", class ="form-control")}}
@@ -1210,7 +1225,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_checkbox(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
         #   {{data.EmployerJob.AgreeTerms | theasCheckbox(id="agreeTermsOfUse", name="ejAgreeTermsOfUse", checked_value="1", value="1")}}
@@ -1246,7 +1262,8 @@ class Theas:
 
         return buf
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_if_none(self, this_env, this_value, *args, **kwargs):
         result = this_value
         if not this_value or (this_value.lower() == 'none'):
@@ -1254,7 +1271,8 @@ class Theas:
                 result = args[0]
         return result
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_define_functions(self, ctrl_name, this_env, *args, **kwargs):
 
         this_page = this_env.theas_page
@@ -1264,7 +1282,8 @@ class Theas:
 
         return ''
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_define_filter(self, ctrl_name, this_env, *args, **kwargs):
 
         this_page = this_env.theas_page
@@ -1275,7 +1294,8 @@ class Theas:
 
         return ''
 
-    @environmentfilter
+    #@environmentfilter
+    @pass_environment
     def theas_echo(self, this_env, this_value, *args, **kwargs):
         '''
 
@@ -1616,6 +1636,7 @@ MIME_TYPE_EXTENSIONS = {
     '.wav': 'audio/x-wav',
     '.weba': 'audio/webm',
     '.webm': 'video/webm',
+    '.webmanifest': 'application/manifest+json',
     '.wma': 'audio/x-ms-wma',
     '.wmd': 'application/x-ms-wmd',
     '.wmf': 'application/x-msmetafile',

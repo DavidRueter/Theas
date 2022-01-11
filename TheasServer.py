@@ -946,7 +946,9 @@ class ThCachedResources:
 
         # Careful:  we could be getting a cached resource in which case there may not yet be a session, in which
         # case we can't update current_resource here!  It is up to the caller to update current_resource
-        if th_session is not None and this_resource is not None and this_resource.exists and this_resource.resource_code != LOGIN_RESOURCE_CODE and this_resource.render_jinja_template:
+        if th_session is not None and this_resource is not None and this_resource.exists and \
+                this_resource.resource_code != LOGIN_RESOURCE_CODE and \
+                this_resource.render_jinja_template:
             # we are assuming that only a jinja template page will have a stored procedure / can serve
             # as the current resource for a session.  (We don't want javascript files and the like
             # to be recorded as the current resource.)
@@ -1266,7 +1268,10 @@ class ThSession:
     def current_resource(self, value):
         if value is not None and value.render_jinja_template:
 
-            if self.__current_resource is None or (value.resource_code != self.__current_resource.resource_code):
+            if self.__current_resource is None or \
+                    (value.resource_code != self.__current_resource.resource_code and
+                     not value.resource_code.endswith('.vue') and \
+                     not value.resource_code.endswith('.js')):
                 self.log('Resource', 'Current_resource changed to: {}  Was: {}'.format(value.resource_code,
                                                                                        self.__current_resource.resource_code if self.__current_resource else 'not set'))
                 self.__current_resource = value
@@ -2345,8 +2350,10 @@ class ThHandler(tornado.web.RequestHandler):
         else:
             template_str = resource.data
 
-            if resource is not None and resource.exists and resource.resource_code != LOGIN_RESOURCE_CODE and \
-                    resource.render_jinja_template and self.session.current_resource != resource:
+            if resource is not None and resource.exists and \
+                    resource.resource_code != LOGIN_RESOURCE_CODE and \
+                    resource.render_jinja_template and \
+                    self.session.current_resource != resource:
                 # We may have retrieved a cached resource.  Set current_resource.
                 self.session.current_resource = resource
 
@@ -3253,7 +3260,7 @@ class ThHandler(tornado.web.RequestHandler):
 
                 self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
-                # Take logged-in userss back to where they were
+                # Take logged-in users back to where they were
                 if not resource_code and self.session.logged_in:
                     resource = self.session.current_resource
 
@@ -3277,7 +3284,8 @@ class ThHandler(tornado.web.RequestHandler):
                         resource = G_cached_resources.get_resource(resource_code, self.session, none_if_not_found=True,
                                                                    get_default_resource=self.session.logged_in)
 
-                if resource is not None and resource.exists and resource.resource_code != LOGIN_RESOURCE_CODE and \
+                if resource is not None and resource.exists and\
+                        resource.resource_code != LOGIN_RESOURCE_CODE and \
                         resource.render_jinja_template:
                     # We may have retrieved a cached resource.  Set current_resource.
                     self.session.current_resource = resource
@@ -4011,6 +4019,8 @@ class ThHandler_REST(ThHandler):
         global G_cached_resources
 
         buf = ''
+        bufbin = b''
+
         rest_proc_name = 'theas.spdoRESTRequest'
 
         try:
@@ -4023,6 +4033,7 @@ class ThHandler_REST(ThHandler):
             requesttype_guid_str = None
             requesttype_code = None
             buf = None
+            bufbin = b''
 
 
             request_path = None
@@ -4193,19 +4204,19 @@ class ThHandler_REST(ThHandler):
                                     buf = 'Stored procedure returned an error:' + \
                                           urlparse.quote(format_error(row['ErrorMessage']))
 
-                            if 'RESTResponse' in row:
+                            if ('ContentBin' in row):
+                                if not row['ContentBin'] is None and row['ContentBin'] != '':
+                                    bufbin = row['ContentBin']
+                                    if bufbin:
+                                        bufbin = bytes(bufbin)
+
+                            if not bufbin and ('RESTResponse' in row):
                                 if row['RESTResponse'] is not None:
                                     buf = row['RESTResponse']
 
-                            if not buf and ('Content' in row):
+                            if not bufbin and not buf and ('Content' in row):
                                 if not row['Content'] is None and row['Content'] != '':
                                     buf = row['Content']
-
-                            if not buf and ('ContentBin' in row):
-                                if not row['ContentBin'] is None and row['ContentBin'] != '':
-                                    buf = row['ContentBin']
-                                    if buf:
-                                        buf = bytes(buf)
 
                             if 'TheasParams' in row:
                                 theas_params_str = row['TheasParams']
@@ -4237,21 +4248,27 @@ class ThHandler_REST(ThHandler):
 
                     else:
                         buf = None
+                        bufbin = None
 
                 except:
                     buf = None
+                    bufbin = None
 
                 if this_redir_url:
                     self.redirect(this_redir_url)
                 elif this_response_no >= 400:
                     self.send_error(this_response_no)
-                elif buf is None:
+                elif buf is None and bufbin is None:
                     self.send_error(status_code=500)
                 else:
                     if this_response_no:
                         self.set_status(this_response_no)
-                    self.set_header('Content-Length', len(buf))
-                    self.write(buf)
+                    if len(bufbin) > 0:
+                        self.set_header('Content-Length', len(bufbin))
+                        self.write(bufbin)
+                    elif buf:
+                        self.set_header('Content-Length', len(buf.encode('utf-8')))
+                        self.write(buf)
 
                     # CORS
                     self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
