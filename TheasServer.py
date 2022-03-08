@@ -756,6 +756,17 @@ class ThCachedResources:
                     assert th_session is not None, 'ThCachedResources: load_resource called without a valid session'
                 else:
                     th_session = ThSession(None, sessionless=True)
+                    if LOGIN_AUTO_USER_TOKEN and not th_session.logged_in and not th_session.autologged_in:
+                        th_session.log('Auth', 'Authenticating as AUTO user (i.e. public)')
+                        try:
+                            th_session.authenticate(user_token=LOGIN_AUTO_USER_TOKEN)
+                        except:
+                            th_session.autologged_in = False
+
+                        if not th_session.autologged_in:
+                            th_session.log('Auth',
+                                     'Error: Authentication as AUTO user (i.e. public) FAILED for loading all_static_blocks.  Is your config file wrong?')
+                            th_session.log('Auth', 'Bad AUTO user token: {}'.format(LOGIN_AUTO_USER_TOKEN))
                     resource_code = None
 
             if all_static_blocks:
