@@ -1,3 +1,5 @@
+"use strict";
+
 // iOS does not support FormData.set(), so we replace it with FormData.append()
 if (!FormData.prototype.set) {
   FormData.prototype.set = FormData.prototype.append;
@@ -134,18 +136,19 @@ Theas.prototype.updateAllTheasParams = function (nv) {
               else if (n.startsWith(pfx2)) {
                   k = n.substring(pfx2.length);
               }
+              else {
+                k = n;
+              }
 
               if (k) {
                   k = k.replace(':', '$');
-                  thatTheas.theasParams[k] = nv[n];
+                  //thatTheas.theasParams[k] = nv[n];
+                  thatTheas.thatVue.$set(thatTheas.theasParams, k, nv[n]);
               }
           }
       }
 
       let thisErr = thatTheas.theasParams['th$ErrorMessage'];
-      if (thisErr) {
-        thatTheas.raiseError(thisErr);
-      }
 
     }
 
@@ -250,8 +253,17 @@ Theas.prototype.cancelAsync = function (startedBefore) {
 };
 
 Theas.prototype.sendAsync = function (config) {
+   // Note:  the entire config object will be passed in to the response handler
+   // referenced in config.onResponse
+   // This means that the caller can add whatever they want to the config object,
+   // and the callback function will have access to it via the config (3rd) parameter
+   // passed into the onResponse function.
+
    // save reference to Theas object
    let thatTheas = this;
+
+   //Note: Axios passes
+   //passed in the response handler.
 
    if (typeof(config) == 'string') {
        // config actually just contains a string for cmd
@@ -324,7 +336,6 @@ Theas.prototype.sendAsync = function (config) {
    let requestID = thatTheas.uuidv4();
    let CancelToken = axios.CancelToken;
 
-
    let axiosConfig = {
        method: 'post',
        url: config.url,
@@ -372,7 +383,6 @@ Theas.prototype.sendAsync = function (config) {
        alert(error);
        return Promise.reject(error);
    });
-
 
 
     ax.request(axiosConfig)
@@ -815,49 +825,25 @@ Theas.prototype.submitForm = function (v, config) {
 
    axios(axiosConfig)
        .then(function (response) {
-           //handle success
-           thatTheas.updateAllTheasParams(thatTheas.splitToNV(response.data))
+          //handle success
+          thatTheas.updateAllTheasParams(thatTheas.splitToNV(response.data))
 
-           vueObj.submitted = false;
+          vueObj.submitted = false;
 
-/*
-           let params;
-           let nameValue;
-           let thisName;
-           let thisValue;
 
-           let goToURL = '';
+          let goToURL = thatTheas.theasParams['th$NextPage'];
 
-           if (response != undefined) {
-               params = response.data.split('&');
-               for (let i = 0; i < params.length; i++) {
-                   nameValue = params[i].split('=');
+          if (!goToURL && config.onSuccessURL) {
+              goToURL = config.onSuccessURL
+          }
 
-                   thisName = nameValue[0];
-                   thisValue = nameValue[1];
+          if (goToURL) {
+            if (!goToURL.startsWith('/')) {
+            goToURL = '/' + goToURL;
+            }
 
-                   if (thisName == 'theas:th:NextPage') {
-                       // navigate to specified page
-                       goToURL = thisValue;
-                   }
-               }
-
-           }
-*/
-
-           let goToURL = thatTheas.theasParams['th$NextPage'];
-
-           if (!goToURL && config.onSuccessURL) {
-               goToURL = config.onSuccessURL
-           }
-
-           if (goToURL) {
-             if (!goToURL.startsWith('/')) {
-              goToURL = '/' + goToURL;
-             }
-
-             window.location = goToURL;
-           }
+            window.location = goToURL;
+          }
 
        })
        .catch(function (response) {
@@ -999,3 +985,4 @@ if (thatTheas.theasParams['th$ErrorMessage']) {
 
 return result;
 };
+

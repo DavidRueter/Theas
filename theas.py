@@ -730,7 +730,7 @@ class Theas:
             while buf.endswith('&'):
                 buf = buf[:-1]
             for this_nv in buf.split('&'):
-                if this_nv and this_nv.index('=') > 0:
+                if this_nv and this_nv.index('=') == 1:
                     this_name, v = this_nv.split('=')
                     theas_name = this_name
 

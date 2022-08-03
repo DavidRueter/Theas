@@ -772,10 +772,8 @@ class ThCachedResources:
             if all_static_blocks:
                 th_session.log('Resource', 'Will load all static resources from the database.')
             else:
-                if resource_code is None or\
-                                resource_code == '~' or\
-                                resource_code == '/' or\
-                                resource_code == '':
+                if resource_code is None or resource_code == '~':
+                    resource_code = '~'
                     th_session.log('Resource',
                                    'No resource_code specified.  Will load default resource for this session.')
                     get_default_resource = 1
@@ -849,7 +847,7 @@ class ThCachedResources:
                         if 'Revision' in row:
                             this_resource.revision = row['Revision']
 
-                        if this_resource.resource_code and this_resource.resource_code != '~':
+                        if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
                             # added 2/11/2019:  don't want to cache default resource
                             self.add_resource(row['ResourceCode'], this_resource)
 
@@ -857,8 +855,10 @@ class ThCachedResources:
                             this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
                             this_static_blocks_dict['thInclude_' + row['ResourceCode']] = buf
 
-                if resource_code and resource_code != '~' and row_count == 0:
+                if 1 == 0 and resource_code and not resource_code  in ('~', '/', '')  and row_count == 0:
                     # do negative cache
+                    # Negative caching disabled 5/23/2022 due to causing some problems related to:
+                    #  UseSysWebResource, timing and PurgeCache, etc.
                     this_resource = ThResource()
                     this_resource.exists = False
                     self.add_resource(resource_code, this_resource)
@@ -918,6 +918,9 @@ class ThCachedResources:
 
         if resource_code == '':
             resource_code = None
+        elif resource_code in ('~', '__th', '/'):
+                resource_code = '~'
+                get_default_resource = True
 
         if resource_code is not None and resource_code in self.__resources:
             # Cached resource
