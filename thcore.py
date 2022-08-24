@@ -117,6 +117,9 @@ import html
 import json
 import base64
 
+from collections.abc import Coroutine
+
+
 #from time import struct_time, strptime, strftime
 from time import strptime, strftime
 import datetime
@@ -126,6 +129,7 @@ from jinja2 import Undefined, pass_environment #environmentfilter  # , Markup, e
 from jinja2.environment import Environment
 
 ALLOW_UNSAFE_FUNCTIONS = False
+_i = 1
 
 
 def format_str_if(this_str, fmt_str):
@@ -224,7 +228,7 @@ class TheasControlNV:
             self.value = self.datavalue
 
 
-class Theas:
+class Theas():
     def __init__(self, theas_session=None, jinja_environment=None):
 
         # if not isinstance(jinja_environment, Environment):
@@ -312,7 +316,7 @@ class Theas:
         self.set_value('th:PerformUpdate', '0')
 
         self.functions = {}
-        self.authenicator = None
+        self.authenticator = None
 
         self.doOnInit = []
 
@@ -550,8 +554,8 @@ class Theas:
                 if isinstance(datavalue_param, (str, bytes, bytearray)):
                     urlparse.quote(datavalue_param)
 
-                if ctrl_name == 'th:ErrorMessage':
-                    self.th_session.log('Theas', 'th:ErrorMessage value set={}'.format(datavalue_param))
+                #if ctrl_name == 'th:ErrorMessage':
+                #    self.th_session.log('Theas', 'th:ErrorMessage value set={}'.format(datavalue_param))
 
             if this_ctrl_nv is not None:
                 this_ctrl = this_ctrl_nv.control
@@ -661,7 +665,7 @@ class Theas:
                 if this_ctrl is None:
                     this_ctrl = noneTheasControl
                     # else:
-                    # this_ctrl.authenticator = self.authenicator  # record which authenticator created the control
+                    # this_ctrl.authenticator = self.authenticator  # record which authenticator created the control
 
                 if this_ctrl is not None:
                     this_ctrl.attribs = this_attribs
@@ -779,7 +783,7 @@ class Theas:
                         if value_changed:
                             changed_controls.append(this_ctrl_nv)
 
-                self.authenicator = str(uuid.uuid4())  # set a new authenicator GUID
+                self.authenticator = str(uuid.uuid4())  # set a new authenticator GUID
 
         if len(self.doOnAfterProcessRequest):
             for this_func in self.doOnAfterProcessRequest:
@@ -1392,7 +1396,7 @@ class Theas:
                 if result_data:
                     data = result_data
 
-        # self.authenicator = str(uuid.uuid4())  #set a new authenticator GUID
+        # self.authenticator = str(uuid.uuid4())  #set a new authenticator GUID
 
         # render "function_def" template to define functions
         # if self.template_function_def_str:
