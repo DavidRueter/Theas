@@ -145,7 +145,7 @@ venv_py*/
 /misc/
 /node_modules/
 *.zip
-*.exe
+#*.exe
 
 settings.cfg
 TheasServer.exe
