@@ -1,37 +1,42 @@
-from threading import RLock
+from threading import RLock, Thread
 import datetime
 import uuid
 import time
 import asyncio
 
-from pymssql import _mssql
-from thbase import log
+
+from thbase import log, G_server
+
 from thcore import Theas
-from thsql import call_auth_storedproc
+from thsql import call_auth_storedproc, call_logout_storedproc
 
-
+#module-level constances, set by config_thsession()
 _LOGGING_LEVEL = 1
-REMEMBER_USER_TOKEN = True
-SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
-SQL_TIMEOUT = 120
-LOGIN_RESOURCE_CODE = 'login'
-SERVER_PREFIX = 'localhost:8881'
-LOGIN_AUTO_USER_TOKEN = None
+_REMEMBER_USER_TOKEN = True
+_SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
+_SQL_TIMEOUT = 120
+_LOGIN_RESOURCE_CODE = 'login'
+_SERVER_PREFIX = 'localhost:8881'
+_LOGIN_AUTO_USER_TOKEN = None
+_REMOVE_EXPIRED_THREAD_SLEEP = 60
 
+#aliases to the globals lists in TheasServer.py
 G_sessions = None
 G_conns = None
 G_cached_resources = None
 
 def config_thsession(
-        gsess=None,
-        gconns=None,
-        gresources=None,
-        remember_user_token=None,
-        session_max_idle=None,
-        sql_timeout=None,
-        login_resource_code=None,
-        server_prefix = None,
-        login_auto_user_token=None
+        gsess=G_sessions,
+        gconns=G_conns,
+        gresources=G_cached_resources,
+        remember_user_token=_REMEMBER_USER_TOKEN,
+        session_max_idle=_SESSION_MAX_IDLE,
+        sql_timeout=_SQL_TIMEOUT,
+        login_resource_code=_LOGIN_RESOURCE_CODE,
+        server_prefix = _SERVER_PREFIX,
+        login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
+        logging_level=_LOGGING_LEVEL,
+        remove_expired_thread_sleep=_REMOVE_EXPIRED_THREAD_SLEEP
     ):
 
     global G_sessions
@@ -43,24 +48,30 @@ def config_thsession(
     global G_cached_resources
     G_cached_resources = gresources
 
-    global REMEMBER_USER_TOKEN
-    REMEMBER_USER_TOKEN = remember_user_token
+    global _LOGGING_LEVEL
+    _LOGGING_LEVEL = logging_level
 
-    global SESSION_MAX_IDLE
-    SESSION_MAX_IDLE = session_max_idle
+    global _REMEMBER_USER_TOKEN
+    _REMEMBER_USER_TOKEN = remember_user_token
 
-    global SQL_TIMEOUT
-    SQL_TIMEOUT = sql_timeout
+    global _SESSION_MAX_IDLE
+    _SESSION_MAX_IDLE = session_max_idle
 
-    global LOGIN_RESOURCE_CODE
-    LOGIN_RESOURCE_CODE = login_resource_code
+    global _SQL_TIMEOUT
+    _SQL_TIMEOUT = sql_timeout
 
-    global SERVER_PREFIX
-    SERVER_PREFIX = server_prefix
+    global _LOGIN_RESOURCE_CODE
+    _LOGIN_RESOURCE_CODE = login_resource_code
 
-    global LOGIN_AUTO_USER_TOKEN
-    LOGIN_AUTO_USER_TOKEN = login_auto_user_token
-    
+    global _SERVER_PREFIX
+    _SERVER_PREFIX = server_prefix
+
+    global _LOGIN_AUTO_USER_TOKEN
+    _LOGIN_AUTO_USER_TOKEN = login_auto_user_token
+
+    global _REMOVE_EXPIRED_THREAD_SLEEP
+    _REMOVE_EXPIRED_THREAD_SLEEP = remove_expired_thread_sleep
+
 
 # -------------------------------------------------
 # Global session list
@@ -107,7 +118,10 @@ class ThSessions:
     def remove_all_sessions(self):
         with self.mutex:
             for session_token, this_sess in self.__sessions.items():
-                if this_sess is not None and this_sess.sql_conn is not None:
+                if this_sess is not None and\
+                    this_sess.conn is not None and\
+                    this_sess.conn.sql_conn is not None and\
+                    this_sess.conn.sql_conn.conneted:
                     this_sess.sql_conn.close()
 
     def remove_expired(self, remove_all=False):
@@ -124,7 +138,7 @@ class ThSessions:
                     this_session.date_expire < datetime.datetime.now() or
 
                         (
-                        SQL_TIMEOUT > 0 and
+                        _SQL_TIMEOUT > 0 and
                         this_session.date_sql_timeout is not None and
                         this_session.date_sql_timeout < datetime.datetime.now()
                         )
@@ -141,10 +155,10 @@ class ThSessions:
             del expireds
 
 
-    @staticmethod
-    def log(category, *args, severity=10000):
-        if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
-            print(datetime.datetime.now(), 'ThSessions [{}]'.format(category), *args)
+    #@staticmethod
+    #def log(category, *args, severity=10000):
+    #    if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
+    #        print(datetime.datetime.now(), 'ThSessions [{}]'.format(category), *args)
 
     def retrieve_session(self, session_token=None, comments=''):
         this_sess = None
@@ -162,13 +176,11 @@ class ThSessions:
         return this_sess
 
     def _poll_remove_expired(self):
-        global G_server_is_running
-
         last_poll = datetime.datetime.now()
 
-        while self.background_thread_running and G_server_is_running:
+        while self.background_thread_running and G_server.is_running:
             # self.log('PollRemoveExpired', 'Running background_thread_running')
-            if (datetime.datetime.now() - last_poll).total_seconds() > REMOVE_EXPIRED_THREAD_SLEEP:
+            if (datetime.datetime.now() - last_poll).total_seconds() > _REMOVE_EXPIRED_THREAD_SLEEP:
                 last_poll = datetime.datetime.now()
                 self.log('PollRemoveExpired', 'Sessions at start', len(self.__sessions))
                 self.remove_expired()
@@ -176,10 +188,11 @@ class ThSessions:
             time.sleep(3)  # sleep only for 3 seconds so the application can shutdown cleanly when needed
 
     def start_cleanup_thread(self):
-        if REMOVE_EXPIRED_THREAD_SLEEP:
-            self.background_thread_running = True
-            expire_thread = threading.Thread(target=self._poll_remove_expired, name='ThSessions Cleanup')
-            expire_thread.start()
+        pass
+        #if _REMOVE_EXPIRED_THREAD_SLEEP:
+        #    self.background_thread_running = True
+        #    expire_thread = Thread(target=self._poll_remove_expired, name='ThSessions Cleanup')
+        #    expire_thread.start()
 
 
 # -------------------------------------------------
@@ -201,7 +214,7 @@ class ThSession():
 
     def __init__(self):
         self.theas_page = None
-        self.sql_conn = None
+        self.conn = None
 
         self.log_current_request = True
         self.current_handler = None
@@ -256,8 +269,8 @@ class ThSession():
 
         # if set to true, upon successful authenticate the user's token will be saved to a cookie
         # for automatic login on future visits
-        global REMEMBER_USER_TOKEN
-        self.remember_user_token = REMEMBER_USER_TOKEN
+        global _REMEMBER_USER_TOKEN
+        self.remember_user_token = _REMEMBER_USER_TOKEN
 
         self.theas_page = Theas(theas_session=self)
 
@@ -358,17 +371,17 @@ class ThSession():
             self.theas_page = None
             del self.theas_page
 
-        if self.sql_conn is not None:
-            G_conns.release_conn(self.sql_conn)
+        if self.conn is not None:
+            G_conns.release_conn(self.conn)
             #if self.sql_conn.connected:
             #    self.sql_conn.close()
-            self.sql_conn = None
-            del self.sql_conn
+            self.conn = None
+            del self.conn
 
-    @classmethod
-    def cls_log(cls, category, *args, severity=10000):
-        if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
-            print(datetime.datetime.now(), 'ThSessions [' + category + ']:', *args)
+    #@classmethod
+    #def cls_log(cls, category, *args, severity=10000):
+    #    if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
+    #        print(datetime.datetime.now(), 'ThSessions [' + category + ']:', *args)
 
     @classmethod
     async def get_session(cls, retrieve_from_db=False, inhibit_create=False,
@@ -405,10 +418,10 @@ class ThSession():
             retry_count = 0
 
             start_waiting = time.time()
-            seconds_to_wait = 30
+            seconds_to_wait = 30 #wakt up to 30 seconds for a lock
 
             while not lock_succeeded and not give_up:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  #wait .5 seconds between retrries
                 retry_count = retry_count + 1
                 log(this_sess, 'Session', 'Session lock retry', retry_count)
                 lock_succeeded = await this_sess.get_lock(handler_guid=handler_guid)
@@ -417,8 +430,8 @@ class ThSession():
                     give_up = time.time() - start_waiting > seconds_to_wait
 
             if lock_succeeded:
-                if this_sess.sql_conn is None:
-                    this_sess.sql_conn = await G_conns.get_conn(conn_name='get_session()')
+                if this_sess.conn is None:
+                    this_sess.conn = await G_conns.get_conn(conn_name='get_session()')
             else:
                 log(this_sess, 'Session', 'Could not lock session.', this_sess.session_token)
                 failed_to_lock = True
@@ -430,7 +443,7 @@ class ThSession():
         if this_sess is not None:
             this_sess.comments = comments
             this_sess.date_request_start = date_start
-            this_sess.date_expire = datetime.datetime.now() + datetime.timedelta(minutes=SESSION_MAX_IDLE)
+            this_sess.date_expire = datetime.datetime.now() + datetime.timedelta(minutes=_SESSION_MAX_IDLE)
 
 
         return this_sess, failed_to_lock
@@ -453,34 +466,38 @@ class ThSession():
         global G_sessions
 
         if force_init:
-            self.sql_conn = None
+            self.conn = None
 
-        if force_init or self.sql_conn is None or (self.sql_conn is not None and not self.sql_conn.connected):
+        if force_init or self.conn is None or\
+                (self.conn is not None and self.conn.sql_conn is not None and not self.sql_conn.connected):
             self.initialized = False
 
-        if (self.sql_conn is None or not self.initialized):
+        if (self.conn  is None or\
+                self.conn.sql_conn is None or\
+                not self.initialized):
 
             # Establish SQL connection, initialize
-                self.sql_conn = await G_conns.get_con()
+                self.conn = await G_conns.get_conn()
+                self.initialized = False
 
-                if self.sql_conn is not None:
+                if self.conn is not None:
                     # Note:  we have created a new user session, but the user still needs to be authenticated
-                    self.initialized = True
+                       # make sure session has been initialized (to handle uploaded files, etc.)
 
-                    # make sure session has been initialized (to handle uploaded files, etc.)
-
-                    if LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in:
+                    if _LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in:
                         self.log('Auth', 'Authenticating as AUTO user (i.e. public)')
                         try:
-                            await self.authenticate(user_token=LOGIN_AUTO_USER_TOKEN)
-                            #async_as_sync(self.authenticate, user_token=LOGIN_AUTO_USER_TOKEN)
+                            await self.authenticate(user_token=_LOGIN_AUTO_USER_TOKEN)
+                            #async_as_sync(self.authenticate, user_token=_LOGIN_AUTO_USER_TOKEN)
                         except:
                             self.autologged_in = False
 
                         if not self.autologged_in:
                             self.log('Auth',
                                      'Error: Authentication as AUTO user (i.e. public) FAILED.  Is your config file wrong?')
-                            self.log('Auth', 'Bad AUTO user token: {}'.format(LOGIN_AUTO_USER_TOKEN))
+                            self.log('Auth', 'Bad AUTO user token: {}'.format(_LOGIN_AUTO_USER_TOKEN))
+
+                    self.initialized = True
 
         return self
 
@@ -508,7 +525,7 @@ class ThSession():
             self.log('Session', 'Total requests for this session: ', self.request_count)
             self.log('Session', 'Finished with this request')
 
-            if self.sql_conn is None:
+            if self.conn is None:
                 self.log('Session', 'Destroying session')
                 G_sessions.remove_session(self.session_token)
             else:
@@ -519,7 +536,7 @@ class ThSession():
 
             self.release_lock(handler=self.current_handler)
 
-    async def authenticate(self, username=None, password=None, user_token=None, retrieve_existing=False, sql_conn=None):
+    async def authenticate(self, username=None, password=None, user_token=None, retrieve_existing=False, conn=None):
         """
         :param username: Username of user.  If provided, provide password as well
         :param password: Password of user.  Provide if username is provided
@@ -564,7 +581,7 @@ class ThSession():
         # The session keeps a copy of the user_name for convenience / to access in templates
         self.username = None
 
-        resultset = await call_auth_storedproc(th_session=self, sql_conn=sql_conn,
+        resultset = await call_auth_storedproc(th_session=self, conn=conn,
                                                username=username, password=password,
                                                user_token=user_token, retrieve_existing=retrieve_existing
                                                )
@@ -578,7 +595,7 @@ class ThSession():
                 username = row['UserName']
 
             if session_guid is not None:
-                if user_token == LOGIN_AUTO_USER_TOKEN:
+                if user_token == _LOGIN_AUTO_USER_TOKEN:
                     self.logged_in = False
                     self.autologged_in = True
                     self.log('Auth', 'Authenticated as AUTO (public)... not a real login')
@@ -629,31 +646,25 @@ class ThSession():
 
         self.logged_in = False
 
-        if self.sql_conn is not None and self.sql_conn.connected:
+        if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
             self.log('SQL', 'Closing SQL connection in ThSession.logout')
 
             try:
-                self.sql_conn.cancel()
+                self.conn.cancel()
             except Exception as e:
                 self.log('SQL', 'In ThSession.logout, exception calling sql_conn.cancel(). {}'.format(e))
             finally:
                 self.log('SQL', 'Call to cancel() on SQL connection complete')
 
-            if self.sql_conn is not None and self.sql_conn.connected:
-                try:
-                    proc = ThStoredProc('theas.spdoLogout', self)
-                    if await proc.is_ok():
-                        proc.bind(self.session_token, _mssql.SQLVARCHAR, '@SessionToken')
-                        await proc.execute()
-                        #async_as_sync(proc.execute)
-                except Exception as e:
-                    self.log('SQL', 'In ThSession.logout, exception calling theas.spdoLogout. {}'.format(e))
+            if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
+                call_logout_storedproc()
+
 
             try:
-                self.sql_conn.close()
-                self.sql_conn = None
+                self.conn.sql_conn.close()
+                self.conn = None
             except Exception as e:
-                self.log('SQL', 'In ThSession.logout, exception calling sql_conn.close(). {}'.format(e))
+                self.log('SQL', 'In ThSession.logout, exception calling conn.sql_conn.close(). {}'.format(e))
             finally:
                 self.log('SQL', 'In ThSession.logout, call to close() on SQL connection complete')
 
@@ -718,7 +729,7 @@ class ThSession():
 
     def do_on_sql_start(self, proc):
         self.date_last_sql_start = time.time()
-        self.date_sql_timeout = datetime.datetime.now() + datetime.timedelta(seconds=SQL_TIMEOUT)
+        self.date_sql_timeout = datetime.datetime.now() + datetime.timedelta(seconds=_SQL_TIMEOUT)
         self.log('Timing', 'SQL Start for procedure: ', proc.stored_proc_name)
         self.log('Timing', 'SQL execution times out at:', self.date_sql_timeout)
 
@@ -743,7 +754,7 @@ class ThSession():
             this_data['_Theas']['xsrf_token'] = self.current_handler.xsrf_token.decode('ascii')
             this_data['_Theas']['__handler_guid'] = self.current_handler.handler_guid
 
-        this_data['_Theas']['theasServerPrefix'] = SERVER_PREFIX
+        this_data['_Theas']['theasServerPrefix'] = _SERVER_PREFIX
 
         # this_data['_Theas']['xsrf_formHTML'] = self.current_handler.xsrf_form_html()
         this_data['_Theas']['theasParams'] = self.theas_page.get_controls()
@@ -775,7 +786,7 @@ class ThSession():
         template_str = ''
 
         self.log('Resource', 'Fetching login page resource')
-        resource = await G_cached_resources.get_resource(LOGIN_RESOURCE_CODE, self)
+        resource = await G_cached_resources.get_resource(_LOGIN_RESOURCE_CODE, self)
 
         if resource is None:
             # raise Exception ('Could not load login screen template from the database.  Empty template returned from call to theas.spgetSysWebResources.')

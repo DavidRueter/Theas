@@ -1,13 +1,11 @@
 from threading import RLock
 import json
-from thbase import log
-
-from thsql import ThStoredProc
-from thbase import log
-
 from pymssql import _mssql
 
-LOGIN_RESOURCE_CODE = 'login'
+from thbase import log, log_memory
+from thsql import ThStoredProc
+from thbase import log, TheasServerError
+
 
 # -------------------------------------------------
 # Global cached resources
@@ -59,7 +57,8 @@ class ThCachedResources:
     def __init__(self, default_path='somepath', static_file_version_no=1,
                  max_cache_item_size = 1024 * 1024 * 100,  # Only cache SysWebResources that are less than 100 Meg in size
                  max_cache_size = 1024 * 1024 * 1024 * 2,   # Use a maximum of 2 GB of cache)
-                 conn_pool=None
+                 conn_pool=None,
+                 login_resource_code='login'
                  ):
         self.__resources = {}
         self.__static_blocks_dict = {}
@@ -70,6 +69,7 @@ class ThCachedResources:
         self.max_cache_item_size = max_cache_item_size
         self.max_cache_size = max_cache_size
         self.conn_pool=conn_pool
+        self.login_resource_code = login_resource_code
 
     def __del__(self):
         with self.mutex:
@@ -128,10 +128,14 @@ class ThCachedResources:
                 if resource_dict.data is not None:
                     self.cache_bytes_used = self.cache_bytes_used + len(resource_dict.data)
 
+                log_memory(obj=self.__resources, label='ThCachedResources.add_resource')
+
     async def load_resource(self, resource_code, all_static_blocks=False,
                       from_filename=None, is_public=False, is_static=False, get_default_resource=False,
-                      sql_conn=None):
+                      conn=None):
         this_resource = None
+
+        global G_cached_resources
 
         if from_filename:
             # load resource from file
@@ -181,7 +185,7 @@ class ThCachedResources:
             proc = None
 
             # Get SysWebResourcesdata from database
-            proc = ThStoredProc('theas.spgetSysWebResources', None, sql_conn=sql_conn)
+            proc = ThStoredProc('theas.spgetSysWebResources', None, conn=conn)
 
             if await proc.is_ok():
 
@@ -297,7 +301,7 @@ class ThCachedResources:
 
     async def get_resource(self, resource_code, th_session, all_static_blocks=False, from_filename=None,
                            is_public=False, is_static=False, get_default_resource=False,
-                           sql_conn=None):
+                           conn=None):
         global DEFAULT_RESOURCE_CODE
 
         this_resource = None
@@ -322,15 +326,15 @@ class ThCachedResources:
         else:
             # Load resource
 
-            created_sql_conn = False
+            created_conn = False
 
             # Comment out the following to obtain a SQL connection for fetching the resource
             # ...even if the session alreadyhas a different connection.
             # (This lets us fetch multiple resources concurrently.)
-            if th_session and th_session.sql_conn:
-                sql_conn = th_session.sql_conn
+            if th_session and th_session.conn:
+                conn = th_session.conn
 
-            if not from_filename and not sql_conn:
+            if not from_filename and not conn:
                 sql_conn = await self.conn_pool.get_conn(conn_name='get_resource()')
 
                 created_sql_conn = True
@@ -340,18 +344,18 @@ class ThCachedResources:
                                                all_static_blocks=all_static_blocks,
                                                get_default_resource=get_default_resource,
                                                from_filename=from_filename,
-                                               sql_conn=sql_conn)
+                                               conn=conn)
 
-            if created_sql_conn and sql_conn and sql_conn.connected:
+            if created_conn and conn and conn.connected:
                 #sql_conn.close()
-                self.conn_pool.release_conn(sql_conn)
+                self.conn_pool.release_conn(conn)
                 sql_conn = None
 
 
         # Careful:  we could be getting a cached resource in which case there may not yet be a session, in which
         # case we can't update current_resource here!  It is up to the caller to update current_resource
         if th_session is not None and this_resource is not None and this_resource.exists and \
-                this_resource.resource_code != LOGIN_RESOURCE_CODE and \
+                this_resource.resource_code != self.login_resource_code and \
                 this_resource.render_jinja_template:
             # we are assuming that only a jinja template page will have a stored procedure / can serve
             # as the current resource for a session.  (We don't want javascript files and the like
@@ -361,6 +365,6 @@ class ThCachedResources:
 
         return this_resource
 
-    async def load_global_resources(self, sql_conn=None):
+    async def load_global_resources(self, conn=None):
         await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
-        await self.get_resource(None, None, all_static_blocks=True, sql_conn=sql_conn)
+        await self.get_resource(None, None, all_static_blocks=True, conn=conn)

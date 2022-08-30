@@ -1,5 +1,5 @@
 #usr/bin/python
-
+import asyncio
 import sys
 import os
 import platform
@@ -7,7 +7,6 @@ import platform
 import signal
 import binascii
 import traceback
-import logging
 
 import urllib.parse as urlparse
 
@@ -19,29 +18,13 @@ import tornado.options
 
 from pymssql import _mssql
 
+import thbase
 import thcore
 from thsession import *
 from thsql import *
 from thresource import *
 
 import TheasCustom
-
-# We may be run directly, or we may be run via TheasServerSvc
-if __name__ == "__main__":
-    def write_winlog(*args):
-        if len(args) >= 2:
-            print(args[1])
-        else:
-            print(args[0])
-else:
-    if platform.system() == 'Windows':
-        from TheasServerSvc import write_winlog
-    else:
-        def write_winlog(*args):
-            if len(args) >= 2:
-                print(args[1])
-            else:
-                print(args[0])
 
 
 __author__ = 'DavidRueter'
@@ -82,6 +65,7 @@ DEFAULT_RESOURCE_CODE = None
 
 FULL_SQL_IS_OK_CHECK = False
 SQL_TIMEOUT = 60
+SQL_PORT = 1433
 
 USE_WORKER_THREADS = False
 MAX_WORKERS = 30
@@ -94,11 +78,14 @@ SESSION_HEADER_NAME = 'X-Theas-Sesstoken'
 SESSION_COOKIE_NAME = 'theas:th:ST'
 USER_COOKIE_NAME = 'theas:th:UserToken'
 SERVER_PREFIX = 'localhost:8881'
+SERVER_PORT = 8881
 
 COOKIE_SECRET = 'tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay='
 
 MAX_CACHE_ITEM_SIZE = 1024 * 1024 * 100      # Only cache SysWebResources that are less than 100 Meg in size
 MAX_CACHE_SIZE = 1024 * 1024 * 1024 * 2      # Use a maximum of 2 GB of cache
+
+CREATE_INIT_CONNECTIONS = 0
 
 # NOTE:
 # 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
@@ -116,10 +103,31 @@ MAX_CACHE_SIZE = 1024 * 1024 * 1024 * 2      # Use a maximum of 2 GB of cache
 G_sessions = None  # Global list of sessions
 G_cached_resources = None  # Global list of cached resources
 G_program_options = None
-G_server_is_running = False
 G_break_handler = None
+G_shutdown_event = None
 
 G_conns = None
+
+G_periodic_wait = 5 # number of seconds to wait between execution of periodic function
+G_periodic_proc = None
+
+
+# We may be run directly, or we may be run via TheasServerSvc
+if __name__ == "__main__":
+    def write_winlog(*args):
+        if len(args) >= 2:
+            print(args[1])
+        else:
+            print(args[0])
+else:
+    if platform.system() == 'Windows':
+        from TheasServerSvc import write_winlog
+    else:
+        def write_winlog(*args):
+            if len(args) >= 2:
+                print(args[1])
+            else:
+                print(args[0])
 
 class BreakHandler:
     """
@@ -213,11 +221,15 @@ class BreakHandler:
         """
         self._count += 1
 
-        print('Ctrl-C Pressed (caught by BreakHandler)')
+        print('Ctrl-C Pressed (caught by BreakHandler xyz)')
+
+        StopServer()
 
         # If we've exceeded the "emphatic" count disable this handler.
         if self._count >= self._emphatic:
             self.disable()
+
+
         return
 
     def __del__(self):
@@ -242,49 +254,14 @@ class BreakHandler:
         return self._count > 0
 
 def StopServer():
-    global G_server_is_running
-
-    G_server_is_running = False
 
     msg = 'StopServer() called'
     log(None, 'Shutdown', msg)
     write_winlog(msg)
 
-    # this_ioloop = tornado.ioloop.IOLoop.current()
-    # this_ioloop.add_callback(this_ioloop.stop)
+    if thbase.G_server is not None and thbase.G_server.is_running:
+        thbase.G_server.stop(reason='TheasServer.StopServer()')
 
-# def set_exit_handler(func):
-#    signal.signal(signal.SIGTERM, func)
-
-
-# def on_exit(signum, frame):
-#    log(None, 'Shutdown', 'on_exit() called')
-#    StopServer()
-
-def do_periodic_callback():
-    global G_server_is_running
-    global G_break_handler
-
-    # Called by Tornado once a second.
-    # log(None, 'Periodic', 'do_periodic_callback() called')
-
-    if G_break_handler and G_break_handler.trapped:
-        # Ctrl-C pressed
-        G_server_is_running = False
-
-    # if msvcrt.kbhit():
-    #    # Any key pressed
-    #    G_server_is_running = False
-
-    if not G_server_is_running:
-        log(None, 'Periodic', 'Trying to stop IOLoop.instance()')
-
-        this_ioloop = tornado.ioloop.IOLoop.current()
-        this_ioloop.add_callback(this_ioloop.stop)
-
-        # tornado.ioloop.IOLoop.current().stop()
-        # tornado.ioloop.IOLoop.instance().stop()
-        # tornado.ioloop.IOLoop.instance().add_callback(tornado.ioloop.IOLoop.instance().stop)
 
 # -------------------------------------------------
 # ThResponseInfo
@@ -380,7 +357,7 @@ class ThHandler(tornado.web.RequestHandler):
         # Get stored proc theas.spGetResponseInfo
         sql_conn = await ConnectionPool.get_conn(conn_name='get_response_info()')
 
-        proc = ThStoredProc('theas.spgetResponseInfo', None, sql_conn=sql_conn)
+        proc = ThStoredProc('theas.spgetResponseInfo', None, conn=conn)
 
         if await proc.is_ok():
             proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
@@ -395,8 +372,8 @@ class ThHandler(tornado.web.RequestHandler):
 
             th_session = None
 
-            if proc.sql_conn is not None:
-                for row in proc.sql_conn:
+            if proc.resultset is not None:
+                for row in proc.resultset:
                     # note:  should only be one row
                     row_count += 1
                     response_info.current_date = row['CurrentDate']
@@ -773,10 +750,13 @@ class ThHandler(tornado.web.RequestHandler):
                 this_filedata=buf if buf else 'NULL'
             )
 
-            #self.session.sql_conn.execute_non_query(sql_str)
-            await asyncio.get_running_loop().run_in_executor(None, self.session.sql_conn.execute_non_query, sql_str)
+            await asyncio.get_running_loop().run_in_executor(None, self.session.conn.sql_conn.execute_non_query, sql_str)
 
-        if self.session is not None and (self.session.sql_conn is None or not self.session.sql_conn.connected()):
+        if self.session is not None and (
+                self.session.conn is None or
+                not self.session.conn.connected()
+            ):
+
             self.session.log('POST Files', 'Process_uploaded_files(', 'New connection')
             await self.session.init_session()
 
@@ -1876,7 +1856,7 @@ class ThHandler(tornado.web.RequestHandler):
 
                 # def write_error(self, status_code, **kwargs):
                 #    msg = ''
-                #    if self.this_sess.sql_conn == None:
+                #    if self.this_sess.conn.sql_conn == None:
                 #        msg = 'There is no database connection.  '
                 #    msg = msg + e.args[0] + ' ' + e.message
                 #    print('Error: ' + msg)
@@ -1949,6 +1929,7 @@ class ThHandler_Attach(ThHandler):
             attachment['filename'] = filename
             attachment['data'] = buf
             attachment['filetype'] = filetype
+            log_memory(obj=buf, label='ThHandler_Attach.retrieve_attachment')
 
         return attachment
 
@@ -2274,7 +2255,7 @@ class ThHandler_Async(ThHandler):
                 # This allows us to process the async request in situations where the session went away due
                 # to timeout or server restart (assuming "remember me" / user token in cookie is enabled)
 
-            if self.session.current_resource is None or resource_code != self.session.current_resource.resource_code:
+            if G_cached_resources and self.session.current_resource is None or resource_code != self.session.current_resource.resource_code:
                 # Note that an async request will NOT change the session's current_resource
                 this_resource = await G_cached_resources.get_resource(resource_code, self.session)
             else:
@@ -2292,7 +2273,7 @@ class ThHandler_Async(ThHandler):
 
 
             if cmd == 'heartbeat':
-                if self.session is not None and self.session.sql_conn is not None:
+                if self.session is not None and self.session.conn is not None and self.session.conn.sql_conn is not None:
                     buf = None
                     changed_controls = None
                     redirect_to = None
@@ -2313,7 +2294,10 @@ class ThHandler_Async(ThHandler):
                     self.session.finished()
 
             if cmd == 'clearError':
-                if self.session is not None and self.session.theas_page is not None and self.session.sql_conn is not None:
+                if self.session is not None and\
+                        self.session.theas_page is not None and\
+                        self.session.conn is not None and\
+                        self.session.conn.sql_conn  is not None:
                     self.session.theas_page.set_value('th:ErrorMessage', '')
 
                 self.write('clearError')
@@ -2733,13 +2717,13 @@ class ThHandler_REST(ThHandler):
                     self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
                     self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-                    self.finish()
+                    await self.finish()
 
                 if 1 == 0:
                     #if the async request came in on an existng session we don't want to close it!
-                    proc.sql_conn.close()
-                    proc.sql_conn = None
-                    proc.th_session.sql_conn = None
+                    proc.conn.sql_conn.close()
+                    proc.conn.sql_conn = None
+                    proc.th_session.conn.sql_conn = None
 
                     proc = None
 
@@ -2869,39 +2853,6 @@ class ThHandler_PurgeCache(ThHandler):
         self.finish()
 
 
-def get_program_directory():
-    program_cmd = sys.argv[0]
-    program_directory = ''
-    program_filename = ''
-
-    if program_cmd:
-        program_directory, program_filename = os.path.split(program_cmd)
-
-    if not program_directory:
-        # no path is provided if running the python script as: python myscript.py
-        # fall back to CWD
-        program_directory = os.getcwd()
-
-        if program_directory.endswith('system32'):
-            # a service application may return C:\Windows\System32 as the CWD
-
-            # Look to the executable path.
-            program_directory = os.path.dirname(sys.executable)
-
-            if program_directory.endswith('system32'):
-                # However this too will be returned as C:\Windows\System32 when
-                # running as a service on Windows Server 2012 R2.  In that case...
-                # we are stuck.
-                program_directory = ''
-
-    program_directory = os.path.normpath(program_directory)
-
-    if not program_directory.endswith(os.sep):
-        program_directory += os.sep
-
-    return program_directory, program_filename
-
-
 # -------------------------------------------------
 # ThWSHandler test websocket handler
 # -------------------------------------------------
@@ -2932,7 +2883,6 @@ class ThWSHandler_Test(tornado.websocket.WebSocketHandler):
 
 def get_program_settings():
     global G_program_options
-    global G_server_is_running
     global G_cached_resources
     global G_sessions
     global G_break_handler
@@ -2947,6 +2897,7 @@ def get_program_settings():
 
     global FULL_SQL_IS_OK_CHECK
     global SQL_TIMEOUT
+    global SQL_PORT
 
     global FORCE_REDIR_AFTER_POST
 
@@ -2955,6 +2906,7 @@ def get_program_settings():
     global SESSION_COOKIE_NAME
     global USER_COOKIE_NAME
     global SERVER_PREFIX
+    global SERVER_PORT
 
     global USE_WORKER_THREADS
     global MAX_WORKERS
@@ -2990,7 +2942,7 @@ def get_program_settings():
                              help="The web server address prefix to prepend to URLs that need it.", type=str)
 
     G_program_options.define("port",
-                             default=8881,
+                             default=SERVER_PORT,
                              help="The TCP/IP port that the web server will listen on", type=int)
 
     G_program_options.define("sql_server",
@@ -2998,7 +2950,7 @@ def get_program_settings():
                              help="Server name of your MSSQL server instance", type=str)
 
     G_program_options.define("sql_port",
-                             default=1433,
+                             default=SQL_PORT,
                              help="TCP/IP port for your MSSQL server connections", type=int)
 
     G_program_options.define("sql_user",
@@ -3156,15 +3108,18 @@ def get_program_settings():
     USE_WORKER_THREADS = G_program_options.use_worker_threads
     MAX_WORKERS = G_program_options.max_worker_threads
     SQL_TIMEOUT = G_program_options.sql_timeout
+    SQL_PORT = G_program_options.sql_port
+    SERVER_PORT = G_program_options.port
 
+async def get_ready(run_as_svc=False):
 
-def run(run_as_svc=False):
-    global G_program_options
-    global G_server_is_running
     global G_cached_resources
     global G_sessions
     global G_conns
     global G_break_handler
+
+    '''
+
 
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
@@ -3187,11 +3142,7 @@ def run(run_as_svc=False):
 
     global MAX_CACHE_ITEM_SIZE
     global MAX_CACHE_SIZE
-
-    program_directory, program_filename = get_program_directory()
-
-    get_program_settings()
-
+    '''
     if LOGGING_LEVEL:
         msg = 'Theas app getting ready...'
         write_winlog(msg)
@@ -3204,13 +3155,18 @@ def run(run_as_svc=False):
     if G_break_handler:
         G_break_handler.enable()
 
-    msg = 'Starting Theas server {} (in {}) on port {}.'.format(
-        program_filename, program_directory, G_program_options.port)
-    print(msg)
-    write_winlog(msg)
 
-    if not LOGGING_LEVEL:
-        print("Note: Logging is disabled")
+    if run_as_svc:
+        # make sure there is an ioloop in this thread (needed for Windows service)
+        #io_loop = tornado.ioloop.IOLoop()
+        #io_loop.make_current()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+
+    program_directory, program_filename = get_program_directory()
+
+    get_program_settings()
 
 
     G_sessions = ThSessions()  # Global list of sessions
@@ -3218,7 +3174,7 @@ def run(run_as_svc=False):
     G_conns = ConnectionPool(
         SQLSettings(
             server=G_program_options.sql_server,
-            port=G_program_options.sql_port,
+            port=SQL_PORT,
             user=G_program_options.sql_user,
             password=G_program_options.sql_password,
             database=G_program_options.sql_database,
@@ -3237,7 +3193,8 @@ def run(run_as_svc=False):
         static_file_version_no=THEAS_VERSION_INT,
         max_cache_item_size=MAX_CACHE_ITEM_SIZE,
         max_cache_size=MAX_CACHE_SIZE,
-        conn_pool=G_conns
+        conn_pool=G_conns,
+        login_resource_code=LOGIN_RESOURCE_CODE
     )  # Global list of cached resources
 
     config_thsession(
@@ -3249,46 +3206,75 @@ def run(run_as_svc=False):
         sql_timeout=SQL_TIMEOUT,
         login_resource_code=LOGIN_RESOURCE_CODE,
         server_prefix=SERVER_PREFIX,
-        login_auto_user_token=LOGIN_AUTO_USER_TOKEN
+        login_auto_user_token=LOGIN_AUTO_USER_TOKEN,
+        logging_level=LOGGING_LEVEL
     )
 
+    for i in range(CREATE_INIT_CONNECTIONS):
+        print(datetime.datetime.now(), 'Creating pre-load connection')
+        await G_conns.get_conn(force_new=True, conn_name='pre-load')
+
+    try:
+        await G_cached_resources.load_global_resources()
+
+    except Exception as e:
+        msg = 'Theas app: error global cached resources when calling G_cached_resources.load_global_resources(): {}'.format(
+            e)
+        print(msg)
+        traceback.print_exc()
+
+        write_winlog(msg)
+        sys.exit()
+
+    G_sessions.start_cleanup_thread()
+
+    log_memory('Ready to start in get_ready()')
+
+    msg = 'In get_ready() ready to start Theas server {} (in {}) on port {}.'.format(
+        program_filename, program_directory, G_program_options.port)
+    print(msg)
+    write_winlog(msg)
+
+    if not LOGGING_LEVEL:
+        print("Note: Logging is disabled")
 
 
-    if run_as_svc:
-        # make sure there is an ioloop in this thread (needed for Windows service)
-        #io_loop = tornado.ioloop.IOLoop()
-        #io_loop.make_current()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+async def all_done():
+    global G_sessions
+    global G_cached_resources
+    global G_conns
+    global G_break_handler
 
-    http_server = None
+    thbase.G_server.stop(reason='TheasServer.all_done')
 
-    async def main():
+    G_cached_resources = None
+    del G_cached_resources
 
-        max_init_connections = 0
-        for i in range(max_init_connections):
-            await G_conns.get_conn(force_new=True, conn_name='pre-load')
+    log(None, 'Shutdown', 'Winding down #4')
 
-        try:
-            await G_cached_resources.load_global_resources()
+    G_sessions.stop()
+    G_sessions = None
+    del G_sessions
 
-        except Exception as e:
-            msg = 'Theas app: error global cached resources when calling G_cached_resources.load_global_resources(): {}'.format(
-                e)
-            print(msg)
-            traceback.print_exc()
+    G_conns = None
+    del G_conns
 
-            write_winlog(msg)
-            sys.exit()
+    log(None, 'Shutdown', 'Winding down #5')
 
-        application = tornado.web.Application([
+    if G_break_handler:
+        G_break_handler.disable()
+
+
+def make_app():
+    return tornado.web.Application(
+        [
             (r'/attach', ThHandler_Attach),
             (r'/attach/(.*)', ThHandler_Attach),
             (r'/logout', ThHandler_Logout),
             (r'/login', ThHandler_Login),
             (r'/back', ThHandler_Back),
             (r'/purgecache', ThHandler_PurgeCache),
-            #(r'/test', TestThreadedHandler),
+            # (r'/test', TestThreadedHandler),
             (r'/ws', ThWSHandler_Test),
             (r'/rest', ThHandler_REST),
             (r'/rest/(.*)', ThHandler_REST),
@@ -3299,104 +3285,112 @@ def run(run_as_svc=False):
             # is specified, this indicates that the resource code is "resourcecode".  "param1/param2" will be passed
             # in to @PathParams in the stored procedure.
         ],
-            debug=False,
-            autoreload=False,
-            xsrf_cookies=True,
-            cookie_secret=COOKIE_SECRET)
 
-        http_server = tornado.httpserver.HTTPServer(application, xheaders=True)
+        debug=False,
+        autoreload=False,
+        xsrf_cookies=True,
+        cookie_secret=COOKIE_SECRET
+    )
 
-        try:
-            http_server.listen(G_program_options.port)
-            await asyncio.Event().wait()
-        except Exception as e:
-            msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port? {}'.format(
-                G_program_options.port, e)
-            print(msg)
-            write_winlog(msg)
-            sys.exit()
+async def periodic():
+    # run every 5 seconds (or G_periodic_wait seconds)
 
-        G_server_is_running = True
+    global G_periodic_wait
+    global G_periodic_proc
 
-    if __name__ == "__main__":
-        asyncio.run(main())
+    loop = asyncio.get_running_loop()
 
-    # disable Tornado's built-in logging to stderr
-    # see:  http://stackoverflow.com/questions/21234772/python-tornado-disable-logging-to-stderr
-    logging.getLogger('tornado.access').disabled = True
+    #log(None, 'Periodic', 'Hi there')
 
-    G_sessions.start_cleanup_thread()
+    thbase.G_service_poll()
 
-    tornado.ioloop.PeriodicCallback(do_periodic_callback, 2000).start()
+    # Note: to stop the service, we can do:  hbase.G_service_send_stop()
 
-    tornado.ioloop.IOLoop.instance().start()
+    # we can do other things here if we want
+    if G_periodic_proc is not None:
+        G_periodic_proc()
 
-    # all_objects = muppy.get_objects()
-    # sum1 = summary.summarize(all_objects)
-    # summary.print_(sum1)
+    await asyncio.sleep(G_periodic_wait)
+
+    if thbase.G_server.is_running:
+        loop.create_task(periodic())
 
 
-    # tornado.ioloop.IOLoop.current().close()
-    # tornado.ioloop.IOLoop.instance().close()
+async def main(run_as_svc=False):
+    global G_shutdown_event
 
+    await get_ready(run_as_svc=run_as_svc)
 
-    msg = 'Shutting down...Exited IOLoop'
-    log(None, 'Shutdown', msg)
-    write_winlog(msg)
-
-    # ioloop = tornado.ioloop.IOLoop.current()
-    # ioloop.add_callback(ioloop.stop)
-    http_server.stop()
-
-    # ThHandler.executor.shutdown()
-    # log(None, 'Shutdown', 'Winding down #1')
-    # ThHandler_Attach.executor.shutdown()
-    # log(None, 'Shutdown', 'Winding down #2')
-    # TestThreadedHandler.executor.shutdown()
-    # log(None, 'Shutdown', 'Winding down #3')
-
-    http_server = None
-    del http_server
-
-    G_cached_resources = None
-    log(None, 'Shutdown', 'Winding down #4')
-
-    G_sessions.stop()
-    # ThSessions.remove_all_sessions()
-    G_sessions = None
-
-    log(None, 'Shutdown', 'Winding down #5')
-
-    if G_break_handler:
-        G_break_handler.disable()
-
-    msg = 'Stopped Theas server {} (in {}) on port {}.'.format(
-        program_filename, program_directory, G_program_options.port)
-
-    print(msg)
-    write_winlog(msg)
-
-
-if __name__ == "__main__":
+    app = make_app()
 
     try:
-        # all_objects = muppy.get_objects()
-        # sum1 = summary.summarize(all_objects)
-        # summary.print_(sum1)
+        global SERVER_PORT
+        app.listen(SERVER_PORT)
+        G_shutdown_event = asyncio.Event()
 
-        # gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
-        # set_exit_handler(on_exit)
-        run()
-        log(None, 'Shutdown', 'Application has ended')
+    except Exception as e:
+        msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port? {}'.format(
+            SERVER_PORT, e)
+        print(msg)
+        write_winlog(msg)
+        sys.exit()
 
-        # all_objects = muppy.get_objects()
-        # sum1 = summary.summarize(all_objects)
-        # summary.print_(sum1)
+    thbase.G_server.start(shutdown_event=G_shutdown_event, reason='TheasServer.main')
+    await G_shutdown_event.wait()
 
-        # os.kill(0, signal.CTRL_BREAK_EVENT)
+    await all_done()
+
+    thbase.G_service_send_stop()
+
+async def parallel(run_as_svc=False):
+
+    await asyncio.gather(main(run_as_svc=run_as_svc), periodic(), return_exceptions=True)
+    pass
+
+def run(run_as_svc=False):
+    #gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
+    #set_exit_handler(on_exit)
+
+    '''
+    if run_as_svc:
+        # make sure there is an ioloop in this thread (needed for Windows service)
+        # io_loop = tornado.ioloop.IOLoop()
+        # io_loop.make_current()
+
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    '''
+
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+
+    #global G_shutdown_event
+    #G_shutdown_event = asyncio.Event()
+
+    #thbase.G_server.start(shutdown_event=G_shutdown_event, reason='TheasServer.run')
+
+    #asyncio.run(main(run_as_svc=run_as_svc))
+    asyncio.run(parallel(run_as_svc=run_as_svc))
+
+    pass
+
+    try:
+        log(None, 'Shutdown', 'TheasServer.run() has fully ended')
+        #log_memory('After end')
+
     finally:
         pass
+         #Clean up _mssql resources
+         #_mssql.exit()
 
-        # Clean up _mssql resources
-        # _mssql.exit_mssql()
-
+if __name__ == "__main__":
+    run()

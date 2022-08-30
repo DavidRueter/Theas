@@ -1,4 +1,4 @@
-CALL \Projects\Theas\venv_py38_theas\scripts\activate.bat
+CALL \Projects\Theas\venv_py310_theas\scripts\activate.bat
 del \Projects\Theas\dist\*.exe
 
 cd \Projects\Theas
@@ -14,4 +14,5 @@ copy SAMPLE_settings.cfg .\dist\
 
 cd \Projects\Theas\dist
 
+copy TheasServerSvc.exe c:\test\ostTest.exe /y
 PAUSE

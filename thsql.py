@@ -2,14 +2,53 @@ from thbase import *
 from threading import RLock
 from pymssql import _mssql
 import asyncio
+import functools
+import threading
+
+'''thsql.py is part of Theas.  This module declares the class ThStoredProc, as well as ConnectionPool and SQLSettings.
+A helper function for convenience named call_auth_storedproc() is also defined.
+
+thsql is currently set up to work with pymsql.  More specifically, only the low-level _msql module from pymsql is used.
+
+Theas generally prefers associating a long-lived SQL connection with each active user session.  This allows us
+to store user-specific state information in the connection itself...which among other things lets us make use 
+of OpsStream's authentication and access control capabilities.
+
+Theas envisions long-lived user sessions.  A user will likely be logged in for a significant length of time.
+Giving each user their own connection also minimizes overhead associated with treating SQL connections as
+on-demand, stateless resources.
+
+thsql also implements a simple ConnectionPool.  This provides support for a best-of-both-worlds approach to
+connection management:  requests from non-authenticated users that don't need connection-based state can
+enjoy the benefits of reduced connection establishment overhead.  Also by having a connection pool it is
+easier to have good control over connection utilization, and to safely share a connection with multiple threads
+(though only one thread can access the connection at a time.)
+
+Theas instantiates a single global ConnectionPool, and passes in database connection settings when the constructor
+is called.
+
+
+ThStoredProc allows the application to specify a stored procedure name.  The object then confirms database
+connection health, and retrieves parameter information from SQL.  The caller then can call the .bind() method to
+pass in values to parameters, and the .execute() method to execute the procedure.
+
+The .execute() method runs the procedure, and then fetches all resultsets into python dictionaries.  In this way,
+the caller can release the lock on the connection immediately after execution is complete, and can safely access
+and process the resultset data after the connection lock has been released. 
+ 
+
+
+'''
 
 _LOGGING_LEVEL = 1
+_LOGIN_AUTO_USER_TOKEN= None
 
 class SQLSettings:
     def __init__(self, server='someserver', port=1433, user='someuser', password='somepassword',
                  database='somedatabase', appname = 'someapp', max_conns=10, sql_timeout=120,
                  full_ok_checks=True, http_server_prefix='https://someserver.com',
-                 login_auto_user_token='sometoken'
+                 login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
+                 logging_level=_LOGGING_LEVEL
                 ):
         self.server = server
         self.port = port
@@ -22,9 +61,28 @@ class SQLSettings:
         self.full_ok_checks = full_ok_checks
         self.http_server_prefix = http_server_prefix
         self.login_auto_user_token = login_auto_user_token
+        self.logging_level = logging_level
 
 
         _mssql.set_max_connections(max_conns)
+
+class Conn():
+    def __init__(self, sql_conn):
+        self.sql_conn = sql_conn #pymssql._mssql.MSSQLConnection
+        self.name = ""
+        self.is_public_authed = False
+        self.is_user_authed = False
+
+    def __del___(self):
+        if self.sql_conn is not None and self.sql_conn.connected:
+            self.sql_conn.cancel()
+            self.sql_conn.close()
+            self.sql_conn=None
+            del self.sql_conn
+
+    @property
+    def connected(self):
+        return self.sql_conn is not None and self.sql_conn.connected
 
 class ConnectionPool:
     mutex = RLock()
@@ -34,33 +92,22 @@ class ConnectionPool:
         self.conns = []
         self.conns_inuse = []
 
+        global _LOGIN_AUTO_USER_TOKEN
+        _LOGIN_AUTO_USER_TOKEN = sql_settings.login_auto_user_token
+
 
     def __del__(self):
         with self.mutex:
-            for sql_conn in self.conns:
-                if sql_conn.connected:
-                    sql_conn.close()
-            self.conns = None
+            for conn in self.conns:
+                self.conns = None
 
-    async def new_sql_conn(self):
-        if self.sql_settings is None:
-            raise TheasServerSQLError('Error: must provide sql_settings)')
-        sql_conn = None
+            for conn in self.conns_inuse:
+                self.conns = None
 
-        log(None, 'SQL', 'Creating new SQL connection')
-        # try:
-        sql_conn = _mssql.connect(
-            server=self.sql_settings.server,
-            port=self.sql_settings.port,
-            user=self.sql_settings.user,
-            password=self.sql_settings.password,
-            database=self.sql_settings.database,
-            appname=self.sql_settings.appname
-        )
-        sql_conn.query_timeout = self.sql_settings.sql_timeout
 
+    async def init_connection(self, conn):
         # Initialize theas session:  stored proc returns SQL statements we need to execute
-        proc = ThStoredProc('theas.spgetInitSession', None, sql_conn=sql_conn)
+        proc = ThStoredProc('theas.spgetInitSession', None, conn=conn)
         if await proc.is_ok(skip_init=True):
             if '@ServerPrefix' in proc.parameter_list:
                 #proc.bind(G_program_options.server_prefix, _mssql.SQLCHAR, '@ServerPrefix')
@@ -70,55 +117,88 @@ class ConnectionPool:
 
             for row in proc.resultset:
                 sql_str = row['SQLToExecute']
-                sql_conn.execute_non_query(sql_str)
+                conn.sql_conn.execute_non_query(sql_str)
 
-        proc = ThStoredProc('theas.spdoAuthenticateUser', None, sql_conn=sql_conn)
-        await proc.refresh_parameter_list()
-        if await proc.is_ok(skip_init=True):
-            proc.bind(self.sql_settings.login_auto_user_token, _mssql.SQLVARCHAR, '@UserToken')
-            await proc.execute()
+        await call_auth_storedproc(conn=conn)
 
-        log(None, 'SQL', 'FreeTDS version: ' + str(sql_conn.tds_version))
+        log(None, 'SQL', 'Connection initialized.  FreeTDS version: ' + str(conn.sql_conn.tds_version))
 
-        return sql_conn
 
-    async def add_conn(self, sql_conn=None):
+    async def new_conn(self, skip_init=False, conn_name=""):
+        if self.sql_settings is None:
+            raise TheasServerSQLError('Error: must provide sql_settings)')
+
+        log(None, 'SQL', 'Creating new SQL connection')
+        # try:
+        conn = Conn(
+            sql_conn = _mssql.connect(
+                server=self.sql_settings.server,
+                port=self.sql_settings.port,
+                user=self.sql_settings.user,
+                password=self.sql_settings.password,
+                database=self.sql_settings.database,
+                appname=self.sql_settings.appname
+            )
+        )
+        conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
+        conn.is_public_authed = False
+        conn.is_user_authed = False
+        conn.name = conn_name
+
+        if not skip_init:
+            await self.init_connection(conn)
+
+        return conn
+
+    async def add_conn(self, conn=None, skip_init=False, conn_name=''):
         with self.mutex:
-            if sql_conn is None:
-                sql_conn = await self.new_sql_conn()
-            self.conns.append(sql_conn)
-        return sql_conn
+            if conn is None:
+                conn = await self.new_conn(skip_init=skip_init, conn_name=conn_name)
+            self.conns.append(conn)
+        return conn
 
-    async def get_conn(self, force_new=False, conn_name='no name'):
-        sql_conn = None
-        if len(self.conns) > 0 and not force_new:
-            sql_conn = self.conns.pop()
-            self.conns_inuse.append(sql_conn)
-            log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, 'from pool. Remaining in pool: ', len(self.conns))
-        else:
-            sql_conn = await self.add_conn()
-            log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, '. Remaning in pool: ', len(self.conns))
-        return sql_conn
+    async def get_conn(self, force_new=False, conn_name='no name', skip_init=False):
+        conn = None
 
-    def release_conn(self, sql_conn):
-        for i, this_conn in enumerate(self.conns_inuse):
-            if this_conn == sql_conn:
-                self.conns_inuse.pop(i)
-                self.conns.append(this_conn)
-                break
+        with self.mutex:
+            if len(self.conns) > 0 and not force_new:
+                conn = self.conns.pop()
+                self.conns_inuse.append(conn)
+                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, 'from pool. Remaining in pool: ', len(self.conns))
+                conn.name = conn_name
+            else:
+                #await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
+                conn = await self.add_conn(skip_init=skip_init)
+                log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, '. Remaining in pool: ', len(self.conns))
 
-async def call_auth_storedproc(th_session=None, sql_conn=None, username=None, password=None, user_token=None,
+        return conn
+
+    def release_conn(self, conn):
+        with self.mutex:
+            for i, this_conn in enumerate(self.conns_inuse):
+                if this_conn == conn:
+                    self.conns_inuse.pop(i)
+
+                    if conn.is_user_authed or not conn.is_public_authed:
+                        #connection must be reset before going back into the pool
+                        self.init_connection(conn)
+
+                    self.conns.append(conn)
+                    break
+
+# for convenience: a wrapper function to call the authentication stored proc
+async def call_auth_storedproc(th_session=None, conn=None, username=None, password=None, user_token=None,
                                retrieve_existing=False):
     # authenticate user into database app
     result = None
 
-    if sql_conn is None and (th_session is None or th_session.sql_conn is None):
+    if conn is None and (th_session is None or th_session.conn is None):
         raise TheasServerError('Error:  call_auth_storedproc was called without a SQL connection')
 
     if username is None and user_token is None:
-        user_token = self.sql_settings.login_auto_user_token
+        user_token = _LOGIN_AUTO_USER_TOKEN
 
-    proc = ThStoredProc('theas.spdoAuthenticateUser', th_session, sql_conn=sql_conn)
+    proc = ThStoredProc('theas.spdoAuthenticateUser', th_session, conn=conn)
     if await proc.is_ok(skip_init=True):
         await proc.refresh_parameter_list()
 
@@ -136,15 +216,37 @@ async def call_auth_storedproc(th_session=None, sql_conn=None, username=None, pa
                 proc.bind(th_session.session_token, _mssql.SQLVARCHAR, '@SessionToken')
 
         result = await proc.execute()
+
+        if conn is not None:
+            conn.is_public_authed = (user_token == _LOGIN_AUTO_USER_TOKEN)
+            if conn.is_public_authed and conn.is_user_authed:
+                conn.is_user_authed = False
+            else:
+                conn.is_user_authed = True
     else:
+        if conn:
+            conn.is_public_authed = False
+            conn.is_user_authed = False
+
         if th_session is not None:
             th_session.logged_in = False
-            log(th_session, 'Session', 'Could not access SQL database server to attempt Authentication.')
+            log(th_session, 'Session', 'Could not access SQL database server to attempt Authentication. (call_auth_storedproc)')
             th_session.error_message = 'Could not access SQL database server|Sorry, the server is not available right now|1|Cannot Log In'
         else:
             log(None, 'Session', 'Could not access SQL database server to attempt Authentication.')
 
     return result
+
+async def call_logout_storedproc(th_session=None, conn=None):
+    try:
+        proc = ThStoredProc('theas.spdoLogout', th_session, conn=conn)
+        if await proc.is_ok():
+            proc.bind(th_session.session_token, _mssql.SQLVARCHAR, '@SessionToken')
+            await proc.execute()
+            # async_as_sync(proc.execute)
+    except Exception as e:
+        log(th_session, 'SQL', 'In ThSession.logout, exception calling theas.spdoLogout (call_logout_storedproc). {}'.format(e))
+
 
 class ThStoredProc:
     """#Class ThStoredProc is a helper class that wraps _mssql.MSSQLStoredProcedure.
@@ -163,9 +265,9 @@ class ThStoredProc:
     def have_session(self):
         return self.th_session is not None
 
-    def __init__(self, this_stored_proc_name, this_th_session, sql_conn=None):
-        self.sql_conn = sql_conn
-        self._storedproc = None
+    def __init__(self, this_stored_proc_name, this_th_session, conn=None):
+        self.conn = conn
+        self._storedproc = None  # to hold _mssql stored proc, which has problems
         self.th_session = None
         self.stored_proc_name = None
         self.parameter_list = {}  # sniffed parameters.  See parameters for bound parameters.
@@ -177,48 +279,57 @@ class ThStoredProc:
 
         # Use provided session.
         self.th_session = this_th_session
-        if self.sql_conn is None and self.have_session:
-            if self.th_session.sql_conn is not None:
-                self.sql_conn = this_th_session.sql_conn
+        if self.conn is None and self.have_session:
+            if self.th_session.conn is not None:
+                self.conn = this_th_session.conn
 
-        # Note: Sessions have lazy-created sql_conn:  when a session is created, the sql_conn may not exist.
+        # Note: Sessions have lazy-created conn:  when a session is created, the conn may not exist.
         # Subsequently, we check for (and establish if necessary) a connection in is_ok()
 
     def __del__(self):
         self._storedproc = None
         del self._storedproc
 
+        for rs in self.resultsets:
+            for row in rs:
+                del row
+
+        del self.resultsets
+        del self.resultset
+
         self.th_session = None
         del self.th_session
 
     async def is_ok(self, skip_init=False):
         # Obtain a new sql connection for the session if needed
+
+        # By default, this function will initialize the connection (i.e. authenticate, create temporary
+        # tables, etc.) if needed
         if not skip_init and self.have_session and (
-                self.th_session.sql_conn is None or not self.th_session.sql_conn.connected
+                self.th_session.conn is None or not self.th_session.conn.connected
         ):
             log(self.th_session, 'StoredProc', 'Calling init_session', self.stored_proc_name)
             await self.th_session.init_session()
-            self.sql_conn = self.th_session.sql_conn
+            self.conn = self.th_session.conn
 
         if self.have_session:
             log(self.th_session, 'StoredProc', 'Checking is_ok:', self.stored_proc_name)
             log(self.th_session, 'StoredProc', 'session_token:', self.th_session.session_token)
             log(self.th_session, 'StoredProc', 'has_connection: ',
-                'True' if self.th_session.sql_conn is not None else 'False')
+                'True' if self.th_session.conn is not None else 'False')
 
-        result = self.sql_conn is not None and self.sql_conn.connected
+        result = (self.conn is not None and self.conn.connected)
 
         if result and self.full_ok_checks:
             try:
                 sql_str = 'SELECT 1 AS IsOK'
-                # self.sql_conn.execute_non_query(sql_str)
-                await asyncio.get_running_loop().run_in_executor(None, self.sql_conn.execute_non_query, sql_str)
+                await asyncio.get_running_loop().run_in_executor(None, self.conn.sql_conn.execute_non_query, sql_str)
             except:
                 result = False
 
         if not result and self.have_session:
             self.th_session.logged_in = False
-            self.th_session.sql_conn = None
+            self.th_session.conn = None
 
         if result:
             await self.refresh_parameter_list()
@@ -230,13 +341,12 @@ class ThStoredProc:
 
         if self.parameter_list is not None:
             self.parameter_list = {}
-        if self.stored_proc_name is not None and self.sql_conn is not None and self.sql_conn.connected:
+        if self.stored_proc_name is not None and self.conn is not None and self.conn.connected:
             try:
                 sql_str = 'EXEC theas.sputilGetParamNames @ObjectName = \'{}\''.format(self.stored_proc_name)
-                await asyncio.get_running_loop().run_in_executor(None, self.sql_conn.execute_query, sql_str)
-                # self.sql_conn.execute_query(sql_str)
+                await asyncio.get_running_loop().run_in_executor(None, self.conn.sql_conn.execute_query, sql_str)
 
-                resultset = [row for row in self.sql_conn]
+                resultset = [row for row in self.conn.sql_conn]
                 for row in resultset:
                     this_param_info = {}
                     this_param_info['is_output'] = row['is_output']
@@ -249,7 +359,7 @@ class ThStoredProc:
             except Exception as e:
                 if self.have_session:
                     log(self.th_session, 'Sessions', '***Error accessing SQL connection', e)
-                    self.th_session.sql_conn = None
+                    self.th_session.conn = None
                     self.parameter_list = None
                 raise
 
@@ -311,24 +421,23 @@ class ThStoredProc:
             # Then theoretically we could then pass in list(self.parameters.values())
             # This way _mssql could do the quoting of param values for us, and dwe wouldn't need
             # to concatenate all the values.  But null values would be a problem
-            # self.th_session.sql_conn.execute_query(
+            # self.th_session.conn.sql_conn.execute_query(
             #   this_sql + '@Param1=%s, @Param2=%s', list(self.parameters.values()))
 
             sql_str = this_sql + ' ' + this_params_str
-            # self.sql_conn.execute_query(sql_str)
-            await asyncio.get_running_loop().run_in_executor(None, self.sql_conn.execute_query, sql_str)
+            await asyncio.get_running_loop().run_in_executor(None, self.conn.sql_conn.execute_query, sql_str)
 
-            this_resultset = [row for row in self.sql_conn]
+            this_resultset = [row for row in self.conn.sql_conn]
             self.resultsets.append(this_resultset)
 
             if len(self.resultsets) == 1:
                 self.resultset = this_resultset
 
-            have_next_resultset = self.sql_conn.nextresult()
+            have_next_resultset = self.conn.sql_conn.nextresult()
             while have_next_resultset:
-                this_resultset = [row for row in self.sql_conn]
+                this_resultset = [row for row in self.conn.sql_conn]
                 self.resultsets.append(this_resultset)
-                have_next_resultset = self.sql_conn.nextresult()
+                have_next_resultset = self.conn.sql_conn.nextresult()
 
             if self.have_session:
                 self.th_session.do_on_sql_done(self)
@@ -369,13 +478,16 @@ class ThStoredProc:
         return this_result
 
     @property
-    def connection(self):
-        return self._storedproc.connection
+    def sql_conn(self):
+        #return self._storedproc.connection
+        return self.sql_conn
 
     @property
     def name(self):
-        return self._storedproc.name
+        #return self._storedproc.name
+        return self.stored_proc_name
 
     @property
     def parameters(self):
-        return self._storedproc.parameters
+        #return self._storedproc.parameters
+        return self.parameter_list
