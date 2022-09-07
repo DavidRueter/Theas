@@ -874,6 +874,8 @@ class Theas():
         # Can pass in an optional parameter quotes=True which will cause leading and trailing double
         # quotes to be added to the result.  (The default is no quotes will be added to the result.
 
+
+
         if this_value in this_env.theas_page.th_session.resource_versions:
             this_version = str(this_env.theas_page.th_session.resource_versions[this_value]['Revision'])
 

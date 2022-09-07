@@ -187,7 +187,8 @@ class ThCachedResources:
             # Get SysWebResourcesdata from database
             proc = ThStoredProc('theas.spgetSysWebResources', None, conn=conn)
 
-            if await proc.is_ok():
+            is_ok = await proc.is_ok()
+            if is_ok:
 
                 # Note:  we could check for existence of @GetDefaultResource down below to help with backwards
                 # compatibility ... but that would mean having to call refresh_parameter_list, which is
@@ -329,13 +330,13 @@ class ThCachedResources:
             created_conn = False
 
             # Comment out the following to obtain a SQL connection for fetching the resource
-            # ...even if the session alreadyhas a different connection.
+            # ...even if the session already has a different connection.
             # (This lets us fetch multiple resources concurrently.)
             if th_session and th_session.conn:
                 conn = th_session.conn
 
-            if not from_filename and not conn:
-                sql_conn = await self.conn_pool.get_conn(conn_name='get_resource()')
+            if not from_filename and conn is None:
+                conn = await self.conn_pool.get_conn(conn_name='get_resource()')
 
                 created_sql_conn = True
 
@@ -347,9 +348,9 @@ class ThCachedResources:
                                                conn=conn)
 
             if created_conn and conn and conn.connected:
-                #sql_conn.close()
+                #conn.close()
                 self.conn_pool.release_conn(conn)
-                sql_conn = None
+                conn = None
 
 
         # Careful:  we could be getting a cached resource in which case there may not yet be a session, in which
