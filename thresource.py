@@ -5,7 +5,16 @@ from pymssql import _mssql
 from thbase import log, log_memory
 from thsql import ThStoredProc
 from thbase import log, TheasServerError
+import string
 
+G_cached_resources = None
+
+def config_thresource(
+        gresources=None,
+    ):
+    global G_cached_resources
+    if gresources is not None:
+        G_cached_resources = gresources
 
 # -------------------------------------------------
 # Global cached resources
@@ -200,13 +209,13 @@ class ThCachedResources:
                 # if '@GetDefaultResource' in proc.parameter_list:
                 proc.bind(str(int(get_default_resource)), _mssql.SQLCHAR, '@GetDefaultResource')
 
-                await proc.execute()
+                exec_result = await proc.execute()
 
                 row_count = 0
 
                 this_static_blocks_dict = {}
 
-                if proc.resultset is not None:
+                if exec_result and proc.resultset is not None:
                     for row in proc.resultset:
                         row_count += 1
                         buf = row['ResourceText']
@@ -219,8 +228,11 @@ class ThCachedResources:
                             # Perform replacement of includes.  Template may include string like:
                             # $thInclude_MyResourceCode
                             # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
-                            tmp = string.Template(buf)
-                            buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
+                            try:
+                                tmp = string.Template(buf)
+                                buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
+                            except Exception as e:
+                                log(None, 'Resource', 'Error in load_resource() when processing $thInclude_xxx', e)
 
                         this_resource = ThResource()
 

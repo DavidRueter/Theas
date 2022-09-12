@@ -223,6 +223,7 @@ class ThSession():
         self.session_token = None
 
         self.session_token = str(uuid.uuid4())
+        self.__error_message = ''
 
         self.logged_in = False
         self.autologged_in = False
@@ -294,6 +295,14 @@ class ThSession():
                 self.log('Resource', 'Current_resource changed to: {}  Was: {}'.format(value.resource_code,
                                                                                        self.__current_resource.resource_code if self.__current_resource else 'not set'))
                 self.__current_resource = value
+    @property
+    def error_message(self):
+        return self.__error_message
+
+    @error_message.setter
+    def error_message(self, value):
+        self.__error_message = value
+        self.theas_page.set_value('theas:th:ErrorMessage', self.__error_message)
 
     @property
     def locked(self):
@@ -372,11 +381,7 @@ class ThSession():
             del self.theas_page
 
         if self.conn is not None:
-            G_conns.release_conn(self.conn)
-            #if self.sql_conn.connected:
-            #    self.sql_conn.close()
-            self.conn = None
-            del self.conn
+            G_conns.kill_conn(self.conn)
 
     #@classmethod
     #def cls_log(cls, category, *args, severity=10000):
@@ -544,7 +549,7 @@ class ThSession():
         :param retrieve_existing: Boolean flag.  If set, does not authenticate, but does retrieve existing session
         :return: logged_in (boolean), error_message (string)
         """
-        error_message = ''
+
         self.logged_in = False
         result = False
 
@@ -589,32 +594,42 @@ class ThSession():
         try:
             session_guid = None
 
-            for row in resultset:
-                session_guid = row['SessionGUID']
-                user_token = row['UserToken']
-                username = row['UserName']
+            if resultset is None:
+                self.logged_in = False
+                self.user_token = None
 
-            if session_guid is not None:
-                if user_token == _LOGIN_AUTO_USER_TOKEN:
-                    self.logged_in = False
-                    self.autologged_in = True
-                    self.log('Auth', 'Authenticated as AUTO (public)... not a real login')
 
-                else:
-                    self.logged_in = True
+                self.log('Session', 'Authentication failed:', self.error_message)
+                self.error_message =  self.error_message + '|' + 'Invalid username or password.|1|Could Not Log In'
+                #self.theas_page.set_value('theas:th:ErrorMessage', error_message)
 
-                    # Store some user information (so the information can be accessed in templates)
-                    self.username = username
-                    self.user_token = user_token
+            else:
+                for row in resultset:
+                    session_guid = row['SessionGUID']
+                    user_token = row['UserToken']
+                    username = row['UserName']
 
-                    if self.current_data:
-                        # update data for template (in case Authenticate() was called at the request
-                        # of a resource's stored procedure just before rendering the page)
-                        self.current_data['_Theas']['UserName'] = self.username
-                        self.current_data['_Theas']['LoggedIn'] = self.logged_in
-                        self.current_data['_Theas']['UserToken'] = self.user_token
+                if session_guid is not None:
+                    if user_token == _LOGIN_AUTO_USER_TOKEN:
+                        self.logged_in = False
+                        self.autologged_in = True
+                        self.log('Auth', 'Authenticated as AUTO (public)... not a real login')
 
-                    self.log('Auth', 'Authenticated as actual user {}'.format(self.username))
+                    else:
+                        self.logged_in = True
+
+                        # Store some user information (so the information can be accessed in templates)
+                        self.username = username
+                        self.user_token = user_token
+
+                        if self.current_data:
+                            # update data for template (in case Authenticate() was called at the request
+                            # of a resource's stored procedure just before rendering the page)
+                            self.current_data['_Theas']['UserName'] = self.username
+                            self.current_data['_Theas']['LoggedIn'] = self.logged_in
+                            self.current_data['_Theas']['UserToken'] = self.user_token
+
+                        self.log('Auth', 'Authenticated as actual user {}'.format(self.username))
 
             proc = None
             del proc
@@ -623,7 +638,7 @@ class ThSession():
             self.logged_in = False
             self.user_token = None
             self.log('Session', 'Authentication failed:', e)
-            error_message = repr(e) + '|' + 'Invalid username or password.|1|Could Not Log In'
+            self.error_message = repr(e) + '|' + 'Invalid username or password.|1|Could Not Log In'
 
         if self.current_handler:
             # If authentication was successful, we want to make sure the UserToken
@@ -637,7 +652,7 @@ class ThSession():
             # always write the cookie...even if authentication failed (in which case we need to clear it)
             self.current_handler.write_cookies()
 
-        return self.logged_in, error_message
+        return self.logged_in, self.error_message
 
     async def logout(self):
         self.log('Session', 'Logged out.')
@@ -649,24 +664,9 @@ class ThSession():
         if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
             self.log('SQL', 'Closing SQL connection in ThSession.logout')
 
-            try:
-                self.conn.cancel()
-            except Exception as e:
-                self.log('SQL', 'In ThSession.logout, exception calling sql_conn.cancel(). {}'.format(e))
-            finally:
-                self.log('SQL', 'Call to cancel() on SQL connection complete')
-
             if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
-                call_logout_storedproc()
+                await call_logout_storedproc()
 
-
-            try:
-                self.conn.sql_conn.close()
-                self.conn = None
-            except Exception as e:
-                self.log('SQL', 'In ThSession.logout, exception calling conn.sql_conn.close(). {}'.format(e))
-            finally:
-                self.log('SQL', 'In ThSession.logout, call to close() on SQL connection complete')
 
     def clientside_redir(self, url=None, action='get'):
         # returns tiny html document to send to browser to cause the browser to post back to us
@@ -748,6 +748,8 @@ class ThSession():
         #this_data['_Theas']['ST'] = self.session_token
         this_data['_Theas']['UserName'] = self.username
         this_data['_Theas']['LoggedIn'] = self.logged_in
+        this_data['_Theas']['ErrorMessage'] = self.error_message
+
         #this_data['_Theas']['UserToken'] = self.user_token
 
         if self.current_handler is not None:
@@ -766,6 +768,7 @@ class ThSession():
 
         now_time = datetime.datetime.now().strftime("%I:%M%p")
         this_data['_Theas']['Now'] = now_time
+
 
         # Note:  if an APIStoredProc is called, data._resultsetMeta will be added,
         # but we do not add this dictionary here during initialization

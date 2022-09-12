@@ -508,10 +508,12 @@ class ThHandler(tornado.web.RequestHandler):
 
         finally:
             self.write(buf)
-            self.finish()
 
-            if self.session is not None:
+            if self.session and self.session.locked:
                 self.session.finished()
+
+            #await self.finish()
+            self.finish()
 
     async def exec_stored_proc(self, stored_proc_name, cmd='', path_params=''):
         buf = None
@@ -960,7 +962,8 @@ class ThHandler(tornado.web.RequestHandler):
                 #err_msg = e.text.decode('ascii')
                 err_msg = str(e)
 
-                self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(urlparse.quote(err_msg)))
+                #self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(urlparse.quote(err_msg)))
+                self.session.error_message = urlparse.quote(err_msg)
 
         # if not suppress_resultsets:
         if not had_error:
@@ -1088,7 +1091,8 @@ class ThHandler(tornado.web.RequestHandler):
 
                         if 'ErrorMessage' in row:
                             if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
-                                self.session.theas_page.set_value('theas:th:ErrorMessage', row['ErrorMessage'])
+                                #self.session.theas_page.set_value('theas:th:ErrorMessage', row['ErrorMessage'])
+                                self.session.error_message = row['ErrorMessage']
 
                         if 'Cookies' in row:
                             new_cookies_str = row['Cookies']
@@ -1540,9 +1544,18 @@ class ThHandler(tornado.web.RequestHandler):
                 # if not self.session.authenticate(username=self.get_argument('u'), password=self.get_argument('pw')):
                 if not success:
                     # authentication failed, so send the login screen
-                    self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
+                    #self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
+                    self.session.error_message = 'Error: {}.'.format(error_message)
                     buf = await self.session.build_login_screen()
                     self.write(buf)
+                    handled = True
+
+                    if self.session and self.session.locked:
+                        self.session.finished()
+
+                    await self.finish()
+
+                    this_finished = True
 
                 else:
                     # Authentication succeeded, so continue with redirect
@@ -1608,7 +1621,7 @@ class ThHandler(tornado.web.RequestHandler):
             if self.session and self.session.locked:
                 self.session.finished()
 
-            self.finish()
+            await self.finish()
 
         self.session = None
 
@@ -1838,9 +1851,10 @@ class ThHandler(tornado.web.RequestHandler):
                 else:
                     self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.resource_code))
 
-                self.finish()
 
-            if self.session is not None:
+                await self.finish()
+
+            if self.session and self.session.locked:
                 self.session.comments = None
                 self.session.finished()
 
@@ -1861,7 +1875,7 @@ class ThHandler(tornado.web.RequestHandler):
                 #    msg = msg + e.args[0] + ' ' + e.message
                 #    print('Error: ' + msg)
                 #    self.write('<html><body>Sorry, you encountered an error.  Error message:  ' + msg + '</body></html>')
-                #    self.finish()
+                #    await self.finish()
                 #    #if 'exc_info' in kwargs and issubclass(kwargs['exc_info'][0], ForbiddenException):
                 #    #    self.set_status(403)
 
@@ -2012,12 +2026,14 @@ class ThHandler_Attach(ThHandler):
                         if attachment['filename']:
                             self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(attachment['filename']))
                             self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
-                    self.finish()
+
+                    await self.finish()
                 else:
                     self.send_error(status_code=404)
 
-            self.session.finished()
-            self.session = None
+            if self.session and self.session.locked:
+                self.session.finished()
+                self.session = None
 
     def data_received(self, chunk):
         pass
@@ -2059,13 +2075,19 @@ class ThHandler_Logout(ThHandler):
 
         if self.cookies_changed:
             self.write(self.session.clientside_redir(nextURL))
-            self.session.finished()
-            self.finish()
+
+            if self.session and self.session.locked:
+                self.session.finished()
+
+            await self.finish()
+
         else:
+            if self.session and self.session.locked:
+                self.session.finished()
+
             self.redirect(nextURL)
-            self.session = None
-            # no self.finish needed, due to redirect
-            # self.finish()
+            # no await self.finish needed, due to redirect
+            # await self.finish()
 
     def data_received(self, chunk):
         pass
@@ -2089,23 +2111,33 @@ class ThHandler_Login(ThHandler):
             #self.session = yield self.wait_for_session()
             self.session = await self.wait_for_session()
 
-        if self.session is not None:
-            await self.session.logout()
-            G_sessions.remove_session(self.session.session_token)
+        skip_logout = False
 
-        self.cookie_st = None
-        self.cookie_usertoken = None
-        self.write_cookies()
-        log(None, 'Cookies',
-                          'Clearing cookies {} and {} due to login'.format(SESSION_COOKIE_NAME, USER_COOKIE_NAME))
+        if 'skip_logout' in kwargs:
+            skip_logout = kwargs['skip_logout']
 
-        # self.redirect('/')
-        # self.session = None
-        ##no self.finish needed, due to redirect
-        ##self.finish()
 
-        #self.session = yield self.wait_for_session()
-        self.session = await self.wait_for_session()
+        if not skip_logout:
+
+            if self.session is not None:
+                await self.session.logout()
+                G_sessions.remove_session(self.session.session_token)
+
+            self.cookie_st = None
+            self.cookie_usertoken = None
+            self.write_cookies()
+            log(None, 'Cookies',
+                              'Clearing cookies {} and {} due to login'.format(SESSION_COOKIE_NAME, USER_COOKIE_NAME))
+
+            # self.redirect('/')
+            # self.session = None
+            ##no await self.finish needed, due to redirect
+            ##await self.finish()
+
+            #self.session = yield self.wait_for_session()
+            self.session = await self.wait_for_session()
+
+
         buf = await self.session.build_login_screen()
 
         if self.session is not None:
@@ -2117,10 +2149,12 @@ class ThHandler_Login(ThHandler):
         self.write_cookies()
 
         self.write(buf)
-        self.finish()
 
-        if self.session is not None:
+        if self.session and self.session.locked:
             self.session.finished()
+
+        await self.finish()
+
 
     #@tornado.gen.coroutine
     async def post(self, *args, **kwargs):
@@ -2137,33 +2171,39 @@ class ThHandler_Login(ThHandler):
         error_message = ''
 
         success, error_message = await self.session.authenticate()
-        self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
-
-        resource = await G_cached_resources.get_resource(None, self.session,
-                                                   get_default_resource=self.session.logged_in)
 
         self.write_cookies()
 
         next_page = ''
-        if self.session.logged_in:
-            if resource:
-                next_page = resource.resource_code
-            else:
-                next_page = DEFAULT_RESOURCE_CODE
+
+
+        if not success:
+            self.session.error_message = 'Error: {}.'.format(error_message)
+
+            if self.session is not None and self.session.locked:
+                self.session.finished()
+
+            self.session = None
+            #await self.get(self, args, kwargs)
+            await self.get(self, args, skip_logout=True, kwargs=kwargs)
+
+            #await self.finish()
+
         else:
             next_page = ''
 
+            if self.session.logged_in:
+                if self.session.bookmark_url:
+                    next_page = self.session.bookmark_url
+                else:
+                    next_page = '/'
+            else:
+                next_page = DEFAULT_RESOURCE_CODE
 
-        buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
-            '1' if self.session.logged_in else '0',
-            error_message,
-            next_page)
+            if self.session is not None:
+                self.session.finished()
 
-        self.write(buf)
-        self.finish()
-
-        if self.session is not None:
-            self.session.finished()
+            self.redirect(next_page)
 
     def data_received(self, chunk):
         pass
@@ -2298,7 +2338,8 @@ class ThHandler_Async(ThHandler):
                         self.session.theas_page is not None and\
                         self.session.conn is not None and\
                         self.session.conn.sql_conn  is not None:
-                    self.session.theas_page.set_value('th:ErrorMessage', '')
+                    #self.session.theas_page.set_value('th:ErrorMessage', '')
+                    self.session.error_message = ''
 
                 self.write('clearError')
 
@@ -2318,7 +2359,8 @@ class ThHandler_Async(ThHandler):
                 redirect_to = ''
 
                 success, error_message = await self.session.authenticate()
-                self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
+                #self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
+                self.session.error_message = '{}'.format(error_message)
 
                 resource = await G_cached_resources.get_resource(None, self.session,
                                                                  get_default_resource=self.session.logged_in)
@@ -2334,7 +2376,7 @@ class ThHandler_Async(ThHandler):
                 else:
                     next_page = ''
 
-                if self.session is not None:
+                if self.session and self.session.locked:
                     self.session.finished()
 
                 buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
@@ -2343,7 +2385,8 @@ class ThHandler_Async(ThHandler):
                     next_page)
 
                 self.write(buf)
-                self.finish()
+
+                await self.finish()
 
             else:
                 async_proc_name = None
@@ -2419,9 +2462,12 @@ class ThHandler_Async(ThHandler):
                     self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
                     self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-                    self.session.finished()
+                    if self.session and self.session.locked:
+                        self.session.finished()
+
                     self.session = None
-                    self.finish()
+
+                    await self.finish()
 
     #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
@@ -2804,8 +2850,12 @@ class ThHandler_Back(ThHandler):
                 # self.write(self.session.clientside_redir('/'))
                 self.session.finished()
 
+
+        if self.session and self.session.locked:
+            self.session.finished()
+
         self.session = None
-        self.finish()
+        await self.finish()
 
     def data_received(self, chunk):
         pass
@@ -2850,7 +2900,7 @@ class ThHandler_PurgeCache(ThHandler):
         log(None, 'Cache', message)
 
         self.write('<html><body>' + message + '</body></html>')
-        self.finish()
+        await self.finish()
 
 
 # -------------------------------------------------
@@ -3196,6 +3246,10 @@ async def get_ready(run_as_svc=False):
         conn_pool=G_conns,
         login_resource_code=LOGIN_RESOURCE_CODE
     )  # Global list of cached resources
+
+    config_thresource(
+        gresources=G_cached_resources
+    )
 
     config_thsession(
         gsess=G_sessions,
