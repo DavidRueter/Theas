@@ -1,4 +1,4 @@
-from threading import RLock, Thread
+from threading import RLock
 import datetime
 import uuid
 import time
@@ -26,8 +26,8 @@ G_conns = None
 G_cached_resources = None
 
 def config_thsession(
-        gsess=G_sessions,
-        gconns=G_conns,
+        gsess=G_sessions, # reference to global session list
+        gconns=G_conns, # reference t global connection list
         gresources=G_cached_resources,
         remember_user_token=_REMEMBER_USER_TOKEN,
         session_max_idle=_SESSION_MAX_IDLE,
@@ -76,10 +76,11 @@ def config_thsession(
 # -------------------------------------------------
 # Global session list
 # -------------------------------------------------
+
 class ThSessions:
     """Class ThSessions is to manage a thread-safe global dictionary of active user sessions.
 
-    It provides a mutex, and methods for locking and unlocking the global dictionary, as well as methods for
+    It uses a mutex, and methods for locking and unlocking the global dictionary, as well as methods for
     creating, retrieving, and deleting sessions.
 
     It also provides support for a background thread that is responsible for automatically purging expired
@@ -87,15 +88,15 @@ class ThSessions:
 
     See class ThSession.  (ThSessions manages a dictionary of ThSession objects.)
     """
-    mutex = RLock()
 
     def __init__(self):
         self.__sessions = {}
         self.waiting_for_busy = {}
         self.background_thread_running = False
+        self.lock = RLock()
 
     def __del__(self):
-        with self.mutex:
+        with self.lock:
             for this_session_token in self.__sessions:
                 self.__sessions[this_session_token] = None
             self.__sessions.clear()
@@ -108,7 +109,7 @@ class ThSessions:
 
     def remove_session(self, session_token):
         this_session = None
-        with self.mutex:
+        with self.lock:
             if session_token in self.__sessions:
                 this_session = self.__sessions[session_token]
                 del self.__sessions[session_token]
@@ -116,7 +117,7 @@ class ThSessions:
         return this_session
 
     def remove_all_sessions(self):
-        with self.mutex:
+        with self.lock:
             for session_token, this_sess in self.__sessions.items():
                 if this_sess is not None and\
                     this_sess.conn is not None and\
@@ -124,10 +125,12 @@ class ThSessions:
                     this_sess.conn.sql_conn.conneted:
                     this_sess.sql_conn.close()
 
-    def remove_expired(self, remove_all=False):
+    async def remove_expired(self, remove_all=False):
         global G_program_options
         with self.lock:
             expireds = {}
+
+            log(None, 'ExpiredSess', 'Checking for expired sessions.' 'Total sessions at start:', len(self.__sessions))
 
             for session_token in self.__sessions:
                 this_session = self.__sessions[session_token]
@@ -154,6 +157,8 @@ class ThSessions:
 
             del expireds
 
+            log(None, 'ExpiredSess', 'Done with expired sessions.' 'Total sessions at end:', len(self.__sessions))
+
 
     #@staticmethod
     #def log(category, *args, severity=10000):
@@ -162,7 +167,7 @@ class ThSessions:
 
     def retrieve_session(self, session_token=None, comments=''):
         this_sess = None
-        with self.mutex:
+        with self.lock:
             if session_token and session_token in self.__sessions:
                 # have existing session
                 this_sess = self.__sessions[session_token]
@@ -275,6 +280,14 @@ class ThSession():
 
         self.theas_page = Theas(theas_session=self)
 
+    def __del__(self):
+        if self.theas_page is not None:
+            self.theas_page = None
+            del self.theas_page
+
+        if self.conn is not None:
+            global G_conns
+            G_conns.release_conn_sync(self.conn)
     @property
     def current_resource(self):
         return self.__current_resource
@@ -375,13 +388,6 @@ class ThSession():
                 log(self, 'Session', 'LOCK obtained by handler ({})'.format(self.__locked_by))
         return result
 
-    def __del__(self):
-        if self.theas_page is not None:
-            self.theas_page = None
-            del self.theas_page
-
-        if self.conn is not None:
-            G_conns.kill_conn(self.conn)
 
     #@classmethod
     #def cls_log(cls, category, *args, severity=10000):
@@ -436,7 +442,8 @@ class ThSession():
 
             if lock_succeeded:
                 if this_sess.conn is None:
-                    this_sess.conn = await G_conns.get_conn(conn_name='get_session()')
+                    this_sess.conn = await G_conns.get_conn(conn_name=this_sess.session_token)
+                    log(this_sess, 'Session', 'get_session obtained connection name:', this_sess.conn.name, 'id:', this_sess.conn.id)
             else:
                 log(this_sess, 'Session', 'Could not lock session.', this_sess.session_token)
                 failed_to_lock = True
@@ -483,6 +490,7 @@ class ThSession():
 
             # Establish SQL connection, initialize
                 self.conn = await G_conns.get_conn()
+                log(None, 'Session', 'init_session obtained connection name:', self.conn.name, 'id:', self.conn.id)
                 self.initialized = False
 
                 if self.conn is not None:
@@ -506,7 +514,7 @@ class ThSession():
 
         return self
 
-    def finished(self):
+    async def finished(self):
         if not self.__locked_by:
             pass
         else:
@@ -538,6 +546,10 @@ class ThSession():
 
             self.log_current_request = True
             self.current_handler.cookies_changed = False
+
+            if not self.logged_in and self.conn is not None:
+                global G_conns
+                await G_conns.release_conn(self.conn)
 
             self.release_lock(handler=self.current_handler)
 
@@ -621,6 +633,10 @@ class ThSession():
                         # Store some user information (so the information can be accessed in templates)
                         self.username = username
                         self.user_token = user_token
+
+                        self.theas_page.set_value('th:UserName', self.username)
+                        self.theas_page.set_value('th:ST', self.session_token)
+
 
                         if self.current_data:
                             # update data for template (in case Authenticate() was called at the request

@@ -61,7 +61,6 @@ class ThCachedResources:
     It provides a mutex, and methods for locking and unlocking the global dictionary, as well as methods for
     loading resources, retrieving resources, and deleting resources (i.e. purging cached resources).
     """
-    mutex = RLock()
 
     def __init__(self, default_path='somepath', static_file_version_no=1,
                  max_cache_item_size = 1024 * 1024 * 100,  # Only cache SysWebResources that are less than 100 Meg in size
@@ -69,6 +68,7 @@ class ThCachedResources:
                  conn_pool=None,
                  login_resource_code='login'
                  ):
+        self.lock = RLock()
         self.__resources = {}
         self.__static_blocks_dict = {}
         self.__resource_versions_dict = {}
@@ -77,11 +77,11 @@ class ThCachedResources:
         self.static_file_version_no = static_file_version_no
         self.max_cache_item_size = max_cache_item_size
         self.max_cache_size = max_cache_size
-        self.conn_pool=conn_pool
+        self.conn_pool=conn_pool # Reference to global connection poool
         self.login_resource_code = login_resource_code
 
     def __del__(self):
-        with self.mutex:
+        with self.lock:
             for resource_code in self.__resources:
 
                 this_resource = self.__resources[resource_code]
@@ -132,7 +132,7 @@ class ThCachedResources:
 
         if resource_dict.data is None or\
                 (len(resource_dict.data) < self.max_cache_item_size and self.cache_bytes_used < self.max_cache_size):
-            with self.mutex:
+            with self.lock:
                 self.__resources[resource_code] = resource_dict
                 if resource_dict.data is not None:
                     self.cache_bytes_used = self.cache_bytes_used + len(resource_dict.data)
@@ -293,21 +293,21 @@ class ThCachedResources:
 
         return this_resource
 
-    def delete_resource(self, resource_code=None, delete_all=False):
+    async def delete_resource(self, resource_code=None, delete_all=False):
         result = False
 
         if delete_all and len(self.__resources) > 0:
-            with self.mutex:
+            with self.lock:
                 self.__resources.clear()
                 result = True
 
-            self.load_global_resources()
-
         elif resource_code is not None and resource_code in self.__resources:
-            with self.mutex:
+            with self.lock:
                 self.__resources[resource_code] = None
                 del self.__resources[resource_code]
                 result = True
+
+        await self.load_global_resources()
 
         return result
 
@@ -349,8 +349,9 @@ class ThCachedResources:
 
             if not from_filename and conn is None:
                 conn = await self.conn_pool.get_conn(conn_name='get_resource()')
+                log(None, 'Resource', 'get_resource obtained connection name:', conn.name, 'id:', conn.id)
 
-                created_sql_conn = True
+                created_conn = True
 
 
             this_resource = await self.load_resource(resource_code,
@@ -359,9 +360,9 @@ class ThCachedResources:
                                                from_filename=from_filename,
                                                conn=conn)
 
-            if created_conn and conn and conn.connected:
+            if created_conn and conn is not None:
                 #conn.close()
-                self.conn_pool.release_conn(conn)
+                await self.conn_pool.release_conn(conn)
                 conn = None
 
 

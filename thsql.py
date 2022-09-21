@@ -2,8 +2,8 @@ from thbase import *
 from threading import RLock
 from pymssql import _mssql
 import asyncio
-import functools
-import threading
+import uuid
+
 
 '''thsql.py is part of Theas.  This module declares the class ThStoredProc, as well as ConnectionPool and SQLSettings.
 A helper function for convenience named call_auth_storedproc() is also defined.
@@ -70,9 +70,11 @@ class Conn():
     def __init__(self, sql_conn):
         self.sql_conn = sql_conn #pymssql._mssql.MSSQLConnection
         self.name = ""
+        self.id = str(uuid.uuid4())
         self.is_public_authed = False
         self.is_user_authed = False
         self.last_error = None
+
 
     def __del___(self):
         if self.sql_conn is not None and self.sql_conn.connected:
@@ -85,20 +87,23 @@ class Conn():
     def connected(self):
         return self.sql_conn is not None and self.sql_conn.connected
 
+
+
 class ConnectionPool:
-    mutex = RLock()
 
     def __init__(self, sql_settings=SQLSettings()):
+        self.lock = RLock()
         self.sql_settings = sql_settings
         self.conns = []
         self.conns_inuse = []
+        self.conns_torelease = []
 
         global _LOGIN_AUTO_USER_TOKEN
         _LOGIN_AUTO_USER_TOKEN = sql_settings.login_auto_user_token
 
 
     def __del__(self):
-        with self.mutex:
+        with self.lock:
             for conn in self.conns:
                 self.conns = None
 
@@ -106,13 +111,25 @@ class ConnectionPool:
                 self.conns = None
 
 
-    async def init_connection(self, conn):
+    # NOTE: These methods operate on connections, but they exist in support of pool operations.
+    # Some of them need to access resources in the pool connection list.
+    # For these reasons they are methods of ConnectionPool instead of methods of Conn
+    async def reset_conn(self, conn):
+        proc = ThStoredProc('theas.spactLogout', None, conn=conn)
+        exec_ok = await proc.execute()
+        conn.name = "idle"
+        conn.is_user_authed = False
+        conn.is_public_authed = False
+
+        log(None, 'SQL', 'Connection reset.', conn.id)
+
+    async def init_conn(self, conn):
         # Initialize theas session:  stored proc returns SQL statements we need to execute
         proc = ThStoredProc('theas.spgetInitSession', None, conn=conn)
         if await proc.is_ok(skip_init=True):
             if '@ServerPrefix' in proc.parameter_list:
-                #proc.bind(G_program_options.server_prefix, _mssql.SQLCHAR, '@ServerPrefix')
-                proc.bind(self.sql_settings.http_server_prefix, _mssql.SQLCHAR, '@ServerPrefix')
+                with self.lock:
+                    proc.bind(self.sql_settings.http_server_prefix, _mssql.SQLCHAR, '@ServerPrefix')
 
             exec_ok = await proc.execute()
 
@@ -123,17 +140,19 @@ class ConnectionPool:
 
                 await call_auth_storedproc(conn=conn)
 
-                log(None, 'SQL', 'Connection initialized.  FreeTDS version: ' + str(conn.sql_conn.tds_version))
+                #log(None, 'SQL', 'Connection initialized.  FreeTDS version: ' + str(conn.sql_conn.tds_version))
+                log(None, 'SQL', 'Connection initialized.', conn.id)
             else:
                 log(None, 'SQL',
-                    'Connection initialization failed.  Error calling theas.spgetInitSession: {}'.
+                    'Connection initialization failed.',
+                    conn.id,
+                    'Error calling theas.spgetInitSession: {}'.
                     format(conn.last_error))
 
     async def new_conn(self, skip_init=False, conn_name=""):
         if self.sql_settings is None:
             raise TheasServerSQLError('Error: must provide sql_settings)')
 
-        log(None, 'SQL', 'Creating new SQL connection')
         # try:
         conn = Conn(
             sql_conn = _mssql.connect(
@@ -146,53 +165,92 @@ class ConnectionPool:
             )
         )
         conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
-        conn.is_public_authed = False
-        conn.is_user_authed = False
         conn.name = conn_name
 
+        log(None, 'SQL', 'created_conn() Created new SQL connection name:', conn.name, 'id:', conn.id)
+
         if not skip_init:
-            await self.init_connection(conn)
+            await self.init_conn(conn)
 
         return conn
 
-    async def add_conn(self, conn=None, skip_init=False, conn_name=''):
-        with self.mutex:
-            if conn is None:
-                conn = await self.new_conn(skip_init=skip_init, conn_name=conn_name)
-            self.conns.append(conn)
+    async def add_conn(self, conn=None, use_now=True, skip_init=False, conn_name=''):
+        if conn is None:
+            # Note: new_conn() does create a new SQL connection, and will block the main async IO loop
+            # unless the caller uses an executor thread.  However we expect connections to be fast
+            # to create, and generally there are a modest number of connections...so at this time
+            # we are willing to accept blocking.  The caller can use an executor thread if needed.
+
+            # We want to avoid working with the connection (_mssql object) across threads, and
+            # we want to store the connection in the list...which requires a lock.  And we also
+            # prefer not to have threads locking the global list.
+
+            conn = await self.new_conn(skip_init=skip_init, conn_name=conn_name)
+
+        conn.name = conn_name
+
+        with self.lock:
+            if use_now:
+                self.conns_inuse.append(conn)
+            else:
+                self.conns.append(conn)
+
         return conn
 
-    async def get_conn(self, force_new=False, conn_name='no name', skip_init=False):
+    async def get_conn(self, force_new=False, skip_init=False, conn_name='no name'):
         conn = None
 
-        with self.mutex:
+        with self.lock:
             if len(self.conns) > 0 and not force_new:
                 conn = self.conns.pop()
                 self.conns_inuse.append(conn)
-                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, 'from pool. Remaining in pool: ', len(self.conns))
+                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, conn.id,
+                    'from pool. Remaining in pool: ', len(self.conns))
                 conn.name = conn_name
-            else:
-                #await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
-                conn = await self.add_conn(skip_init=skip_init)
-                log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, '. Remaining in pool: ', len(self.conns))
+        if conn is None:
+            #conn = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
+
+            conn = await self.add_conn(skip_init=skip_init, conn_name=conn_name)
+            log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
+                '. Remaining in pool: ', len(self.conns))
 
         return conn
 
+    def release_conn_sync(self,conn):
+        if conn is not None:
+            with self.lock:
+                self.conns_torelease.append(conn)
+                log(None, 'Conn', 'SQL connection is scheduled to be released. Name:', conn.name, 'id:', id)
+
+    async def process_release_conns(self):
+        with self.lock:
+            log(None, 'Conn', 'process_release_conns() about to process', len(self.conns_torelease), 'connections')
+
+            this_conn = None
+            for i, this_conn in enumerate(self.conns_torelease):
+                if this_conn is not None:
+                    await self.release_conn(this_conn)
+                self.conns_torelease.pop(i)
+
     async def release_conn(self, conn):
-        with self.mutex:
+        with self.lock:
+            log(None, 'SQL', 'release_conn() called for conn name:', conn.name, 'id:', conn.id)
+
             for i, this_conn in enumerate(self.conns_inuse):
                 if this_conn == conn:
                     self.conns_inuse.pop(i)
 
-                    if conn.is_user_authed or not conn.is_public_authed:
+                    #if conn.is_user_authed or not conn.is_public_authed:
                         #connection must be reset before going back into the pool
-                        await self.init_connection(conn)
-
+                    await self.reset_conn(this_conn)
                     self.conns.append(conn)
+
+                    log(None, 'SQL', 'Returned conn to pool:', conn.id)
                     break
 
+            log(None, 'SQL', 'Avail connection count:', len(self.conns))
     def kill_conn(self, conn):
-        with self.mutex:
+        with self.lock:
             for i, this_conn in enumerate(self.conns_inuse):
                 if this_conn == conn:
                     self.conns_inuse.pop(i)
@@ -309,7 +367,7 @@ async def call_logout_storedproc(th_session=None, conn=None):
                 await proc.execute()
 
             if this_conn is not None:
-                this_conn.init_connection()
+                this_conn.init_conn()
 
     except Exception as e:
         log(th_session, 'SQL', 'In ThSession.logout, exception calling theas.spdoLogout (call_logout_storedproc). {}'.format(e))
@@ -382,8 +440,12 @@ class ThStoredProc:
         if self.have_session:
             log(self.th_session, 'StoredProc', 'Checking is_ok:', self.stored_proc_name)
             log(self.th_session, 'StoredProc', 'session_token:', self.th_session.session_token)
-            log(self.th_session, 'StoredProc', 'has_connection: ',
-                'True' if self.th_session.conn is not None else 'False')
+
+            if self.th_session.conn is None:
+                log(self.th_session, 'StoredProc', 'Session has no connection')
+            else:
+                log(self.th_session, 'StoredProc', 'Session conn name:', self.th_session.conn.name,
+                    'id:', self.th_session.conn.id)
 
         result = (self.conn is not None and self.conn.connected)
 

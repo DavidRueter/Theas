@@ -1,7 +1,10 @@
 import datetime
 import sys
 import os
-#from pympler import asizeof, muppy, summary
+import ctypes
+import gc
+
+from pympler import asizeof, muppy, summary as mem_summary
 
 _LOGGING_LEVEL = 1
 
@@ -113,21 +116,6 @@ def log(th_session, category, *args, severity=10000):
         #ThSession.cls_log(category, *args, severity=severity)
         if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
             print(datetime.datetime.now(), 'ThSessions [{}]'.format(category), *args)
-
-def log_memory(obj=None, label="", print_details=False):
-    # see https://pythonhosted.org/Pympler/muppy.html and https://pythonhosted.org/Pympler/muppy.html#the-tracker-module
-
-    if False:
-        if obj is None:
-            all_objects = muppy.get_objects()
-            log(None, 'Memory', 'Total memory used', '({})'.format(label) , len(all_objects))
-
-            if print_details:
-                sum1 = summary.summarize(all_objects)
-                summary.print_(sum1)
-        else:
-            log(None, 'Memory', 'Memory used', '({})'.format(label) , asizeof.asizeof(obj))
-
 
 
 class TheasServerError(BaseException):
@@ -264,3 +252,54 @@ class TheasServerIsRunning():
 
 
 G_server = TheasServerIsRunning()
+
+
+#https://www.pythontutorial.net/advanced-python/python-references/
+#def ref_count(address):
+    #return ctypes.c_long.from_address(address).value
+
+#https://stackify.com/python-garbage-collection/
+3#sys.getrefcount(a)
+
+
+def collect_garbage():
+    #https://www.geeksforgeeks.org/garbage-collection-python/
+    # Returns the number of objects it has collected and deallocated
+    # lists are cleared whenever a full collection or collection of the highest generation (2) is run
+    gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
+    return gc.collect()
+
+
+def memory_report():
+    all_objects = muppy.get_objects()
+
+    buf = ''
+
+    sum1 = mem_summary.summarize(all_objects)
+
+    #mem_summary.print_(sum1)
+
+    lines = []
+
+    for el in sum1:
+        typ, cnt, sz = el
+        lines.append(''.join(('<tr><td>', typ, '</td><td>', str(cnt), '</td><td>', str(sz), '</td></tr>')))
+
+    buf = buf.join(lines)
+    buf = '<h3>Total memory used: {}</h3><br /><table>{}</table>'.format(len(all_objects), buf)
+
+    collect_garbage()
+    return buf
+
+def log_memory(obj=None, label="", print_details=False):
+    # see https://pythonhosted.org/Pympler/muppy.html and https://pythonhosted.org/Pympler/muppy.html#the-tracker-module
+
+        if obj is None:
+            all_objects = muppy.get_objects()
+            log(None, 'Memory', 'Total memory used', '({})'.format(label) , len(all_objects))
+
+            if print_details:
+                sum1 = mem_summary.summarize(all_objects)
+                mem_summary.print_(sum1)
+        else:
+            log(None, 'Memory', 'Memory used', '({})'.format(label) , asizeof.asizeof(obj))

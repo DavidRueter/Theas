@@ -355,16 +355,18 @@ class ThHandler(tornado.web.RequestHandler):
         #    th_session = ThSession(None, new_id=True)
 
         # Get stored proc theas.spGetResponseInfo
-        sql_conn = await ConnectionPool.get_conn(conn_name='get_response_info()')
+        global G_conns
+        conn = await G_conns.get_conn(conn_name='get_response_info()')
+        log(None, 'ThHandler', 'get_response_info obtained connection name:', conn.name, 'id:', conn.id)
 
         proc = ThStoredProc('theas.spgetResponseInfo', None, conn=conn)
+
+        response_info = ThResponseInfo()
 
         if await proc.is_ok():
             proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
 
             await proc.execute()
-
-            response_info = ThResponseInfo()
 
             row_count = 0
 
@@ -387,6 +389,8 @@ class ThHandler(tornado.web.RequestHandler):
 
             proc = None
             del proc
+
+            G_conns.release_conn(conn)
 
         return response_info
 
@@ -512,7 +516,7 @@ class ThHandler(tornado.web.RequestHandler):
             if self.session and self.session.locked:
                 self.session.finished()
 
-            #await self.finish()
+            #self.finish()
             self.finish()
 
     async def exec_stored_proc(self, stored_proc_name, cmd='', path_params=''):
@@ -1167,9 +1171,6 @@ class ThHandler(tornado.web.RequestHandler):
     #def authenticate_user_background(self, u, pw):
     #    return self.session.authenticate(username=u, password=pw)
 
-    #@run_on_executor
-    #def build_login_screen_background(self):
-    #    return self.session.build_login_screen()
 
     async def do_render_response(self, this_resource=None):
         # Gets data and renders template.  Used by GET only.
@@ -1551,9 +1552,9 @@ class ThHandler(tornado.web.RequestHandler):
                     handled = True
 
                     if self.session and self.session.locked:
-                        self.session.finished()
+                        await self.session.finished()
 
-                    await self.finish()
+                    self.finish()
 
                     this_finished = True
 
@@ -1583,13 +1584,14 @@ class ThHandler(tornado.web.RequestHandler):
                             self.session.log('Session', 'Sending client-side redirect to: ({}) after do_post()'.format(
                                 redirect_to))
                             self.write(self.session.clientside_redir(redirect_to))
-                            self.session.finished()
+                            await self.session.finished()
                         else:
                             # can send a normal redirect, since no cookies need to be written
                             this_finished = True
                             self.session.log('Session',
                                              'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
-                            self.session.finished()
+                            if self.session is not None and self.session.is_locked:
+                                await self.session.finished()
                             self.redirect(redirect_to)
 
                     else:
@@ -1619,9 +1621,9 @@ class ThHandler(tornado.web.RequestHandler):
 
         if not handled and not this_finished:
             if self.session and self.session.locked:
-                self.session.finished()
+                await self.session.finished()
 
-            await self.finish()
+            self.finish()
 
         self.session = None
 
@@ -1681,6 +1683,7 @@ class ThHandler(tornado.web.RequestHandler):
                     if ver_pos > 0:
                         resource_code = '.'.join(segments[:ver_pos]) + '.' + '.'.join(segments[ver_pos + 2:])
 
+        log(None, 'GET', '**Starting get for', resource_code)
         # note: self.session is probably not yet assigned
 
         #self.session = yield self.wait_for_session()
@@ -1805,11 +1808,13 @@ class ThHandler(tornado.web.RequestHandler):
                 if self.cookies_changed:
                     # must perform a client-side redirect in order to set cookies
                     self.write(self.session.clientside_redir(redirect_to))
-                    self.session.finished()
+                    await self.session.finished()
                 else:
                     # can send a normal redirect, since no cookies need to be written
-                    self.session.finished()
-                    buf = None
+                    if self.session is not None and self.session.is_locked:
+                        await self.session.finished()
+                        buf = None
+
                     self.redirect(redirect_to)
 
             else:
@@ -1852,11 +1857,11 @@ class ThHandler(tornado.web.RequestHandler):
                     self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.resource_code))
 
 
-                await self.finish()
+                self.finish()
 
             if self.session and self.session.locked:
                 self.session.comments = None
-                self.session.finished()
+                await self.session.finished()
 
                 self.session.log('Request',
                                  'At end, Current Resource is {}'.format(
@@ -1875,7 +1880,7 @@ class ThHandler(tornado.web.RequestHandler):
                 #    msg = msg + e.args[0] + ' ' + e.message
                 #    print('Error: ' + msg)
                 #    self.write('<html><body>Sorry, you encountered an error.  Error message:  ' + msg + '</body></html>')
-                #    await self.finish()
+                #    self.finish()
                 #    #if 'exc_info' in kwargs and issubclass(kwargs['exc_info'][0], ForbiddenException):
                 #    #    self.set_status(403)
 
@@ -2027,12 +2032,12 @@ class ThHandler_Attach(ThHandler):
                             self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(attachment['filename']))
                             self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
 
-                    await self.finish()
+                    self.finish()
                 else:
                     self.send_error(status_code=404)
 
             if self.session and self.session.locked:
-                self.session.finished()
+                await self.session.finished()
                 self.session = None
 
     def data_received(self, chunk):
@@ -2077,17 +2082,17 @@ class ThHandler_Logout(ThHandler):
             self.write(self.session.clientside_redir(nextURL))
 
             if self.session and self.session.locked:
-                self.session.finished()
+                await self.session.finished()
 
-            await self.finish()
+            self.finish()
 
         else:
             if self.session and self.session.locked:
-                self.session.finished()
+                await self.session.finished()
 
             self.redirect(nextURL)
-            # no await self.finish needed, due to redirect
-            # await self.finish()
+            # no self.finish needed, due to redirect
+            # self.finish()
 
     def data_received(self, chunk):
         pass
@@ -2131,8 +2136,8 @@ class ThHandler_Login(ThHandler):
 
             # self.redirect('/')
             # self.session = None
-            ##no await self.finish needed, due to redirect
-            ##await self.finish()
+            ##no self.finish needed, due to redirect
+            ##self.finish()
 
             #self.session = yield self.wait_for_session()
             self.session = await self.wait_for_session()
@@ -2151,9 +2156,9 @@ class ThHandler_Login(ThHandler):
         self.write(buf)
 
         if self.session and self.session.locked:
-            self.session.finished()
+            await self.session.finished()
 
-        await self.finish()
+        self.finish()
 
 
     #@tornado.gen.coroutine
@@ -2181,13 +2186,13 @@ class ThHandler_Login(ThHandler):
             self.session.error_message = 'Error: {}.'.format(error_message)
 
             if self.session is not None and self.session.locked:
-                self.session.finished()
+                await self.session.finished()
 
             self.session = None
             #await self.get(self, args, kwargs)
             await self.get(self, args, skip_logout=True, kwargs=kwargs)
 
-            #await self.finish()
+            #self.finish()
 
         else:
             next_page = ''
@@ -2196,14 +2201,15 @@ class ThHandler_Login(ThHandler):
                 if self.session.bookmark_url:
                     next_page = self.session.bookmark_url
                 else:
-                    next_page = '/'
+                    next_page = '~'
             else:
                 next_page = DEFAULT_RESOURCE_CODE
 
-            if self.session is not None:
-                self.session.finished()
-
             self.redirect(next_page)
+
+            if self.session is not None:
+                await self.session.finished()
+
 
     def data_received(self, chunk):
         pass
@@ -2308,7 +2314,7 @@ class ThHandler_Async(ThHandler):
                              else 'No current resource for this session!')
 
             if self.request_has_files():
-                await self.process_uploaded_files()
+                await self.process_upl()
             # process uploaded files, even if there is no async proc
 
 
@@ -2331,7 +2337,7 @@ class ThHandler_Async(ThHandler):
                     self.write('invalidSession')
 
                 if self.session is not None:
-                    self.session.finished()
+                    await self.session.finished()
 
             if cmd == 'clearError':
                 if self.session is not None and\
@@ -2343,13 +2349,13 @@ class ThHandler_Async(ThHandler):
 
                 self.write('clearError')
 
-                self.session.finished()
+                await self.session.finished()
 
             if cmd == 'theasParams':
                 if self.session is not None:
                     # send ALL Theas controls
                     self.write(self.session.theas_page.serialize())
-                    self.session.finished()
+                    await self.session.finished()
 
 
             if cmd == 'login':
@@ -2377,7 +2383,7 @@ class ThHandler_Async(ThHandler):
                     next_page = ''
 
                 if self.session and self.session.locked:
-                    self.session.finished()
+                    await self.session.finished()
 
                 buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
                     '1' if self.session.logged_in else '0',
@@ -2386,7 +2392,7 @@ class ThHandler_Async(ThHandler):
 
                 self.write(buf)
 
-                await self.finish()
+                self.finish()
 
             else:
                 async_proc_name = None
@@ -2434,9 +2440,11 @@ class ThHandler_Async(ThHandler):
                                              async_proc_name, err_msg))
 
                 if redirect_to:
+                    if self.session is not None and self.session.is_locked:
+                        await self.session.finished()
+                        self.session = None
+
                     # redirect as the stored procedure told us to
-                    self.session.finished()
-                    self.session = None
                     self.redirect(redirect_to)
                 else:
                     if len(buf) > 0:
@@ -2463,15 +2471,14 @@ class ThHandler_Async(ThHandler):
                     self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
                     if self.session and self.session.locked:
-                        self.session.finished()
+                        await self.session.finished()
 
                     self.session = None
 
-                    await self.finish()
+                    self.finish()
 
     #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
-
         return self.post(*args, **kwargs)
 
     def data_received(self, chunk):
@@ -2763,7 +2770,7 @@ class ThHandler_REST(ThHandler):
                     self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
                     self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-                    await self.finish()
+                    self.finish()
 
                 if 1 == 0:
                     #if the async request came in on an existng session we don't want to close it!
@@ -2773,7 +2780,7 @@ class ThHandler_REST(ThHandler):
 
                     proc = None
 
-                self.session.finished()
+                await self.session.finished()
                 #note:  since sql_conn is None, finished() will destroy the session
 
                 self.session = None
@@ -2797,6 +2804,27 @@ class ThHandler_REST(ThHandler):
     async def get(self, *args, **kwargs):
 
         return self.post(*args, **kwargs)
+
+    def data_received(self, chunk):
+        pass
+
+
+# -------------------------------------------------
+# ThHandler_Back "stat" handler
+# -------------------------------------------------
+class ThHandler_Stat(tornado.web.RequestHandler):
+    def __init__(self, application, request, **kwargs):
+        super().__init__(application, request, **kwargs)
+
+    def __del__(self):
+        self.session = None
+
+    #@tornado.gen.coroutine
+    async def get(self, *args, **kwargs):
+        buf = 'Hello World.  Status is OK.'
+        self.write('<html><body>{}</body></html>'.format(memory_report()))
+
+        self.finish()
 
     def data_received(self, chunk):
         pass
@@ -2837,25 +2865,25 @@ class ThHandler_Back(ThHandler):
             # self.write(buf)
             # self.session.log('Response', 'Sending response for back request')
 
-            self.session.finished()
+            await self.session.finished()
         else:
             if self.cookies_changed:
                 # must perform a client-side redirect in order to set cookies
-                self.session.finished()
+                await self.session.finished()
                 # Could redirect if desired.  But instead, we'll send an error message and let the browser handle it
                 # self.redirect('/')
             else:
                 # can send a normal redirect, since no cookies need to be written
                 # Could redirect if desired.  But instead, we'll send an error message and let the browser handle it
                 # self.write(self.session.clientside_redir('/'))
-                self.session.finished()
+                await self.session.finished()
 
 
         if self.session and self.session.locked:
-            self.session.finished()
+            await self.session.finished()
 
         self.session = None
-        await self.finish()
+        self.finish()
 
     def data_received(self, chunk):
         pass
@@ -2884,13 +2912,13 @@ class ThHandler_PurgeCache(ThHandler):
             resource_code = self.get_argument('rc')
 
             if resource_code == '_all':
-                if G_cached_resources.delete_resource(resource_code=None, delete_all=True):
+                if await G_cached_resources.delete_resource(resource_code=None, delete_all=True):
                     message = 'Purged all cached resources.'
                 else:
                     message = 'Nothing purged. Nothing in the cache.'
 
             else:
-                if G_cached_resources.delete_resource(resource_code=resource_code, delete_all=False):
+                if await G_cached_resources.delete_resource(resource_code=resource_code, delete_all=False):
                     message = 'Purged cached resource: ' + resource_code
                 else:
                     message = 'Nothing purged.  Resource code "' + resource_code + '" not found.'
@@ -2900,7 +2928,7 @@ class ThHandler_PurgeCache(ThHandler):
         log(None, 'Cache', message)
 
         self.write('<html><body>' + message + '</body></html>')
-        await self.finish()
+        self.finish()
 
 
 # -------------------------------------------------
@@ -3266,7 +3294,8 @@ async def get_ready(run_as_svc=False):
 
     for i in range(CREATE_INIT_CONNECTIONS):
         print(datetime.datetime.now(), 'Creating pre-load connection')
-        await G_conns.get_conn(force_new=True, conn_name='pre-load')
+        conn = await G_conns.add_conn(use_now=False, conn_name='pre-load')
+        log(None, 'startup', 'get_ready obtained connection name:', conn.name, 'id:', conn.id)
 
     try:
         await G_cached_resources.load_global_resources()
@@ -3280,7 +3309,7 @@ async def get_ready(run_as_svc=False):
         write_winlog(msg)
         sys.exit()
 
-    G_sessions.start_cleanup_thread()
+    #G_sessions.start_cleanup_thread()
 
     log_memory('Ready to start in get_ready()')
 
@@ -3327,6 +3356,7 @@ def make_app():
             (r'/logout', ThHandler_Logout),
             (r'/login', ThHandler_Login),
             (r'/back', ThHandler_Back),
+            (r'/stat', ThHandler_Stat),
             (r'/purgecache', ThHandler_PurgeCache),
             # (r'/test', TestThreadedHandler),
             (r'/ws', ThWSHandler_Test),
@@ -3360,6 +3390,12 @@ async def periodic():
 
     # Note: to stop the service, we can do:  hbase.G_service_send_stop()
 
+    global G_sessions
+    await G_sessions.remove_expired()
+
+    global G_conns
+    await G_conns.process_release_conns()
+
     # we can do other things here if we want
     if G_periodic_proc is not None:
         G_periodic_proc()
@@ -3368,6 +3404,8 @@ async def periodic():
 
     if thbase.G_server.is_running:
         loop.create_task(periodic())
+
+    del loop
 
 
 async def main(run_as_svc=False):

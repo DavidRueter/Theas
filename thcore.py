@@ -309,7 +309,7 @@ class Theas():
         self.th_session = theas_session
         self.control_names = {}
 
-        self.set_value('th:SessionToken', str(self.th_session.session_token), include_in_json=False)
+        self.set_value('th:ST', str(self.th_session.session_token), include_in_json=False)
         self.set_value('th:ErrorMessage', '')
         self.set_value('th:CurrentPage',
                        self.th_session.current_resource.resource_code if self.th_session.current_resource is not None else '')
