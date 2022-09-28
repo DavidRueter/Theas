@@ -69,6 +69,20 @@ SQL_PORT = 1433
 
 USE_WORKER_THREADS = False
 MAX_WORKERS = 30
+
+# NOTE:
+# 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
+#    class that uses background threads via the @run_on_executor decorator has its own thread pool.  Thus the
+#    total number of threads in the application will be {number of classes} x MAX_WORKERS (plus any other threads
+#    used by the application).
+# 2) Counter-intuitively, idle threads are not reused until MAX_WORKERS threads have been created.  For example,
+#    suppose MAX_WORKERS = 30.  When the application is started and the first request comes in, a new thread
+#    would be created.  The request is completed, the thread is idle.  Then a second request comes in.  A thread
+#    would still be created (now two thread), and so on, until all 30 threads in the pool were created.  See
+#    Tornado's module thread.py, class ThreadPoolExecutor._adjust_thread_count, and in particular, this comment:
+#        # TODO(bquinlan): Should avoid creating new threads if there are more
+#        # idle threads than items in the work queue.
+
 USE_SESSION_COOKIE = True
 REMEMBER_USER_TOKEN = False
 FORCE_REDIR_AFTER_POST = True
@@ -86,19 +100,6 @@ MAX_CACHE_ITEM_SIZE = 1024 * 1024 * 100      # Only cache SysWebResources that a
 MAX_CACHE_SIZE = 1024 * 1024 * 1024 * 2      # Use a maximum of 2 GB of cache
 
 CREATE_INIT_CONNECTIONS = 0
-
-# NOTE:
-# 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
-#    class that uses background threads via the @run_on_executor decorator has its own thread pool.  Thus the
-#    total number of threads in the application will be {number of classes} x MAX_WORKERS (plus any other threads
-#    used by the application).
-# 2) Counter-intuitively, idle threads are not reused until MAX_WORKERS threads have been created.  For example,
-#    suppose MAX_WORKERS = 30.  When the application is started and the first request comes in, a new thread
-#    would be created.  The request is completed, the thread is idle.  Then a second request comes in.  A thread
-#    would still be created (now two thread), and so on, until all 30 threads in the pool were created.  See
-#    Tornado's module thread.py, class ThreadPoolExecutor._adjust_thread_count, and in particular, this comment:
-#        # TODO(bquinlan): Should avoid creating new threads if there are more
-#        # idle threads than items in the work queue.
 
 G_sessions = None  # Global list of sessions
 G_cached_resources = None  # Global list of cached resources
@@ -514,7 +515,7 @@ class ThHandler(tornado.web.RequestHandler):
             self.write(buf)
 
             if self.session and self.session.locked:
-                self.session.finished()
+                self.session.finished_sync()
 
             #self.finish()
             self.finish()
@@ -958,6 +959,10 @@ class ThHandler(tornado.web.RequestHandler):
 
                 # Execute stored procedure
                 await proc.execute()
+                if proc.conn.last_error:
+                    had_error = True
+                    err_msg = proc.conn.last_error
+                    self.session.error_message = urlparse.quote(err_msg)
 
             except Exception as e:
                 had_error = True
@@ -970,7 +975,12 @@ class ThHandler(tornado.web.RequestHandler):
                 self.session.error_message = urlparse.quote(err_msg)
 
         # if not suppress_resultsets:
-        if not had_error:
+        if had_error:
+            this_data['General'] = {'ErrorMessage': self.session.error_message}
+            self.session.comments = None
+            return this_data, None, None
+
+        else:
             #  The stored procedure may return one or more resultsets.
             #  Resultsets may return a single row--most appropariately stored in a dictionary, or may contain many rows--most
             #  appropriately stored in a list of dictionaries.
@@ -1042,7 +1052,7 @@ class ThHandler(tornado.web.RequestHandler):
 
             row = None
             resultset_index = 0
-            if proc is not None:
+            if proc is not None and len(proc.resultsets) > 0:
                 resultset = proc.resultsets[resultset_index]
             else:
                 resultset = []
@@ -1159,9 +1169,7 @@ class ThHandler(tornado.web.RequestHandler):
 
             self.session.comments = None
             return this_data, redirect_to, history_go_back
-        else:
-            self.session.comments = None
-            return None, None, None
+
 
     #@run_on_executor
     #def get_data_background(self, resource, suppress_resultsets=False):
@@ -1590,7 +1598,7 @@ class ThHandler(tornado.web.RequestHandler):
                             this_finished = True
                             self.session.log('Session',
                                              'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
-                            if self.session is not None and self.session.is_locked:
+                            if self.session is not None and self.session.locked:
                                 await self.session.finished()
                             self.redirect(redirect_to)
 
@@ -1811,7 +1819,7 @@ class ThHandler(tornado.web.RequestHandler):
                     await self.session.finished()
                 else:
                     # can send a normal redirect, since no cookies need to be written
-                    if self.session is not None and self.session.is_locked:
+                    if self.session is not None and self.session.locked:
                         await self.session.finished()
                         buf = None
 
@@ -2440,7 +2448,7 @@ class ThHandler_Async(ThHandler):
                                              async_proc_name, err_msg))
 
                 if redirect_to:
-                    if self.session is not None and self.session.is_locked:
+                    if self.session is not None and self.session.locked:
                         await self.session.finished()
                         self.session = None
 

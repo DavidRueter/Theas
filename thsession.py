@@ -514,6 +514,45 @@ class ThSession():
 
         return self
 
+    def finished_sync(self):
+        if not self.__locked_by:
+            pass
+        else:
+
+            self.date_request_done = datetime.datetime.now()
+
+            self.current_data = None  # clear out data that was used by this request's template
+
+            if len(self.history) > 0 and self.history[-1]['PageName'] == self.theas_page.get_value('theas:th:NextPage'):
+                # self.history[-1]['stepGUID'] = self.get_param('stepGUID')
+                # self.history[-1]['stepDefID'] = self.get_param('stepDefID')
+                pass
+            else:
+                this_history_entry = {}
+                this_history_entry['DateRequestDone'] = self.date_request_done
+                this_history_entry['PageName'] = self.theas_page.get_value('theas:th:NextPage')
+                # this_history_entry['stepGUID'] = self.get_param('stepGUID')
+                # this_history_entry['stepDefID'] = self.get_param('stepDefID')
+                self.history.append(this_history_entry)
+
+            self.log('Session', 'Total requests for this session: ', self.request_count)
+            self.log('Session', 'Finished with this request')
+
+            if self.conn is None:
+                self.log('Session', 'Destroying session')
+                G_sessions.remove_session(self.session_token)
+            else:
+                self.log('Session', 'Will time out at', self.date_expire)
+
+            self.log_current_request = True
+            self.current_handler.cookies_changed = False
+
+            if not self.logged_in and self.conn is not None:
+                global G_conns
+                G_conns.release_conn_sync(self.conn)
+
+            self.release_lock(handler=self.current_handler)
+
     async def finished(self):
         if not self.__locked_by:
             pass
@@ -552,7 +591,6 @@ class ThSession():
                 await G_conns.release_conn(self.conn)
 
             self.release_lock(handler=self.current_handler)
-
     async def authenticate(self, username=None, password=None, user_token=None, retrieve_existing=False, conn=None):
         """
         :param username: Username of user.  If provided, provide password as well
