@@ -885,6 +885,13 @@ class ThHandler(tornado.web.RequestHandler):
 
                 first_path_elem = self.request.path.split('/')[1]
 
+                #@Paramstr is used to facilitate storing static parameters in a resource.
+                #If there is a space in the resources' stored proc name, everything after is
+                #stored in api_stored_proc_paramstr, and is passed into @Paramstr for the
+                #stored proc to use at it sees fit.
+                if '@ParamStr' in proc.parameter_list:
+                    proc.bind(resource.api_stored_proc_paramstr, _mssql.SQLCHAR, '@ParamStr')
+
                 if '@Document' in proc.parameter_list:
                     this_document = None
 
@@ -959,6 +966,10 @@ class ThHandler(tornado.web.RequestHandler):
 
                 # Execute stored procedure
                 await proc.execute()
+
+                this_data['_Theas']['ConnName'] = proc.conn.name
+                this_data['_Theas']['ConnID'] = proc.conn.id
+
                 if proc.conn.last_error:
                     had_error = True
                     err_msg = proc.conn.last_error
@@ -1198,7 +1209,7 @@ class ThHandler(tornado.web.RequestHandler):
 
             if this_resource.render_jinja_template:
                 # resource indicates that we should render a Jinja template
-                buf = self.session.theas_page.render(this_resource.data, data=this_data)
+                buf = self.session.theas_page.render(this_resource.data, data=this_data, request=self.request)
             elif this_resource.api_stored_proc:
                 # resource does not indicate that we should render a Jinja template (but does specify an
                 # api stored proc) so just return the raw content retrieved by get_data
@@ -1740,7 +1751,7 @@ class ThHandler(tornado.web.RequestHandler):
 
                 self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
-                # Take logged-in users back to where they were
+                # SOS Should have 404?  Take logged-in users back to where they were
                 if not resource_code and self.session.logged_in:
                     resource = self.session.current_resource
 
@@ -2460,7 +2471,13 @@ class ThHandler_Async(ThHandler):
                         try:
                             json_buf = json.loads(buf)
                             # buf looks like it contains JSON.  Add an element containing TheasParams
-                            json_buf['theasParams'] = self.session.theas_page.serialize(control_list=changed_controls)
+                            ch_ctl = self.session.theas_page.serialize(control_list=changed_controls)
+                            if ch_ctl:
+                                if isinstance(json_buf, dict):
+                                    json_buf['theasParams'] = ch_ctl
+                                else:
+                                    # todo:  consider if we need to support sending updated Theas params in this situation
+                                    log(None, 'TheasParams', 'WARNING:  cannot send changed Theas params along with response because JSON response is not a dict')
                             self.write(json.dumps(json_buf))
                         except ValueError as e:
                             # buf does not look like it contains JSON.  Just send the string.

@@ -45,7 +45,7 @@ _LOGIN_AUTO_USER_TOKEN= None
 
 class SQLSettings:
     def __init__(self, server='someserver', port=1433, user='someuser', password='somepassword',
-                 database='somedatabase', appname = 'someapp', max_conns=10, sql_timeout=120,
+                 database='somedatabase', appname='someapp', max_conns=10, sql_timeout=120,
                  full_ok_checks=True, http_server_prefix='https://someserver.com',
                  login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
                  logging_level=_LOGGING_LEVEL
@@ -69,7 +69,7 @@ class SQLSettings:
 class Conn():
     def __init__(self, sql_conn):
         self.sql_conn = sql_conn #pymssql._mssql.MSSQLConnection
-        self.name = ""
+        self.name = "new"
         self.id = str(uuid.uuid4())
         self.is_public_authed = False
         self.is_user_authed = False
@@ -165,7 +165,9 @@ class ConnectionPool:
             )
         )
         conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
-        conn.name = conn_name
+
+        if conn_name:
+            conn.name = conn_name
 
         log(None, 'SQL', 'created_conn() Created new SQL connection name:', conn.name, 'id:', conn.id)
 
@@ -228,9 +230,10 @@ class ConnectionPool:
 
             this_conn = None
             for i, this_conn in enumerate(self.conns_torelease):
+                self.conns_torelease.pop(i)
+
                 if this_conn is not None:
                     await self.release_conn(this_conn)
-                self.conns_torelease.pop(i)
 
     async def release_conn(self, conn):
         with self.lock:
@@ -334,6 +337,7 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
 
                 if th_session is not None:
                     th_session.logged_in = this_conn.is_user_authed
+                    th_session.conn.name = username if username else user_token[:5] + '...' #for logging / debugging
 
         else:
             log(th_session, 'Session', 'Authentication stored proc not is_ok in call_auth_storedproc()')
@@ -368,6 +372,7 @@ async def call_logout_storedproc(th_session=None, conn=None):
 
             if this_conn is not None:
                 this_conn.init_conn()
+
 
     except Exception as e:
         log(th_session, 'SQL', 'In ThSession.logout, exception calling theas.spdoLogout (call_logout_storedproc). {}'.format(e))

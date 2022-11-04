@@ -120,9 +120,9 @@ class ThSessions:
         with self.lock:
             for session_token, this_sess in self.__sessions.items():
                 if this_sess is not None and\
-                    this_sess.conn is not None and\
-                    this_sess.conn.sql_conn is not None and\
-                    this_sess.conn.sql_conn.conneted:
+                        this_sess.conn is not None and\
+                        this_sess.conn.sql_conn is not None and\
+                        this_sess.conn.sql_conn.connected:
                     this_sess.sql_conn.close()
 
     async def remove_expired(self, remove_all=False):
@@ -150,6 +150,7 @@ class ThSessions:
 
             for session_token in expireds:
                 this_session = expireds[session_token]
+                this_session.conn = None
                 self.__sessions[session_token] = None
                 del self.__sessions[session_token]
                 if this_session is not None:
@@ -268,6 +269,7 @@ class ThSession():
         self.date_started = datetime.datetime.now()
 
         self.current_xsrf_form_html = None
+        self.current_request = {}
 
         # username holds the username of the currently authenticated user, and will be updated by authenticate()
         self.username = None
@@ -286,8 +288,11 @@ class ThSession():
             del self.theas_page
 
         if self.conn is not None:
+            this_conn = self.conn
+            self.conn = None
+
             global G_conns
-            G_conns.release_conn_sync(self.conn)
+            G_conns.release_conn_sync(this_conn)
     @property
     def current_resource(self):
         return self.__current_resource
@@ -490,7 +495,11 @@ class ThSession():
 
             # Establish SQL connection, initialize
                 self.conn = await G_conns.get_conn()
+
                 log(None, 'Session', 'init_session obtained connection name:', self.conn.name, 'id:', self.conn.id)
+                self.conn.name = 'initializing'
+                log(None, 'Session', 'init_session set connection name to:', self.conn.name, 'id:', self.conn_id)
+
                 self.initialized = False
 
                 if self.conn is not None:
@@ -548,8 +557,12 @@ class ThSession():
             self.current_handler.cookies_changed = False
 
             if not self.logged_in and self.conn is not None:
+
+                this_conn = self.conn
+                self.conn = None
+
                 global G_conns
-                G_conns.release_conn_sync(self.conn)
+                G_conns.release_conn_sync(this_conn)
 
             self.release_lock(handler=self.current_handler)
 
@@ -587,8 +600,11 @@ class ThSession():
             self.current_handler.cookies_changed = False
 
             if not self.logged_in and self.conn is not None:
+                this_conn = self.conn
+                self.conn = None
+
                 global G_conns
-                await G_conns.release_conn(self.conn)
+                await G_conns.release_conn(this_conn)
 
             self.release_lock(handler=self.current_handler)
     async def authenticate(self, username=None, password=None, user_token=None, retrieve_existing=False, conn=None):
@@ -680,8 +696,7 @@ class ThSession():
                             # update data for template (in case Authenticate() was called at the request
                             # of a resource's stored procedure just before rendering the page)
                             self.current_data['_Theas']['UserName'] = self.username
-                            self.current_data['_Theas']['LoggedIn'] = self.logged_in
-                            self.current_data['_Theas']['UserToken'] = self.user_token
+                            self.current_data['_Theas']['LoggedIn'] = '1' if self.logged_in else '0'
 
                         self.log('Auth', 'Authenticated as actual user {}'.format(self.username))
 
@@ -717,9 +732,7 @@ class ThSession():
 
         if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
             self.log('SQL', 'Closing SQL connection in ThSession.logout')
-
-            if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
-                await call_logout_storedproc()
+            await call_logout_storedproc(th_session=self, conn=self.conn)
 
 
     def clientside_redir(self, url=None, action='get'):
@@ -799,12 +812,15 @@ class ThSession():
     def init_template_data(self):
         this_data = {}
         this_data['_Theas'] = {}
-        #this_data['_Theas']['ST'] = self.session_token
+        this_data['_Theas']['SessionToken'] = self.session_token
+
         this_data['_Theas']['UserName'] = self.username
-        this_data['_Theas']['LoggedIn'] = self.logged_in
+        this_data['_Theas']['LoggedIn'] = '1' if self.logged_in else 0
         this_data['_Theas']['ErrorMessage'] = self.error_message
 
-        #this_data['_Theas']['UserToken'] = self.user_token
+        if self.conn:
+            this_data['_Theas']['ConnName'] = self.conn.name
+            this_data['_Theas']['ConnID'] = self.conn.id
 
         if self.current_handler is not None:
             this_data['_Theas']['xsrf_token'] = self.current_handler.xsrf_token.decode('ascii')
@@ -817,12 +833,12 @@ class ThSession():
 
         if self.current_resource is not None:
             this_data['_Theas']['theasCurrentPage'] = self.current_resource.resource_code
+
         this_data['_Theas']['theasIncludes'] = G_cached_resources.static_blocks_dict
         this_data['_Theas']['theasJS'] = 'Theas.js'
 
         now_time = datetime.datetime.now().strftime("%I:%M%p")
         this_data['_Theas']['Now'] = now_time
-
 
         # Note:  if an APIStoredProc is called, data._resultsetMeta will be added,
         # but we do not add this dictionary here during initialization

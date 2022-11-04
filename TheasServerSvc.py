@@ -79,6 +79,7 @@ MESSAGE_FILE_DLL = 'TheasMessages.dll'
 G_program_directory, G_program_filename = thbase.get_program_directory()
 G_program_name, G_extension = os.path.splitext(G_program_filename)
 G_service_name = SERVICE_NAME_PREFIX + '_' + G_program_name
+
 G_message_file = G_program_directory + '\\\\' + 'TheasMessages.dll'
 
 G_current_service = None # set by TheasServerSvc.__init__
@@ -128,6 +129,8 @@ def _main():
     run_service = False
     debug_service = False
 
+    TSS = TheasServerSvc
+
     # if the .exe is run without arguments, default to run as a service
     if len(sys.argv) == 1:
         run_service = True
@@ -153,7 +156,7 @@ def _main():
                 # note:  explicitly provide G_service_name so that the service is named according to the
                 # current .exe filename (even if it is renamed) instead of the class name.
 
-            servicemanager.PrepareToHostSingle(TheasServerSvc)
+            servicemanager.PrepareToHostSingle(TSS)
                 # note:  "single" means that this .exe will host a single service.
                 # The TheasServerSvc class we declared above will be what the Windows Service Manager
                 # uses to control the service.
@@ -171,14 +174,14 @@ def _main():
         # handled explicitly here rather than relying on HandleCommandLine (called below)
         # to facilitate running within the pycharm debugger
         write_winlog('Running as debug service in _main()')
-        win32serviceutil.DebugService(TheasServerSvc, (G_program_filename, 'debug'))
+        win32serviceutil.DebugService(TSS, (G_program_filename, 'debug'))
 
     else:
         try:
             write_winlog('Processing command line in _main()')
 
             # process the service-related command line parameters
-            win32serviceutil.HandleCommandLine(TheasServerSvc)
+            win32serviceutil.HandleCommandLine(TSS)
             pass
         except Exception as e:
             msg = 'Error while calling HandleCommandLine: {}'.format(e)

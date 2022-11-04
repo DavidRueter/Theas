@@ -70,7 +70,7 @@ either embedded in a Jinja template, or in a string stored in a database or some
 See https://github.com/mitsuhiko/jinja2 and http://jinja.pocoo.org for more information on Jinja2
 
 
-this_data['_Theas']['theasParams'
+this_data['_Theas']['theasParams']
 
 Within your template, you can access data from the resultsets like this:
         {{ data.Employer.JobTitle }}
@@ -237,6 +237,7 @@ class Theas():
             self.jinja_env = Environment()
 
             self.jinja_env.theas_page = self
+            self.jinja_env.current_request = {}
 
             self.jinja_env.undefined = SilentUndefined
 
@@ -296,6 +297,8 @@ class Theas():
 
             self.jinja_env.filters['friendlydate'] = self.format_friendlydate
             # General date formatting routine.
+
+            self.jinja_env.filters['fmt'] = self.theas_fmt
 
             # self.jinja_env.filters['button'] = self.theas_button
 
@@ -447,7 +450,10 @@ class Theas():
                 s += post
 
         else:
-            s = str(value)
+            if isinstance(value, SilentUndefined):
+                s = ''
+            else:
+                s = str(value)
 
         return s
 
@@ -654,6 +660,9 @@ class Theas():
                     this_ctrl_nv.datavalue = datavalue_param
                 else:
                     if is_new_control and default_value_param is not None:
+                        if default_value_param == '__th':
+                            default_value_param = this_ctrl_nv.datavalue
+
                         if this_ctrl_nv.datavalue != default_value_param:
                             value_changed = True
                         # We want to go ahead and assign this value even if we don't think it has changed, because the
@@ -849,8 +858,13 @@ class Theas():
 
     #@environmentfilter
     @pass_environment
-    def theas_resource(self, this_env, this_value, quotes=False, relative=False, *args, **kwargs):
+    def theas_resource(self, this_env, this_value, quotes=False, *args, **kwargs):
 
+        relative = True
+        if this_value[0] == '/':
+            relative = False
+
+        this_value = this_value.lstrip('.')
         this_value = this_value.lstrip('/')
 
         busted_filename = this_value
@@ -875,16 +889,23 @@ class Theas():
         # quotes to be added to the result.  (The default is no quotes will be added to the result.
 
 
-
         if this_value in this_env.theas_page.th_session.resource_versions:
             this_version = str(this_env.theas_page.th_session.resource_versions[this_value]['Revision'])
 
             segments = this_value.split('.')
             busted_filename = '.'.join(segments[:-1]) + '.ver.' + this_version + '.' + '.'.join(segments[-1:])
 
-        if not relative:
-            busted_filename = '/' + busted_filename
+        this_path = ''
 
+        if relative and this_env.current_request:
+            this_path = this_env.current_request.path
+            if this_path:
+                this_path = '/'.join(this_path.split('/')[:-1]) + '/'
+
+        if not this_path:
+            this_path = '/'
+
+        busted_filename = this_path + busted_filename
 
         result = json.dumps(busted_filename)
 
@@ -987,7 +1008,13 @@ class Theas():
         # id is not used for hidden
         # Note that **kwargs may contain persist=0 ...and this would be passed into this_page.get_control
         # Note that **kwargs may contain overwrite=1 ...and this would be passed into this_page.get_control
+
+        this_overwrite = True
+        if isinstance(this_value, str) and this_value.lower() != '__th':
+            this_overwrite = False
+
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, default=this_value,
+                                                                       overwrite=this_overwrite,
                                                                        control_type='hidden', **kwargs)
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
@@ -1277,6 +1304,22 @@ class Theas():
                 result = args[0]
         return result
 
+    @pass_environment
+    def theas_fmt(self, this_env, this_value, formatstr='${:,.0f}', *args, **kwargs):
+
+        try:
+            if isinstance(this_value, SilentUndefined) or not this_value or (this_value.lower() == 'none'):
+                if len(args) > 0:
+                    result = args[0]
+                else:
+                    result = ''
+            else:
+                result = formatstr.format(this_value)
+        except:
+            result = this_value
+
+        return result
+
     #@environmentfilter
     @pass_environment
     def theas_define_functions(self, ctrl_name, this_env, *args, **kwargs):
@@ -1388,7 +1431,7 @@ class Theas():
 
         return buf
 
-    def render(self, template_str, data={}):
+    def render(self, template_str, data={}, *args, **kwargs):
         # Call doOnBeforeRender function(s) if provided
         if len(self.doOnBeforeRender):
             for this_func in self.doOnBeforeRender:
@@ -1405,12 +1448,20 @@ class Theas():
         #    function_def_template = self.jinja_env.from_string(self.template_function_def_str)
         #    function_def_template.render()
 
+        this_request = None
+
+        if 'request' in kwargs:
+            this_request= kwargs['request']
+
+        self.jinja_env.current_request = this_request
+
         # set th:CurrentPage
         if self.th_session and self.th_session.current_resource and self.th_session.current_resource.resource_code:
             self.get_control('th:CurrentPage', datavalue=self.th_session.current_resource.resource_code)
 
         # render output using template and data
         this_template = self.jinja_env.from_string(template_str)
+
         buf = this_template.render(data=data)
 
         # Call doOnAfterRender function(s) if provided

@@ -8,6 +8,7 @@
 # is then included in the .EXE
 
 
+import win32timezone
 import datetime
 import getpass
 import socket

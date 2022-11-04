@@ -39,6 +39,7 @@ class ThResource:
         self.date_updated = ''
         self.data = ''
         self.api_stored_proc = None
+        self.api_stored_proc_paramstr = None
         self.api_async_stored_proc = None
         self.api_stored_proc_resultset_str = None
         self.is_public = False
@@ -163,6 +164,7 @@ class ThCachedResources:
                 this_resource.filename = 'application/javascript'
                 this_resource.data = buf
                 this_resource.api_stored_proc = None
+                this_resource.api_stored_proc_paramstr = None
                 this_resource.api_async_stored_proc = None
                 this_resource.api_stored_proc_resultset_str = None
                 this_resource.is_public = is_public
@@ -182,11 +184,10 @@ class ThCachedResources:
             if all_static_blocks:
                 log(None, 'Resource', 'Will load all static resources from the database.')
             else:
-                if resource_code is None or resource_code == '~':
-                    resource_code = '~'
+                if resource_code == '~':
                     log(None, 'Resource',
-                                   'No resource_code specified.  Will load default resource for this session.')
-                    get_default_resource = 1
+                                   'Requesting ~.  Will load default resource for this session.')
+                    get_default_resource = True
                 else:
                     log(None, 'Resource', 'ThCachedResources.load_resource fetching from database',
                                    resource_code if resource_code is not None else 'None')
@@ -207,7 +208,7 @@ class ThCachedResources:
                 proc.bind(str(int(all_static_blocks)), _mssql.SQLCHAR, '@AllStaticBlocks')
 
                 # if '@GetDefaultResource' in proc.parameter_list:
-                proc.bind(str(int(get_default_resource)), _mssql.SQLCHAR, '@GetDefaultResource')
+                proc.bind(1 if (get_default_resource) else 0, _mssql.SQLCHAR, '@GetDefaultResource')
 
                 exec_result = await proc.execute()
 
@@ -243,7 +244,13 @@ class ThCachedResources:
                         if 'DateUpdated' in row:
                             this_resource.date_updated = row['DateUpdated']
                         this_resource.data = buf
-                        this_resource.api_stored_proc = row['APIStoredProc']
+
+                        if row['APIStoredProc']:
+                            this_resource.api_stored_proc = row['APIStoredProc'].split(' ')[0]
+                            this_resource.api_stored_proc_paramstr = row['APIStoredProc'][len(this_resource.api_stored_proc):]
+                            if this_resource.api_stored_proc_paramstr:
+                                this_resource.api_stored_proc_paramstr  = this_resource.api_stored_proc_paramstr .strip()
+
                         this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
                         this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
                         this_resource.is_public = row['IsPublic']
@@ -371,7 +378,7 @@ class ThCachedResources:
         if th_session is not None and this_resource is not None and this_resource.exists and \
                 this_resource.resource_code != self.login_resource_code and \
                 this_resource.render_jinja_template:
-            # we are assuming that only a jinja template page will have a stored procedure / can serve
+            # we are assuming that only a jinja template page will have a stored procedure / can servethis
             # as the current resource for a session.  (We don't want javascript files and the like
             # to be recorded as the current resource.)
             th_session.current_resource = this_resource

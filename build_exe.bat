@@ -14,5 +14,4 @@ copy SAMPLE_settings.cfg .\dist\
 
 cd \Projects\Theas\dist
 
-copy TheasServerSvc.exe c:\test\ostTest.exe /y
 PAUSE
