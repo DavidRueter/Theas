@@ -1460,9 +1460,13 @@ class Theas():
             self.get_control('th:CurrentPage', datavalue=self.th_session.current_resource.resource_code)
 
         # render output using template and data
-        this_template = self.jinja_env.from_string(template_str)
 
-        buf = this_template.render(data=data)
+        try:
+            this_template = self.jinja_env.from_string(template_str)
+
+            buf = this_template.render(data=data)
+        except Exception as ex:
+            buf = 'Error when rendering Jinja template #2: ' + ex.message
 
         # Call doOnAfterRender function(s) if provided
         if len(self.doOnAfterRender):
