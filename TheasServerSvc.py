@@ -284,7 +284,7 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
     # note:  we save the service name in a global to facilitate using this name when logging
 
     def __init__(self, args):
-        self.timeout = 50
+        self.timeout = 1
 
         win32serviceutil.ServiceFramework.__init__(self, args)
         # Create an event which we will use to wait on.
@@ -315,17 +315,6 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         # "while true" loop shown in most examples.
         TheasServer.run(run_as_svc=True)
 
-        # make sure asyncio loop is stopped
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except Exception as e:
-            loop = None
-
-        if loop is not None:
-            if loop.is_running():
-                loop.close()
-        pass
 
     def SvcOtherEx(self, control, event_type, data):
 
@@ -352,30 +341,28 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         # This allows an external caller (i.e. our Theas server) to have the service
         # poll for a stop signal as part of a periodic task in the asyncio eloop.
 
-        # Wait for service stop signal, if I timeout, loop again
+        # Wait for service stop signal.  If I timeout, loop again
         rc = win32event.WaitForSingleObject(self.hWaitStop, self.timeout)
 
         # Check to see if self.hWaitStop happened
         if rc == win32event.WAIT_OBJECT_0:
             # Stop signal encountered
-            write_winlog('Service stop signal was encountered in onServicePoll().  Stopping.')
+            write_winlog('Service stop signal was encountered in onServicePoll(). Stopping.')
 
-            if thbase.G_server:
-               thbase.G_server.stop(skip_service_stop=True)
         else:
-            #write_winlog('Service is Alive and well in onServicePoll')
+            write_winlog('Service is Alive and well in onServicePoll')
             pass
 
     def SvcStop(self):
+        write_winlog('Service SvcStop() was called.')
+
         # Before we do anything, tell the SCM we are starting the stop process.
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         # And set my event.
         win32event.SetEvent(self.hWaitStop)
 
-        write_winlog('Service SvcStop() was called.')
-
-        # Tell the TheasServer event loop to stop (which will subsequently tell the service to stop)
-        thbase.G_server.stop(service=self)
+        # Tell the TheasServer event loop to stop
+        thbase.G_server.stop(service=self, reason='Service SvcStop()')
 
 def service_poll():
     global G_current_service
