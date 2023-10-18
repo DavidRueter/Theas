@@ -2,6 +2,7 @@ from thbase import *
 from threading import RLock
 from pymssql import _mssql
 import asyncio
+import concurrent.futures
 import uuid
 
 
@@ -87,6 +88,25 @@ class Conn():
     def connected(self):
         return self.sql_conn is not None and self.sql_conn.connected
 
+G_thsql_executor = None
+
+def set_executor(executor=None, max_workers=100):
+    global G_thsql_executor
+
+    if G_thsql_executor is None:
+        if executor is not None:
+            G_thsql_executor = executor
+        else:
+            G_thsql_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='thsql')
+
+def thsql_executor():
+    global G_thsql_executor
+
+    if G_thsql_executor is None:
+        set_executor()
+
+    return G_thsql_executor
+
 
 
 class ConnectionPool:
@@ -104,11 +124,19 @@ class ConnectionPool:
 
     def __del__(self):
         with self.lock:
+
             for conn in self.conns:
                 self.conns = None
 
             for conn in self.conns_inuse:
                 self.conns = None
+
+    def kill_threads(self, reason=''):
+        log(None, 'SQL', 'thsql.py Killing all executor threads in kill_threads() {}'.format(reason))
+        executor = thsql_executor()
+        if executor is not None:
+            with self.lock:
+                executor.shutdown(wait=False, cancel_futures=True)
 
 
     # NOTE: These methods operate on connections, but they exist in support of pool operations.
@@ -457,7 +485,7 @@ class ThStoredProc:
         if result and self.full_ok_checks:
             try:
                 sql_str = 'SELECT 1 AS IsOK'
-                await asyncio.get_running_loop().run_in_executor(None, self.conn.sql_conn.execute_non_query, sql_str)
+                await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str)
             except Exception as e:
                 log(self.th_session, 'StoredProc', 'Connection in is_ok is NOT OK:', e)
                 result = False
@@ -479,7 +507,7 @@ class ThStoredProc:
         if self.stored_proc_name is not None and self.conn is not None and self.conn.connected:
             try:
                 sql_str = 'EXEC theas.sputilGetParamNames @ObjectName = \'{}\''.format(self.stored_proc_name)
-                await asyncio.get_running_loop().run_in_executor(None, self.conn.sql_conn.execute_query, sql_str)
+                await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_query, sql_str)
 
                 resultset = [row for row in self.conn.sql_conn]
                 for row in resultset:
@@ -589,7 +617,7 @@ class ThStoredProc:
             #   this_sql + '@Param1=%s, @Param2=%s', list(self.parameters.values()))
 
             sql_str = this_sql + ' ' + this_params_str
-            result = await asyncio.get_running_loop().run_in_executor(None, self.do_exec, sql_str)
+            result = await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.do_exec, sql_str)
 
             if result:
                 if self.have_session:
