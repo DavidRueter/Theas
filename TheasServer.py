@@ -1,8 +1,7 @@
 #usr/bin/python
 import asyncio
-import sys
-import os
 import platform
+import contextlib
 
 import signal
 import binascii
@@ -45,13 +44,7 @@ __author__ = 'DavidRueter'
 
  May be run as a Windows service. See TheasServerSvc.py and setup.py for more information.
 """
-# @contextlib.contextmanager
-# def catch_async_exceptions(type, value, traceback):
-#    try:
-#        print('ERROR: ' + str(value.args[0][1]))
-#        #yield
-#    except Exception:
-#        print('ERROR: ' + str(value.args[0][1]))
+
 
 THEAS_VERSION = '0.90.1.255'  # from version.cfg
 THEAS_VERSION_INT = '255'
@@ -69,19 +62,6 @@ SQL_PORT = 1433
 
 USE_WORKER_THREADS = False
 MAX_WORKERS = 30
-
-# NOTE:
-# 1) This is the maximum number of threads per thread pool, not for the whole application.  In practice each
-#    class that uses background threads via the @run_on_executor decorator has its own thread pool.  Thus the
-#    total number of threads in the application will be {number of classes} x MAX_WORKERS (plus any other threads
-#    used by the application).
-# 2) Counter-intuitively, idle threads are not reused until MAX_WORKERS threads have been created.  For example,
-#    suppose MAX_WORKERS = 30.  When the application is started and the first request comes in, a new thread
-#    would be created.  The request is completed, the thread is idle.  Then a second request comes in.  A thread
-#    would still be created (now two thread), and so on, until all 30 threads in the pool were created.  See
-#    Tornado's module thread.py, class ThreadPoolExecutor._adjust_thread_count, and in particular, this comment:
-#        # TODO(bquinlan): Should avoid creating new threads if there are more
-#        # idle threads than items in the work queue.
 
 USE_SESSION_COOKIE = True
 REMEMBER_USER_TOKEN = False
@@ -105,12 +85,11 @@ G_sessions = None  # Global list of sessions
 G_cached_resources = None  # Global list of cached resources
 G_program_options = None
 G_break_handler = None
-G_shutdown_event = None
 
 G_conns = None
 
-G_periodic_wait = 5 # number of seconds to wait between execution of periodic function
-G_periodic_proc = None
+G_periodic_wait = 15 # number of seconds to wait between execution of periodic function
+G_periodic_proc = None  # optional function to call periodically on the async loop
 
 
 # We may be run directly, or we may be run via TheasServerSvc
@@ -152,7 +131,7 @@ class BreakHandler:
     ih.disable()
     # Back to usual operation...
 
-    from:  http://stacyprowell.com/blog/2009/03/trapping-ctrlc-in-python/
+    from:  https://stacyprowell.com/blog/2009/03/trapping-ctrlc-in-python/
 
     Also, consider:
             # see: https://docs.microsoft.com/en-us/windows/console/registering-a-control-handler-function
@@ -222,9 +201,9 @@ class BreakHandler:
         """
         self._count += 1
 
-        print('Ctrl-C Pressed (caught by BreakHandler xyz)')
+        print('Ctrl-C Pressed (caught by BreakHandler {})'.format(signame))
 
-        StopServer()
+        thbase.G_server.stop(reason='BreakHandler')
 
         # If we've exceeded the "emphatic" count disable this handler.
         if self._count >= self._emphatic:
@@ -254,16 +233,6 @@ class BreakHandler:
         """
         return self._count > 0
 
-def StopServer():
-
-    msg = 'StopServer() called'
-    log(None, 'Shutdown', msg)
-    write_winlog(msg)
-
-    if thbase.G_server is not None and thbase.G_server.is_running:
-        thbase.G_server.stop(reason='TheasServer.StopServer()')
-
-
 # -------------------------------------------------
 # ThResponseInfo
 # -------------------------------------------------
@@ -282,7 +251,6 @@ class ThResponseInfo:
 # ThHandler main request handler
 # -------------------------------------------------
 class ThHandler(tornado.web.RequestHandler):
-    #executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     def __init__(self, application, request, **kwargs):
         super().__init__(application, request, **kwargs)
@@ -496,6 +464,9 @@ class ThHandler(tornado.web.RequestHandler):
 
             if status_code == 404:
                 buf = '<html><body>Error 404:  File not found</body></html>'
+                buf = ''
+                #self.send_error(status_code=404)
+                # SOS:  404
             else:
                 if 'exc_info' in kwargs:
                     for line in traceback.format_exception(this_err_cls, this_err, this_trackback):
@@ -512,16 +483,19 @@ class ThHandler(tornado.web.RequestHandler):
                 )
 
         finally:
-            self.write(buf)
+            if buf:
+                self.write(buf)
 
             if self.session and self.session.locked:
                 self.session.finished_sync()
 
-            #self.finish()
-            self.finish()
+            if buf:
+                self.finish()
 
     async def exec_stored_proc(self, stored_proc_name, cmd='', path_params=''):
         buf = None
+        changed_controls = None
+        redirect_to = None
 
         if stored_proc_name:
 
@@ -615,7 +589,6 @@ class ThHandler(tornado.web.RequestHandler):
                 # Execute stored procedure
                 await proc.execute()
 
-                redirect_to = None
                 theas_params_str = ''
                 new_cookies_str = ''
                 header_str = ''
@@ -671,7 +644,6 @@ class ThHandler(tornado.web.RequestHandler):
                 self.session.log('Handler', '{row_count} rows returned by handler stored proc'.format(
                     row_count=row_count))
 
-                changed_controls = None
 
                 if theas_params_str:
                     changed_controls = self.session.theas_page.process_client_request(
@@ -714,54 +686,54 @@ class ThHandler(tornado.web.RequestHandler):
                 len(self.request.files) > 0
         )
 
+    async def process_file(self, bindata=None, filename=None, file_obj=None, fieldname=None, filetype=None):
+        buf = None
+
+        if bindata is not None:
+            buf = '0x' + binascii.hexlify(bindata).decode('ascii')
+        elif file_obj is not None:
+            buf = '0x' + binascii.hexlify(file_obj['body']).decode('ascii')
+            filename = file_obj['filename']
+            filetype = file_obj['content_type']
+
+            # fileProc = ThStoredProc('theas.spinsHTTPFiles', self.session)
+            # if fileawait proc.is_ok():
+            #    if bindata is not None:
+            #        buf = '0x' + binascii.hexlify(bindata).decode('ascii')
+            #        filename = 'body'
+            #    else:
+            #        buf = '0x'.encode('ascii') + binascii.hexlify(file_obj['body']).decode('ascii')
+            #        filename = this_file['filename']
+
+            # fileProc.bind(fieldname, _mssql.SQLVARCHAR, '@FieldName')
+            # fileProc.bind(this_filename, _mssql.SQLVARCHAR, '@FileName')
+            # fileProc.bind(buf, _mssql.SQLVARCHAR, '@FileCharData')
+            # should work, but does not: #fileProc.bind(this_file['body'], _mssql.SQLVARBINARY, '@FileData')
+            # fileResultValue = fileProc.execute()
+
+            # callproc() is broken as of 6/16/2015, in that it truncates long values:
+            # https://github.com/pymssql/pymssql/issues/275
+            # So we are forced to use execute instead
+
+
+        await self.session.init_session()
+
+        sql_str = "exec theas.spinsHTTPFiles @FieldName={this_fieldname}, @FileName={this_filename}, @FileType={this_filetype}, @FileData={this_filedata}".format(
+            this_fieldname='\'' + fieldname + '\'' if fieldname else 'NULL',
+            this_filename='\'' + filename + '\'' if filename else 'NULL',
+            this_filetype='\'' + filetype + '\'' if filename else 'NULL',
+            this_filedata=buf if buf else 'NULL'
+        )
+
+        await asyncio.get_running_loop().run_in_executor(None, self.session.conn.sql_conn.execute_non_query, sql_str)
+
     async def process_uploaded_files(self):
         if not self.request_has_files():
             return
 
-        async def process_file(bindata=None, filename=None, file_obj=None, fieldname=None, filetype=None):
-            buf = None
-
-            if bindata is not None:
-                buf = '0x' + binascii.hexlify(bindata).decode('ascii')
-            elif file_obj is not None:
-                buf = '0x' + binascii.hexlify(file_obj['body']).decode('ascii')
-                filename = file_obj['filename']
-                filetype = file_obj['content_type']
-
-                # fileProc = ThStoredProc('theas.spinsHTTPFiles', self.session)
-                # if fileawait proc.is_ok():
-                #    if bindata is not None:
-                #        buf = '0x' + binascii.hexlify(bindata).decode('ascii')
-                #        filename = 'body'
-                #    else:
-                #        buf = '0x'.encode('ascii') + binascii.hexlify(file_obj['body']).decode('ascii')
-                #        filename = this_file['filename']
-
-                # fileProc.bind(fieldname, _mssql.SQLVARCHAR, '@FieldName')
-                # fileProc.bind(this_filename, _mssql.SQLVARCHAR, '@FileName')
-                # fileProc.bind(buf, _mssql.SQLVARCHAR, '@FileCharData')
-                # should work, but does not: #fileProc.bind(this_file['body'], _mssql.SQLVARBINARY, '@FileData')
-                # fileResultValue = fileProc.execute()
-
-                # callproc() is broken as of 6/16/2015, in that it truncates long values:
-                # https://github.com/pymssql/pymssql/issues/275
-                # So we are forced to use execute instead
-
-
-            await self.session.init_session()
-
-            sql_str = "exec theas.spinsHTTPFiles @FieldName={this_fieldname}, @FileName={this_filename}, @FileType={this_filetype}, @FileData={this_filedata}".format(
-                this_fieldname='\'' + fieldname + '\'' if fieldname else 'NULL',
-                this_filename='\'' + filename + '\'' if filename else 'NULL',
-                this_filetype='\'' + filetype + '\'' if filename else 'NULL',
-                this_filedata=buf if buf else 'NULL'
-            )
-
-            await asyncio.get_running_loop().run_in_executor(None, self.session.conn.sql_conn.execute_non_query, sql_str)
-
         if self.session is not None and (
                 self.session.conn is None or
-                not self.session.conn.connected()
+                not self.session.conn.connected
             ):
 
             self.session.log('POST Files', 'Process_uploaded_files(', 'New connection')
@@ -769,7 +741,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         if self.request.headers.get('Content-Type') == 'application/octet-stream':
             self.session.log('POST Files', 'Delivering binary body to SQL')
-            await process_file(bindata=self.request.body,
+            await self.process_file(bindata=self.request.body,
                          filename=self.request.headers.get('X-File-Name'),
                          filetype=self.request.headers.get('X-File-Type')
                                )
@@ -780,7 +752,7 @@ class ThHandler(tornado.web.RequestHandler):
             # pass upload files to SQL
             for this_file_field in list(self.request.files.keys()):
                 for this_file in self.request.files[this_file_field]:
-                    await process_file(file_obj=this_file, fieldname=this_file_field)
+                    await self.process_file(file_obj=this_file, fieldname=this_file_field)
 
     async def get_template(self, resource_code):
         global G_cached_resources
@@ -1209,7 +1181,10 @@ class ThHandler(tornado.web.RequestHandler):
 
             if this_resource.render_jinja_template:
                 # resource indicates that we should render a Jinja template
-                buf = self.session.theas_page.render(this_resource.data, data=this_data, request=self.request)
+                try:
+                    buf = self.session.theas_page.render(this_resource.data, data=this_data, request=self.request)
+                except Exception as ex:
+                    buf = 'Error when rendering Jinja template: ' + str(ex)
             elif this_resource.api_stored_proc:
                 # resource does not indicate that we should render a Jinja template (but does specify an
                 # api stored proc) so just return the raw content retrieved by get_data
@@ -1217,6 +1192,9 @@ class ThHandler(tornado.web.RequestHandler):
                                 'General' in this_data and \
                                 'Content' in this_data['General']:
                     buf = this_data['General']['Content']
+
+            if redirect_to is None and this_resource.redir_url is not None:
+                redirect_to = this_resource.redir_url
 
         return buf, redirect_to, history_go_back
 
@@ -1392,11 +1370,6 @@ class ThHandler(tornado.web.RequestHandler):
 
         return buf, redirect_to, history_go_back, handled
 
-    #@run_on_executor
-    #def do_post_background(self, *args, **kwargs):
-    #    return self.do_post(args, kwargs)
-
-    #@tornado.gen.coroutine
     async def wait_for_session(self, seconds_to_wait=30, write_to_cookie=True):
         this_sess = None
 
@@ -1436,7 +1409,7 @@ class ThHandler(tornado.web.RequestHandler):
         give_up = False
         failed_to_lock = False
         start_waiting = time.time()
-        while this_sess is None and not give_up:
+        while this_sess is None and not give_up and thbase.G_server.is_running:
             this_sess, failed_to_lock = await ThSession.get_session(session_token=this_session_token,
                                                               handler_guid=self.handler_guid,
                                                               comments='ThHandler.wait_for_session')
@@ -1481,7 +1454,6 @@ class ThHandler(tornado.web.RequestHandler):
 
         return this_sess
 
-    #@tornado.gen.coroutine
     async def head(self, *args, **kwargs):
         # Partial support for HTTP HEAD requests
         # Currently only supports cached public resources that are in cache
@@ -1533,350 +1505,358 @@ class ThHandler(tornado.web.RequestHandler):
             if response_info.etag:
                 self.set_header('Etag', response_info.etag)
 
-    #@tornado.gen.coroutine
     async def post(self, *args, **kwargs):
         # MAIN ENTRY POINT FOR HTTP POST REQUEST
 
         log(None, 'POST', '*******************************')
 
-        #self.session = yield self.wait_for_session()
-        self.session = await self.wait_for_session()
+        if not thbase.G_server.is_running:
+            self.send_error(status_code=503)
+        else:
 
-        self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
-        self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+            #self.session = yield self.wait_for_session()
+            self.session = await self.wait_for_session()
 
-        this_finished = False
-        handled = False
+            self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
+            self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
-        buf = None
-        redirect_to = None
-        history_go_back = False
+            this_finished = False
+            handled = False
 
-        if self.session is not None:
-            # This is a post.  The next page may be specified in a form field theas:th:NextPage.
-            if not self.session.logged_in and self.get_arguments('u') and self.get_arguments('pw'):
-                # The requested page is the login screen
-                error_message = ''
-                #if USE_WORKER_THREADS:
-                success, error_message = await self.session.authenticate(username=self.get_argument('u'),
-                                                                         password=self.get_argument('pw'))
+            buf = None
+            redirect_to = None
+            history_go_back = False
 
-                # if not self.session.authenticate(username=self.get_argument('u'), password=self.get_argument('pw')):
-                if not success:
-                    # authentication failed, so send the login screen
-                    #self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
-                    self.session.error_message = 'Error: {}.'.format(error_message)
-                    buf = await self.session.build_login_screen()
-                    self.write(buf)
-                    handled = True
+            if self.session is not None:
+                # This is a post.  The next page may be specified in a form field theas:th:NextPage.
+                if not self.session.logged_in and self.get_arguments('u') and self.get_arguments('pw'):
+                    # The requested page is the login screen
+                    error_message = ''
+                    #if USE_WORKER_THREADS:
+                    success, error_message = await self.session.authenticate(username=self.get_argument('u'),
+                                                                             password=self.get_argument('pw'))
 
-                    if self.session and self.session.locked:
-                        await self.session.finished()
+                    # if not self.session.authenticate(username=self.get_argument('u'), password=self.get_argument('pw')):
+                    if not success:
+                        # authentication failed, so send the login screen
+                        #self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
+                        self.session.error_message = 'Error: {}.'.format(error_message)
+                        buf = await self.session.build_login_screen()
+                        self.write(buf)
+                        handled = True
 
-                    self.finish()
+                        if self.session and self.session.locked:
+                            await self.session.finished()
 
-                    this_finished = True
+                        await self.finish()
 
-                else:
-                    # Authentication succeeded, so continue with redirect
-                    # self.session.theas_page.set_value('theas:th:ErrorMessage', '')
-
-                    if self.session.bookmark_url:
-                        self.session.log('Proceeding with bookmarked page', self.session.bookmark_url)
-                        await self.get_template(self.session.bookmark_url)
-                        self.session.bookmark_url = None
+                        this_finished = True
 
                     else:
-                        self.session.log('Response', 'Sending clientside redir after login page success')
-                        self.write(self.session.clientside_redir())
+                        # Authentication succeeded, so continue with redirect
+                        # self.session.theas_page.set_value('theas:th:ErrorMessage', '')
 
-            if not handled:
+                        if self.session.bookmark_url:
+                            self.session.log('Proceeding with bookmarked page', self.session.bookmark_url)
+                            await self.get_template(self.session.bookmark_url)
+                            self.session.bookmark_url = None
 
-                # Handle the actual form processing here. When done, we will persist session data and redirect.
-                #if USE_WORKER_THREADS:
-                buf, redirect_to, history_go_back, handled = await self.do_post(args, kwargs)
+                        else:
+                            self.session.log('Response', 'Sending clientside redir after login page success')
+                            self.write(self.session.clientside_redir())
 
                 if not handled:
-                    if redirect_to is not None:
-                        if self.cookies_changed:
-                            # must perform a client-side redirect in order to set cookies
-                            self.session.log('Session', 'Sending client-side redirect to: ({}) after do_post()'.format(
-                                redirect_to))
-                            self.write(self.session.clientside_redir(redirect_to))
-                            await self.session.finished()
-                        else:
-                            # can send a normal redirect, since no cookies need to be written
-                            this_finished = True
-                            self.session.log('Session',
-                                             'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
-                            if self.session is not None and self.session.locked:
+
+                    # Handle the actual form processing here. When done, we will persist session data and redirect.
+                    #if USE_WORKER_THREADS:
+                    buf, redirect_to, history_go_back, handled = await self.do_post(args, kwargs)
+
+                    if not handled:
+                        if redirect_to is not None:
+                            if self.cookies_changed:
+                                # must perform a client-side redirect in order to set cookies
+                                self.session.log('Session', 'Sending client-side redirect to: ({}) after do_post()'.format(
+                                    redirect_to))
+                                self.write(self.session.clientside_redir(redirect_to))
                                 await self.session.finished()
-                            self.redirect(redirect_to)
-
-                    else:
-                        if history_go_back and self.session is not None:
-
-                            if len(self.session.history) > 0:
-                                this_history_entry = self.session.history.pop()
-
-                                self.session.theas_page.set_value('theas:th:NextPage', this_history_entry['PageName'])
-
-                                self.session.log('Response', 'Sending clientside redir due to history_go_back')
+                            else:
+                                # can send a normal redirect, since no cookies need to be written
                                 this_finished = True
-                                buf = self.session.clientside_redir()
+                                self.session.log('Session',
+                                                 'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
+                                if self.session is not None and self.session.locked:
+                                    await self.session.finished()
+                                self.redirect(redirect_to)
 
-                        if buf is None:
-                            buf = '<html><body>No content to send in ThHandler.post()</body></html>'
+                        else:
+                            if history_go_back and self.session is not None:
+
+                                if len(self.session.history) > 0:
+                                    this_history_entry = self.session.history.pop()
+
+                                    self.session.theas_page.set_value('theas:th:NextPage', this_history_entry['PageName'])
+
+                                    self.session.log('Response', 'Sending clientside redir due to history_go_back')
+                                    this_finished = True
+                                    buf = self.session.clientside_redir()
+
+                            if buf is None:
+                                buf = '<html><body>No content to send in ThHandler.post()</body></html>'
+                            self.write(buf)
+
+                            # CORS
+                            self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                            self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
+                            self.session.log('Response', 'Sending response')
+
+            else:
+                self.write('<html><body>Error: cannot process request without a valid session</body></html>')
+
+            if not handled and not this_finished:
+                if self.session and self.session.locked:
+                    await self.session.finished()
+
+                await self.finish()
+
+            self.session = None
+
+    async def get(self, *args, **kwargs):
+        ##########################################################
+        # MAIN ENTRY POINT FOR HTTP GET REQUEST
+        ##########################################################
+
+        global G_cached_resources
+
+        if not thbase.G_server.is_running:
+            # serviedr is shutting down
+            self.send_error(status_code=503)
+        else:
+
+            if self.session:
+                self.session.comments = 'ThHandler.get'
+
+            # do everything needed to process an HTTP GET request
+
+            handled = False
+            buf = None
+            redirect_to = None
+            history_go_back = False
+
+            # try to find required resource
+            resource_code = None
+            resource = None
+
+            request_path = None
+            if len(args) >= 0:
+                request_path = args[0]
+
+            if request_path is not None and request_path.split('/')[0] == 'r':
+                # Special case:  an "r" as the first segment of the path, such as:
+                # r/resourcecode/aaa/bbb
+                # indicates that the second segment is to be the resource code.
+                # This allows URLs such as /r/img/myimg.jpg to be handled dynamically:  the resource img is
+                # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
+                # img/myimg.jpg
+                resource_code = request_path.split('/')[1]
+            else:
+                resource_code = request_path
+                if resource_code and resource_code.count('.') >= 2:
+                    # A versioned filename, i.e. my.23.css for version #23 of my.css
+                    # We just want to cut out the version, and return the unversioned
+                    # filename as the resource code (i.e. my.css)
+
+                    # That is, Theas will always / only serve up the most recent version
+                    # of a resource.  There is not support for serving up a particular
+                    # historical version.  The version number in the file name is merely
+                    # for the browser's benefit, so that we can "cache bust" / have the
+                    # browser request the latest version even if it has an old version in
+                    # cache.
+
+                    # For this reason, we don't really need to inspect the resources.
+                    # We need only manipulate the resource_code to strip out the version
+                    # number.
+                    segments = resource_code.split('.')
+                    if len(segments) >= 3 and 'ver' in segments:
+                        ver_pos = segments.index('ver')
+                        if ver_pos > 0:
+                            resource_code = '.'.join(segments[:ver_pos]) + '.' + '.'.join(segments[ver_pos + 2:])
+
+            log(None, 'GET', '**Starting get for', resource_code)
+            # note: self.session is probably not yet assigned
+
+            #self.session = yield self.wait_for_session()
+            if self.session is None:
+                log(None, 'SessionRetrive', 'At start session is None')
+            else:
+                log(None, 'SessionRetrieve', 'At start session is:', self.session.session_token)
+
+            self.session = await self.wait_for_session()
+
+            if self.session is None:
+                log(None, 'SessionRetrive', 'After wait_for_session() session is None')
+            else:
+                log(None, 'SessionRetrieve', 'After wait_for_session() session is:', self.session.session_token)
+
+
+
+            # A request for a cached public resource does not need a database connection.
+            # We can serve up such requests without even checking the session.
+            # If we do not check the session, multiple simultaneous requests can be processed,
+            if resource_code or self.session:
+                resource = await G_cached_resources.get_resource(resource_code, self.session)
+
+            # see if the resource is public (so that we can serve up without a session)
+            if resource is not None and resource.exists and resource.is_public and \
+                    not resource.render_jinja_template and \
+                    not resource.on_before and not resource.on_after:
+                # note:  resource.data will usually be str but might be bytes
+                log(None, 'CachedGET', 'Serving up cached resource', resource_code)
+                buf = resource.data
+
+            else:
+                # Retrieve or create a session.  We want everyone to have a session (even if they are not authenticated)
+                # We need to use the session's SQL connection to retrieve the resource
+
+                log(None, 'GET', '*******************************')
+                log(None, 'GET', args[0])
+
+                if self.session is None:
+                    log(None, 'GET Error', 'No session.  Cannot continue to process request.')
+                    self.write('<html><body>Error: cannot process request without a valid session</body></html>')
+                else:
+                    # we have a session, but are not necessarily logged in
+                    self.session.log('GET', 'Have session', self.session.session_token)
+                    self.session.log('GET', 'Received request for: {}'.format(self.request.path))
+
+                    self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+
+                    # SOS Should have 404?  Take logged-in users back to where they were
+                    if not resource_code and self.session.logged_in:
+                        resource = self.session.current_resource
+
+                    if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
+                        # resource_code was not provided and user is not logged in:  use default resource
+                        # If the user is logged in, we want get_resource to select the appropriate
+                        # resource for the user.
+                        resource_code = DEFAULT_RESOURCE_CODE
+
+                    if resource is None or not resource.exists:
+                        # Call get_resources again, this time with a session
+                        resource = await G_cached_resources.get_resource(resource_code, self.session)
+
+                        #handle invalid resource when logged in
+                        if 1==0 and resource is None or (resource and not resource.exists):
+                            # If the user is logged in, but resource_code is not specified, we explicitly set get_default_resource
+                            # so that the stored proc can look up the correct resource for us.
+                            # This change was made 9/21/2017 to correct a problem that led to 404 errors resulting in serving
+                            # up the default resource.
+                            self.session.log('Get Resource', 'Logged in?', self.session.logged_in)
+                            self.session.log('Get Resource', 'resource_code', resource_code if resource_code is not None else 'None')
+                            resource = await G_cached_resources.get_resource(resource_code, self.session,
+                                                                       get_default_resource=self.session.logged_in)
+
+                    if resource is not None and resource.exists and\
+                            resource.resource_code != LOGIN_RESOURCE_CODE and \
+                            resource.render_jinja_template:
+                        # We may have retrieved a cached resource.  Set current_resource.
+                        self.session.current_resource = resource
+
+                    if resource is not None and resource.exists:
+                        if resource.on_before:
+                            this_function = getattr(TheasCustom, resource.on_before)
+                            if this_function:
+                                handled = this_function(self, args, kwargs)
+
+                        if resource.requires_authentication and not self.session.logged_in:
+
+                            if not self.session.logged_in:
+                                # still not logged in:  present login screen
+                                self.session.bookmark_url = resource.resource_code
+                                # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
+                                self.session.current_resource = resource
+
+                                # NOTE:  this needs further thought.
+                                # Sometimes it is nice to send the login screen in response to a request
+                                # for an auth-required resource if the user is not logged in.
+                                # Other times, we might prefer to send a 404 error, or to navigate
+                                # to index, etc. (consider <img src="xxx">, <audio>, etc.)
+                                buf = await self.session.build_login_screen()
+
+                                log(self.session, 'Response', 'Sending login screen')
+
+                        if buf is None and (not resource.requires_authentication or self.session.logged_in):
+                            if resource.api_stored_proc or resource.render_jinja_template:
+                                #buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
+
+    #                            buf, redirect_to, history_go_back = yield tornado.gen.multi(tornado.ioloop.IOLoop.current().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource)))
+
+    #                            buf, redirect_to, history_go_back = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource))
+                                buf, redirect_to, history_go_back = await self.do_render_response(this_resource=resource)
+
+                            else:
+                                # note:  resource.data will usually be str but might be bytes
+                                buf = resource.data
+
+                        if resource.on_after:
+                            this_function = getattr(TheasCustom, resource.on_after)
+                            if this_function:
+                                handled = this_function(self, args, kwargs)
+
+            if not handled:
+                if redirect_to is not None:
+                    if self.cookies_changed:
+                        # must perform a client-side redirect in order to set cookies
+                        self.write(self.session.clientside_redir(redirect_to))
+                        handled = True
+                    else:
+                        # can send a normal redirect, since no cookies need to be written
+                        self.redirect(redirect_to)
+                        handled = True
+
+                elif history_go_back:
+                    pass
+
+                if not handled:
+                    if buf is None:
+                        log(self.session, 'Response',
+                            'Sending 404 error in response to HTTP GET request for {}'.format(resource_code))
+
+                        self.send_error(status_code=404)
+                        handled = True
+                    else:
+                        log(self.session, 'Response', 'Sending response to HTTP GET request for {}'.format(resource_code))
+
                         self.write(buf)
 
                         # CORS
                         self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
                         self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-                        self.session.log('Response', 'Sending response')
-
-        else:
-            self.write('<html><body>Error: cannot process request without a valid session</body></html>')
-
-        if not handled and not this_finished:
-            if self.session and self.session.locked:
-                await self.session.finished()
-
-            self.finish()
-
-        self.session = None
-
-    #@tornado.gen.coroutine
-    async def get(self, *args, **kwargs):
-        ##########################################################
-        # MAIN ENTRY POINT FOR HTTP GET REQUEST
-        ##########################################################
-        global G_cached_resources
-
-        if self.session:
-            self.session.comments = 'ThHandler.get'
-
-        # do everything needed to process an HTTP GET request
-
-        handled = False
-        buf = None
-        redirect_to = None
-        history_go_back = False
-
-        # try to find required resource
-        resource_code = None
-        resource = None
-
-        request_path = None
-        if len(args) >= 0:
-            request_path = args[0]
-
-        if request_path is not None and request_path.split('/')[0] == 'r':
-            # Special case:  an "r" as the first segment of the path, such as:
-            # r/resourcecode/aaa/bbb
-            # indicates that the second segment is to be the resource code.
-            # This allows URLs such as /r/img/myimg.jpg to be handled dynamically:  the resource img is
-            # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
-            # img/myimg.jpg
-            resource_code = request_path.split('/')[1]
-        else:
-            resource_code = request_path
-            if resource_code and resource_code.count('.') >= 2:
-                # A versioned filename, i.e. my.23.css for version #23 of my.css
-                # We just want to cut out the version, and return the unversioned
-                # filename as the resource code (i.e. my.css)
-
-                # That is, Theas will always / only serve up the most recent version
-                # of a resource.  There is not support for serving up a particular
-                # historical version.  The version number in the file name is merely
-                # for the browser's benefit, so that we can "cache bust" / have the
-                # browser request the latest version even if it has an old version in
-                # cache.
-
-                # For this reason, we don't really need to inspect the resources.
-                # We need only manipulate the resource_code to strip out the version
-                # number.
-                segments = resource_code.split('.')
-                if len(segments) >= 3 and 'ver' in segments:
-                    ver_pos = segments.index('ver')
-                    if ver_pos > 0:
-                        resource_code = '.'.join(segments[:ver_pos]) + '.' + '.'.join(segments[ver_pos + 2:])
-
-        log(None, 'GET', '**Starting get for', resource_code)
-        # note: self.session is probably not yet assigned
-
-        #self.session = yield self.wait_for_session()
-        if self.session is None:
-            log(None, 'SessionRetrive', 'At start session is None')
-        else:
-            log(None, 'SessionRetrieve', 'At start session is:', self.session.session_token)
-
-        self.session = await self.wait_for_session()
-
-        if self.session is None:
-            log(None, 'SessionRetrive', 'After wait_for_session() session is None')
-        else:
-            log(None, 'SessionRetrieve', 'After wait_for_session() session is:', self.session.session_token)
-
-
-
-        # A request for a cached public resource does not need a database connection.
-        # We can serve up such requests without even checking the session.
-        # If we do not check the session, multiple simultaneous requests can be processed,
-        if resource_code or self.session:
-            resource = await G_cached_resources.get_resource(resource_code, self.session)
-
-        # see if the resource is public (so that we can serve up without a session)
-        if resource is not None and resource.exists and resource.is_public and \
-                not resource.render_jinja_template and \
-                not resource.on_before and not resource.on_after:
-            # note:  resource.data will usually be str but might be bytes
-            log(None, 'CachedGET', 'Serving up cached resource', resource_code)
-            buf = resource.data
-
-        else:
-            # Retrieve or create a session.  We want everyone to have a session (even if they are not authenticated)
-            # We need to use the session's SQL connection to retrieve the resource
-
-            log(None, 'GET', '*******************************')
-            log(None, 'GET', args[0])
-
-            if self.session is None:
-                log(None, 'GET Error', 'No session.  Cannot continue to process request.')
-                self.write('<html><body>Error: cannot process request without a valid session</body></html>')
-            else:
-                # we have a session, but are not necessarily logged in
-                self.session.log('GET', 'Have session', self.session.session_token)
-                self.session.log('GET', 'Received request for: {}'.format(self.request.path))
-
-                self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
-
-                # SOS Should have 404?  Take logged-in users back to where they were
-                if not resource_code and self.session.logged_in:
-                    resource = self.session.current_resource
-
-                if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
-                    # resource_code was not provided and user is not logged in:  use default resource
-                    # If the user is logged in, we want get_resource to select the appropriate
-                    # resource for the user.
-                    resource_code = DEFAULT_RESOURCE_CODE
-
-                if resource is None or not resource.exists:
-                    # Call get_resources again, this time with a session
-                    resource = await G_cached_resources.get_resource(resource_code, self.session)
-
-                    if resource is None or not resource.exists:
-                        # If the user is logged in, but resource_code is not specified, we explicitly set get_default_resource
-                        # so that the stored proc can look up the correct resource for us.
-                        # This change was made 9/21/2017 to correct a problem that led to 404 errors resulting in serving
-                        # up the default resource.
-                        self.session.log('Get Resource', 'Logged in?', self.session.logged_in)
-                        self.session.log('Get Resource', 'resource_code', resource_code if resource_code is not None else 'None')
-                        resource = await G_cached_resources.get_resource(resource_code, self.session,
-                                                                   get_default_resource=self.session.logged_in)
-
-                if resource is not None and resource.exists and\
-                        resource.resource_code != LOGIN_RESOURCE_CODE and \
-                        resource.render_jinja_template:
-                    # We may have retrieved a cached resource.  Set current_resource.
-                    self.session.current_resource = resource
-
-                if resource is not None and resource.exists:
-                    if resource.on_before:
-                        this_function = getattr(TheasCustom, resource.on_before)
-                        if this_function:
-                            handled = this_function(self, args, kwargs)
-
-                    if resource.requires_authentication and not self.session.logged_in:
-
-                        if not self.session.logged_in:
-                            # still not logged in:  present login screen
-                            self.session.bookmark_url = resource.resource_code
-                            # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
-                            self.session.current_resource = resource
-
-                            # NOTE:  this needs further thought.
-                            # Sometimes it is nice to send the login screen in response to a request
-                            # for an auth-required resource if the user is not logged in.
-                            # Other times, we might prefer to send a 404 error, or to navigate
-                            # to index, etc. (consider <img src="xxx">, <audio>, etc.)
-                            buf = await self.session.build_login_screen()
-
-                            log(self.session, 'Response', 'Sending login screen')
-
-                    if buf is None and (not resource.requires_authentication or self.session.logged_in):
-                        if resource.api_stored_proc or resource.render_jinja_template:
-                            #buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
-
-#                            buf, redirect_to, history_go_back = yield tornado.gen.multi(tornado.ioloop.IOLoop.current().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource)))
-
-#                            buf, redirect_to, history_go_back = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource))
-                            buf, redirect_to, history_go_back = await self.do_render_response(this_resource=resource)
-
+                        if resource is not None and resource.is_public:
+                            self.set_header('Cache-Control', ' max-age=900')  # let browser cache for 15 minutes
                         else:
-                            # note:  resource.data will usually be str but might be bytes
-                            buf = resource.data
+                            self.set_header('Cache-Control', 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0')
+                            self.add_header('Cache-Control', 'Cache-Control: post-check=0, pre-check=0')
+                            self.add_header('Cache-Control', 'Pragma: no-cache')
 
-                    if resource.on_after:
-                        this_function = getattr(TheasCustom, resource.on_after)
-                        if this_function:
-                            handled = this_function(self, args, kwargs)
+                        if self.filename is not None:
+                            self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(self.filename))
+                            self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
 
-        if not handled:
-            if redirect_to is not None:
-                if self.cookies_changed:
-                    # must perform a client-side redirect in order to set cookies
-                    self.write(self.session.clientside_redir(redirect_to))
-                    await self.session.finished()
-                else:
-                    # can send a normal redirect, since no cookies need to be written
-                    if self.session is not None and self.session.locked:
-                        await self.session.finished()
-                        buf = None
-
-                    self.redirect(redirect_to)
-
-            else:
-                if history_go_back:
-                    pass
-                else:
-                    if buf is None:
-                        log(self.session, 'Response',
-                                  'Sending 404 error in response to HTTP GET request for {}'.format(resource_code))
-                        self.send_error(status_code=404)
-
-            if buf is not None:
-                log(self.session, 'Response', 'Sending response to HTTP GET request for {}'.format(resource_code))
-
-                self.write(buf)
-
-                # CORS
-                self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-                self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
-
-                if resource is not None and resource.is_public:
-                    self.set_header('Cache-Control', ' max-age=900')  # let browser cache for 15 minutes
-                else:
-                    self.set_header('Cache-Control', 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0')
-                    self.add_header('Cache-Control', 'Cache-Control: post-check=0, pre-check=0')
-                    self.add_header('Cache-Control', 'Pragma: no-cache')
-
-                if self.filename is not None:
-                    self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(self.filename))
-                    self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
-
-                elif resource is not None:
-                    if resource.filename:
-                        if resource.filetype:
-                            self.set_header('Content-Type', resource.filetype)
+                        elif resource is not None:
+                            if resource.filename:
+                                if resource.filetype:
+                                    self.set_header('Content-Type', resource.filetype)
+                                else:
+                                    self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.filename))
+                            self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
                         else:
-                            self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.filename))
-                    self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
-                else:
-                    self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.resource_code))
+                            self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.resource_code))
 
 
-                self.finish()
+            if not handled:
+                await self.finish()
 
             if self.session and self.session.locked:
                 self.session.comments = None
@@ -1889,32 +1869,15 @@ class ThHandler(tornado.web.RequestHandler):
                                      else 'Not Assigned!'
                                  ))
 
-
-
-
-                # def write_error(self, status_code, **kwargs):
-                #    msg = ''
-                #    if self.this_sess.conn.sql_conn == None:
-                #        msg = 'There is no database connection.  '
-                #    msg = msg + e.args[0] + ' ' + e.message
-                #    print('Error: ' + msg)
-                #    self.write('<html><body>Sorry, you encountered an error.  Error message:  ' + msg + '</body></html>')
-                #    self.finish()
-                #    #if 'exc_info' in kwargs and issubclass(kwargs['exc_info'][0], ForbiddenException):
-                #    #    self.set_status(403)
-
-                # def _handle_request_exception(self, e):
-
-    #@tornado.gen.coroutine
-    async def options(self, resource_code=None, *args, **kwargs):
+async def options(self, resource_code=None, *args, **kwargs):
         # CORS
         self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
         self.set_header('Access-Control-Allow-Methods', 'POST, GET, PUT, DELETE')
         self.set_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
         self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-    def data_received(self, chunk):
-        pass
+def data_received(self, chunk):
+    pass
 
 
 # -------------------------------------------------
@@ -1991,11 +1954,6 @@ class ThHandler_Attach(ThHandler):
 
         return resource
 
-    #@run_on_executor
-    #def retrieve_webresource_background(self):
-    #    return self.retrieve_webresource_background(self)
-
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
         # MAIN ENTRY POINT FOR ATTACH HTTP GET REQUEST
 
@@ -2051,7 +2009,7 @@ class ThHandler_Attach(ThHandler):
                             self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(attachment['filename']))
                             self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
 
-                    self.finish()
+                    await self.finish()
                 else:
                     self.send_error(status_code=404)
 
@@ -2073,7 +2031,6 @@ class ThHandler_Logout(ThHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
         global G_sessions
 
@@ -2103,7 +2060,7 @@ class ThHandler_Logout(ThHandler):
             if self.session and self.session.locked:
                 await self.session.finished()
 
-            self.finish()
+            await self.finish()
 
         else:
             if self.session and self.session.locked:
@@ -2127,7 +2084,6 @@ class ThHandler_Login(ThHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
         global G_sessions
 
@@ -2177,10 +2133,9 @@ class ThHandler_Login(ThHandler):
         if self.session and self.session.locked:
             await self.session.finished()
 
-        self.finish()
+        await self.finish()
 
 
-    #@tornado.gen.coroutine
     async def post(self, *args, **kwargs):
         # Note:  As of 1/7/2021 the preferred way of performing authentication is via Async (cmd='login')
         # Posting to special login URL is deprecated.
@@ -2238,7 +2193,6 @@ class ThHandler_Login(ThHandler):
 # ThHandler_Async async (AJAX) handler
 # -------------------------------------------------
 class ThHandler_Async(ThHandler):
-    #executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     def __init__(self, application, request, **kwargs):
         super().__init__(application, request, **kwargs)
@@ -2246,263 +2200,266 @@ class ThHandler_Async(ThHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def post(self, *args, **kwargs):
 
         global G_cached_resources
 
         log(None, 'Async', '*******************************')
 
-        # Note:  The async request is to a generic url of /async
-        # To determine what type of async request is being made, we look to the session's current_resource
-        # If current_resource is not set (such as due to a new session), we look to the Theas param
-        # th:CurrentPage
 
-        buf = ''
-        changed_controls = None
-        redirect_to = None
-
-        resource_code = None
-        this_resource = None
-
-        this_document = None
-        path_params = None
-
-        first_path_elem = self.request.path.split('/')[1]
-
-        if first_path_elem == 'async':
-            # this_document = self.request.path.split('/')[2]
-            # resource_code = "/".join(self.request.path.split('/')[3:])
-
-            # The rest of the path (after async) is taken to be the resource code.
-            # The resource code may contain /'s
-            # Therefore it is not possible to pass in path params on a request to async
-            this_document = "/".join(self.request.path.split('/')[2:])
+        if not thbase.G_server.is_running:
+            self.send_error(status_code=503)
         else:
-            this_document = self.request.path
 
-        cmd = None
-        if self.get_arguments('cmd'):
-            cmd = self.get_argument('cmd')
-        if not cmd and self.get_body_arguments('cmd'):
-            cmd = self.get_body_argument('cmd')
+            # Note:  The async request is to a generic url of /async
+            # To determine what type of async request is being made, we look to the session's current_resource
+            # If current_resource is not set (such as due to a new session), we look to the Theas param
+            # th:CurrentPage
 
-        #self.session = yield self.wait_for_session()
-        self.session = await self.wait_for_session()
+            buf = ''
+            changed_controls = None
+            redirect_to = None
 
-        if self.session is not None:
+            resource_code = None
+            this_resource = None
 
-            # update theas parameters based on this post...even if there is not an async stored proc
-            th_params = None
+            this_document = None
+            path_params = None
 
-            # If parameter th is present, use this as Theas param data, else look to the request_handler
-            if self.get_arguments('th'):
-                th_params = self.get_argument('th')
+            first_path_elem = self.request.path.split('/')[1]
 
-            self.session.theas_page.process_client_request(request_handler=self, buf=th_params, accept_any=False)
+            if first_path_elem == 'async':
+                # this_document = self.request.path.split('/')[2]
+                # resource_code = "/".join(self.request.path.split('/')[3:])
 
-            # Resource code is determined by:
-            #   1) Specific resource that pertains to cmd, i.e. resetPassword -> login
-            #   2) path parameters, i.e. this_document
-            #   3) Theas param th:CurrentPage
-            #   4) Session's current_resource, i.e. last resource requested
-
-            if cmd == 'resetPassword':
-                resource_code = 'login'
-            elif this_document:
-                resource_code = this_document
-            elif self.session.current_resource is not None:
-                resource_code = self.session.current_resource.resource_code
+                # The rest of the path (after async) is taken to be the resource code.
+                # The resource code may contain /'s
+                # Therefore it is not possible to pass in path params on a request to async
+                this_document = "/".join(self.request.path.split('/')[2:])
             else:
-                resource_code = self.session.theas_page.get_value('th:CurrentPage').strip()
-                # Request may have provided Theas param 'th:CurrentPage'
-                # If session does not have current_resource set, trust 'th:CurrentPage'
-                # This allows us to process the async request in situations where the session went away due
-                # to timeout or server restart (assuming "remember me" / user token in cookie is enabled)
+                this_document = self.request.path
 
-            if G_cached_resources and self.session.current_resource is None or resource_code != self.session.current_resource.resource_code:
-                # Note that an async request will NOT change the session's current_resource
-                this_resource = await G_cached_resources.get_resource(resource_code, self.session)
-            else:
-                this_resource = self.session.current_resource
+            cmd = None
+            if self.get_arguments('cmd'):
+                cmd = self.get_argument('cmd')
+            if not cmd and self.get_body_arguments('cmd'):
+                cmd = self.get_body_argument('cmd')
 
-            self.session.log('Async:',
-                             'Resource Code',
-                             resource_code
-                             if resource_code
-                             else 'No current resource for this session!')
+            #self.session = yield self.wait_for_session()
+            self.session = await self.wait_for_session()
 
-            if self.request_has_files():
-                await self.process_upl()
-            # process uploaded files, even if there is no async proc
+            if self.session is not None:
 
+                # update theas parameters based on this post...even if there is not an async stored proc
+                th_params = None
 
-            if cmd == 'heartbeat':
-                if self.session is not None and self.session.conn is not None and self.session.conn.sql_conn is not None:
-                    buf = None
-                    changed_controls = None
-                    redirect_to = None
+                # If parameter th is present, use this as Theas param data, else look to the request_handler
+                if self.get_arguments('th'):
+                    th_params = self.get_argument('th')
 
-                    buf, changed_controls, redirect_to = self.exec_stored_proc('theas.spapiHeartbeat', cmd='')
+                self.session.theas_page.process_client_request(request_handler=self, buf=th_params, accept_any=False)
 
-                    if changed_controls:
-                        buf = buf + '&' + self.session.theas_page.serialize(control_list=changed_controls)
+                # Resource code is determined by:
+                #   1) Specific resource that pertains to cmd, i.e. resetPassword -> login
+                #   2) path parameters, i.e. this_document
+                #   3) Theas param th:CurrentPage
+                #   4) Session's current_resource, i.e. last resource requested
 
-                    if buf:
-                        self.write(buf)
-                    else:
-                        self.write('sessionOK')
+                if cmd == 'resetPassword':
+                    resource_code = 'login'
+                elif this_document:
+                    resource_code = this_document
+                elif self.session.current_resource is not None:
+                    resource_code = self.session.current_resource.resource_code
                 else:
-                    self.write('invalidSession')
+                    resource_code = self.session.theas_page.get_value('th:CurrentPage').strip()
+                    # Request may have provided Theas param 'th:CurrentPage'
+                    # If session does not have current_resource set, trust 'th:CurrentPage'
+                    # This allows us to process the async request in situations where the session went away due
+                    # to timeout or server restart (assuming "remember me" / user token in cookie is enabled)
 
-                if self.session is not None:
-                    await self.session.finished()
-
-            if cmd == 'clearError':
-                if self.session is not None and\
-                        self.session.theas_page is not None and\
-                        self.session.conn is not None and\
-                        self.session.conn.sql_conn  is not None:
-                    #self.session.theas_page.set_value('th:ErrorMessage', '')
-                    self.session.error_message = ''
-
-                self.write('clearError')
-
-                await self.session.finished()
-
-            if cmd == 'theasParams':
-                if self.session is not None:
-                    # send ALL Theas controls
-                    self.write(self.session.theas_page.serialize())
-                    await self.session.finished()
-
-
-            if cmd == 'login':
-
-                success = False
-                error_message = ''
-                redirect_to = ''
-
-                success, error_message = await self.session.authenticate()
-                #self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
-                self.session.error_message = '{}'.format(error_message)
-
-                resource = await G_cached_resources.get_resource(None, self.session,
-                                                                 get_default_resource=self.session.logged_in)
-
-                self.write_cookies()
-
-                next_page = ''
-                if self.session.logged_in:
-                    if resource:
-                        next_page = resource.resource_code
-                    else:
-                        next_page = DEFAULT_RESOURCE_CODE
+                if G_cached_resources and self.session.current_resource is None or resource_code != self.session.current_resource.resource_code:
+                    # Note that an async request will NOT change the session's current_resource
+                    this_resource = await G_cached_resources.get_resource(resource_code, self.session)
                 else:
-                    next_page = ''
+                    this_resource = self.session.current_resource
 
-                if self.session and self.session.locked:
-                    await self.session.finished()
+                self.session.log('Async:',
+                                 'Resource Code',
+                                 resource_code
+                                 if resource_code
+                                 else 'No current resource for this session!')
 
-                buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
-                    '1' if self.session.logged_in else '0',
-                    error_message,
-                    next_page)
+                if self.request_has_files():
+                    await self.process_uploaded_files()
+                # process uploaded files, even if there is no async proc
 
-                self.write(buf)
 
-                self.finish()
+                if cmd == 'heartbeat':
+                    if self.session is not None and self.session.conn is not None and self.session.conn.sql_conn is not None:
+                        buf = None
+                        changed_controls = None
+                        redirect_to = None
 
-            else:
-                async_proc_name = None
+                        buf, changed_controls, redirect_to = self.exec_stored_proc('theas.spapiHeartbeat', cmd='')
 
-                if self.session is not None:
-                    # self.session.log('Async', str(self.request.body_arguments))
+                        if changed_controls:
+                            buf = buf + '&' + self.session.theas_page.serialize(control_list=changed_controls)
 
-                    try:
-
-                        if this_resource is None:
-                            # Something is wrong.  Perhaps the async request came in before a resource had been served?
-                            # This could happen if the TheasServer was restarted after a page was sent to the browser,
-                            # Javascript on the page could submit an async requests...which we can't handle, because
-                            # the original session no longer exists.
-
-                            raise TheasServerError(
-                                'There is a problem with your session. Click the "reload" button in your browser.' +
-                                '|Invalid Session|Async request was received before a SysWebResource was served.  Perhaps ' +
-                                'your session expired, or the server was restarted after this page was loaded.')
-                        else:
-
-                            async_proc_name = this_resource.api_async_stored_proc
-
-                        if async_proc_name:
-                            buf, changed_controls, redirect_to = await self.exec_stored_proc(async_proc_name, cmd=cmd, path_params=path_params)
-
-                    except TheasServerError as e:
-                        # e = sys.exc_info()[0]
-                        err_msg = e.value if hasattr(e, 'value') else e
-
-                        buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(err_msg))
-
-                    except Exception as e:
-                        # We would like to catch specific MSSQL exceptions, but these are declared with cdef
-                        # in _mssql.pyx ... so they are not exported to python.  Should these be declared
-                        # with cpdef?
-
-                        err_msg = None
-
-                        err_msg = str(e)
-
-                        buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(err_msg))
-                        self.session.log('Async',
-                                         'ERROR when executing stored proc {}: {}'.format(
-                                             async_proc_name, err_msg))
-
-                if redirect_to:
-                    if self.session is not None and self.session.locked:
-                        await self.session.finished()
-                        self.session = None
-
-                    # redirect as the stored procedure told us to
-                    self.redirect(redirect_to)
-                else:
-                    if len(buf) > 0:
-                        # stored proc specified an explicit response
-                        try:
-                            json_buf = json.loads(buf)
-                            # buf looks like it contains JSON.  Add an element containing TheasParams
-                            ch_ctl = self.session.theas_page.serialize(control_list=changed_controls)
-                            if ch_ctl:
-                                if isinstance(json_buf, dict):
-                                    json_buf['theasParams'] = ch_ctl
-                                else:
-                                    # todo:  consider if we need to support sending updated Theas params in this situation
-                                    log(None, 'TheasParams', 'WARNING:  cannot send changed Theas params along with response because JSON response is not a dict')
-                            self.write(json.dumps(json_buf))
-                        except ValueError as e:
-                            # buf does not look like it contains JSON.  Just send the string.
+                        if buf:
                             self.write(buf)
-
+                        else:
+                            self.write('sessionOK')
                     else:
-                        # Stored proc did not specify an explicit response, but may have updated TheasParams.
-                        # Send updated TheasParams only.
-                        self.write(self.session.theas_page.serialize(control_list=changed_controls))
+                        self.write('invalidSession')
 
-                        # send ALL TheasParams
-                        #self.write(self.session.theas_page.serialize())
+                    if self.session is not None:
+                        await self.session.finished()
 
-                    # CORS
-                    self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-                    self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+                if cmd == 'clearError':
+                    if self.session is not None and\
+                            self.session.theas_page is not None and\
+                            self.session.conn is not None and\
+                            self.session.conn.sql_conn  is not None:
+                        #self.session.theas_page.set_value('th:ErrorMessage', '')
+                        self.session.error_message = ''
+
+                    self.write('clearError')
+
+                    await self.session.finished()
+
+                if cmd == 'theasParams':
+                    if self.session is not None:
+                        # send ALL Theas controls
+                        self.write(self.session.theas_page.serialize())
+                        await self.session.finished()
+
+
+                if cmd == 'login':
+
+                    success = False
+                    error_message = ''
+                    redirect_to = ''
+
+                    success, error_message = await self.session.authenticate()
+                    #self.session.theas_page.set_value('theas:th:ErrorMessage', '{}'.format(error_message))
+                    self.session.error_message = '{}'.format(error_message)
+
+                    resource = await G_cached_resources.get_resource(None, self.session,
+                                                                     get_default_resource=self.session.logged_in)
+
+                    self.write_cookies()
+
+                    next_page = ''
+                    if self.session.logged_in:
+                        if resource:
+                            next_page = resource.resource_code
+                        else:
+                            next_page = DEFAULT_RESOURCE_CODE
+                    else:
+                        next_page = ''
 
                     if self.session and self.session.locked:
                         await self.session.finished()
 
-                    self.session = None
+                    buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
+                        '1' if self.session.logged_in else '0',
+                        error_message,
+                        next_page)
 
-                    self.finish()
+                    self.write(buf)
 
-    #@tornado.gen.coroutine
+                    await self.finish()
+
+                else:
+                    async_proc_name = None
+
+                    if self.session is not None:
+                        # self.session.log('Async', str(self.request.body_arguments))
+
+                        try:
+
+                            if this_resource is None:
+                                # Something is wrong.  Perhaps the async request came in before a resource had been served?
+                                # This could happen if the TheasServer was restarted after a page was sent to the browser,
+                                # Javascript on the page could submit an async requests...which we can't handle, because
+                                # the original session no longer exists.
+
+                                raise TheasServerError(
+                                    'There is a problem with your session. Click the "reload" button in your browser.' +
+                                    '|Invalid Session|Async request was received before a SysWebResource was served.  Perhaps ' +
+                                    'your session expired, or the server was restarted after this page was loaded.')
+                            else:
+
+                                async_proc_name = this_resource.api_async_stored_proc
+
+                            if async_proc_name:
+                                buf, changed_controls, redirect_to = await self.exec_stored_proc(async_proc_name, cmd=cmd, path_params=path_params)
+
+                        except TheasServerError as e:
+                            # e = sys.exc_info()[0]
+                            err_msg = e.value if hasattr(e, 'value') else e
+
+                            buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(err_msg))
+
+                        except Exception as e:
+                            # We would like to catch specific MSSQL exceptions, but these are declared with cdef
+                            # in _mssql.pyx ... so they are not exported to python.  Should these be declared
+                            # with cpdef?
+
+                            err_msg = None
+
+                            err_msg = str(e)
+
+                            buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(err_msg))
+                            self.session.log('Async',
+                                             'ERROR when executing stored proc {}: {}'.format(
+                                                 async_proc_name, err_msg))
+
+                    if redirect_to:
+                        if self.session is not None and self.session.locked:
+                            await self.session.finished()
+                            self.session = None
+
+                        # redirect as the stored procedure told us to
+                        self.redirect(redirect_to)
+                    else:
+                        if len(buf) > 0:
+                            # stored proc specified an explicit response
+                            try:
+                                json_buf = json.loads(buf)
+                                # buf looks like it contains JSON.  Add an element containing TheasParams
+                                ch_ctl = self.session.theas_page.serialize(control_list=changed_controls)
+                                if ch_ctl:
+                                    if isinstance(json_buf, dict):
+                                        json_buf['theasParams'] = ch_ctl
+                                    else:
+                                        # todo:  consider if we need to support sending updated Theas params in this situation
+                                        log(None, 'TheasParams', 'WARNING:  cannot send changed Theas params along with response because JSON response is not a dict')
+                                self.write(json.dumps(json_buf))
+                            except ValueError as e:
+                                # buf does not look like it contains JSON.  Just send the string.
+                                self.write(buf)
+
+                        else:
+                            # Stored proc did not specify an explicit response, but may have updated TheasParams.
+                            # Send updated TheasParams only.
+                            #self.write(self.session.theas_page.serialize(control_list=changed_controls))
+
+                            # send ALL TheasParams
+                            self.write(self.session.theas_page.serialize())
+
+                        # CORS
+                        self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                        self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
+                        if self.session and self.session.locked:
+                            await self.session.finished()
+
+                        self.session = None
+
+                        await self.finish()
+
     async def get(self, *args, **kwargs):
         return self.post(*args, **kwargs)
 
@@ -2535,7 +2492,6 @@ class ThHandler_REST(ThHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def post(self, *args, **kwargs):
         global G_cached_resources
 
@@ -2795,7 +2751,7 @@ class ThHandler_REST(ThHandler):
                     self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
                     self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-                    self.finish()
+                    await self.finish()
 
                 if 1 == 0:
                     #if the async request came in on an existng session we don't want to close it!
@@ -2825,13 +2781,37 @@ class ThHandler_REST(ThHandler):
 
 
 
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
 
         return self.post(*args, **kwargs)
 
     def data_received(self, chunk):
         pass
+
+
+
+# -------------------------------------------------
+# ThHandler_Stop handler (for debugging only
+# -------------------------------------------------
+class ThHandler_Stop(tornado.web.RequestHandler):
+    def __init__(self, application, request, **kwargs):
+        super().__init__(application, request, **kwargs)
+
+    def __del__(self):
+        self.session = None
+
+    async def get(self, *args, **kwargs):
+        buf = 'Hello World.  Status is OK.'
+        self.write('<html><body>{}</body></html>'.format('Stopping Theas!'))
+
+        self.finish()
+
+        thbase.G_server.stop()
+
+    def data_received(self, chunk):
+        pass
+
+
 
 
 # -------------------------------------------------
@@ -2844,7 +2824,6 @@ class ThHandler_Stat(tornado.web.RequestHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
         buf = 'Hello World.  Status is OK.'
         self.write('<html><body>{}</body></html>'.format(memory_report()))
@@ -2865,7 +2844,6 @@ class ThHandler_Back(ThHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
 
         if self.session is None:
@@ -2908,7 +2886,7 @@ class ThHandler_Back(ThHandler):
             await self.session.finished()
 
         self.session = None
-        self.finish()
+        await self.finish()
 
     def data_received(self, chunk):
         pass
@@ -2927,7 +2905,6 @@ class ThHandler_PurgeCache(ThHandler):
     def __del__(self):
         self.session = None
 
-    #@tornado.gen.coroutine
     async def get(self, *args, **kwargs):
         global G_cached_resources
 
@@ -2953,7 +2930,7 @@ class ThHandler_PurgeCache(ThHandler):
         log(None, 'Cache', message)
 
         self.write('<html><body>' + message + '</body></html>')
-        self.finish()
+        await self.finish()
 
 
 # -------------------------------------------------
@@ -3251,6 +3228,9 @@ async def get_ready(run_as_svc=False):
         write_winlog(msg)
         print(msg)
 
+    # register callback to call when Theas stops
+    thbase.set_all_done(all_done)
+
     if not run_as_svc:
         # Trap breaks.
         G_break_handler = BreakHandler()
@@ -3263,8 +3243,10 @@ async def get_ready(run_as_svc=False):
         # make sure there is an ioloop in this thread (needed for Windows service)
         #io_loop = tornado.ioloop.IOLoop()
         #io_loop.make_current()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        loop = asyncio.get_running_loop()
+        if loop is None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
 
     program_directory, program_filename = get_program_directory()
@@ -3288,8 +3270,8 @@ async def get_ready(run_as_svc=False):
             http_server_prefix=G_program_options.server_prefix,
             login_auto_user_token=LOGIN_AUTO_USER_TOKEN
         )
-
     )
+    #G_conns.init_executor(100)
 
     G_cached_resources = ThCachedResources(
         G_program_options.settings_path,
@@ -3347,35 +3329,49 @@ async def get_ready(run_as_svc=False):
         print("Note: Logging is disabled")
 
 
-async def all_done():
+def all_done():
     global G_sessions
     global G_cached_resources
     global G_conns
     global G_break_handler
 
-    thbase.G_server.stop(reason='TheasServer.all_done')
+    msg = 'TheasServer.py all_done() called'
+    log(None, 'Shutdown', msg)
+    write_winlog(msg)
 
-    G_cached_resources = None
-    del G_cached_resources
+    #experimental  Would like to kill SQL connections, but they may be running in an executor thread
+    #if G_conns is not None:
+    #    G_conns.kill_threads(reason='Called from all_done()')
+    #    G_conns = None
+    #    msg = 'TheasServer.py all_done() killing threads'
+    #    log(None, 'Shutdown', msg)
+    #    write_winlog(msg)
 
-    log(None, 'Shutdown', 'Winding down #4')
 
-    G_sessions.stop()
-    G_sessions = None
-    del G_sessions
+    #G_sessions = None
+    #del G_sessions
 
-    G_conns = None
-    del G_conns
+    #G_conns = None
+    #del G_conns
 
-    log(None, 'Shutdown', 'Winding down #5')
+    #G_cached_resources = None
+    #del G_cached_resources
 
-    if G_break_handler:
+    #log(None, 'Shutdown', 'Winding down #5')
+
+    if G_break_handler is not None:
         G_break_handler.disable()
+
+    msg = 'TheasServer.py all_done() finished'
+    log(None, 'Shutdown', msg)
+    write_winlog(msg)
 
 
 def make_app():
+
     return tornado.web.Application(
         [
+            (r'/stop', ThHandler_Stop),
             (r'/attach', ThHandler_Attach),
             (r'/attach/(.*)', ThHandler_Attach),
             (r'/logout', ThHandler_Logout),
@@ -3401,19 +3397,10 @@ def make_app():
         cookie_secret=COOKIE_SECRET
     )
 
-async def periodic():
-    # run every 5 seconds (or G_periodic_wait seconds)
-
-    global G_periodic_wait
-    global G_periodic_proc
-
-    loop = asyncio.get_running_loop()
-
-    #log(None, 'Periodic', 'Hi there')
+async def each_period():
 
     thbase.G_service_poll()
-
-    # Note: to stop the service, we can do:  hbase.G_service_send_stop()
+    # Note: to stop the service, we can do: thbase.G_service_send_stop()
 
     global G_sessions
     await G_sessions.remove_expired()
@@ -3422,65 +3409,53 @@ async def periodic():
     await G_conns.process_release_conns()
 
     # we can do other things here if we want
+    global G_periodic_proc
     if G_periodic_proc is not None:
         G_periodic_proc()
 
-    await asyncio.sleep(G_periodic_wait)
+async def periodic():
+    # run every 5 seconds (or G_periodic_wait seconds)
+    global G_periodic_wait
 
-    if thbase.G_server.is_running:
-        loop.create_task(periodic())
-
-    del loop
+    while thbase.G_server.is_running:
+        asyncio.create_task(each_period())
+        await asyncio.sleep(G_periodic_wait)
 
 
 async def main(run_as_svc=False):
-    global G_shutdown_event
-
+    shutdown_event = None
     await get_ready(run_as_svc=run_as_svc)
 
     app = make_app()
 
     try:
         global SERVER_PORT
-        app.listen(SERVER_PORT)
-        G_shutdown_event = asyncio.Event()
+        http_server = app.listen(SERVER_PORT)
+        shutdown_event = asyncio.Event()
+
+        thbase.G_server.start(shutdown_event=shutdown_event, http_server=http_server, reason='TheasServer.main')
 
     except Exception as e:
         msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port? {}'.format(
             SERVER_PORT, e)
         print(msg)
         write_winlog(msg)
-        sys.exit()
+        #sys.exit()
 
-    thbase.G_server.start(shutdown_event=G_shutdown_event, reason='TheasServer.main')
-    await G_shutdown_event.wait()
+    if shutdown_event is not None:
+        await shutdown_event.wait()
 
-    await all_done()
-
-    thbase.G_service_send_stop()
+    if thbase.G_server is not None:
+        thbase.G_server.stop(reason='TheasServer.main() exiting')
 
 async def parallel(run_as_svc=False):
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.gather(main(run_as_svc=run_as_svc), periodic(), return_exceptions=True)
 
-    await asyncio.gather(main(run_as_svc=run_as_svc), periodic(), return_exceptions=True)
-    pass
 
 def run(run_as_svc=False):
     #gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
     #set_exit_handler(on_exit)
-
-    '''
-    if run_as_svc:
-        # make sure there is an ioloop in this thread (needed for Windows service)
-        # io_loop = tornado.ioloop.IOLoop()
-        # io_loop.make_current()
-
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    '''
 
     loop = None
     try:
@@ -3489,25 +3464,15 @@ def run(run_as_svc=False):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-
-    #global G_shutdown_event
-    #G_shutdown_event = asyncio.Event()
-
-    #thbase.G_server.start(shutdown_event=G_shutdown_event, reason='TheasServer.run')
-
-    #asyncio.run(main(run_as_svc=run_as_svc))
-    asyncio.run(parallel(run_as_svc=run_as_svc))
+    try:
+        asyncio.run(parallel(run_as_svc=run_as_svc))
+    except Exception as e:
+        log(None, 'Shutdown', 'Exception in TheasServer.run() {}'.format(str(e)))
 
     pass
-
-    try:
-        log(None, 'Shutdown', 'TheasServer.run() has fully ended')
-        #log_memory('After end')
-
-    finally:
-        pass
-         #Clean up _mssql resources
-         #_mssql.exit()
+    #log_memory('After end')
+    #Clean up _mssql resources
+ #_mssql.exit()
 
 if __name__ == "__main__":
     run()
