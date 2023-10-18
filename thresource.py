@@ -4,7 +4,7 @@ from pymssql import _mssql
 
 from thbase import log, log_memory
 from thsql import ThStoredProc
-from thbase import log, TheasServerError
+from thbase import log, TheasServerError, theas_server
 import string
 
 G_cached_resources = None
@@ -50,7 +50,8 @@ class ThResource:
         self.exists = True
         self.on_before = None
         self.on_after = None
-        self.revision = None
+        self.revision = None,
+        self.redir_url = None
 
     def __del__(self):
         self.data = None
@@ -145,160 +146,175 @@ class ThCachedResources:
                       conn=None):
         this_resource = None
 
-        global G_cached_resources
-
-        if from_filename:
-            # load resource from file
-
-            if from_filename.endswith('Theas.js'):
-                try:
-                    with open(from_filename, 'r') as f:
-                        buf = f.read()
-                        f.close()
-                except Exception:
-                    raise TheasServerError('Error while starting the Theas Server:  File Theas.js could not be read.')
-
-                this_resource = ThResource()
-                this_resource.resource_code = resource_code
-                this_resource.filename = from_filename
-                this_resource.filename = 'application/javascript'
-                this_resource.data = buf
-                this_resource.api_stored_proc = None
-                this_resource.api_stored_proc_paramstr = None
-                this_resource.api_async_stored_proc = None
-                this_resource.api_stored_proc_resultset_str = None
-                this_resource.is_public = is_public
-                this_resource.is_static = is_static
-                this_resource.requires_authentication = False
-                this_resource.revision = self.static_file_version_no # use Theas version
-
-                self.add_resource(resource_code, this_resource)
-
-            else:
-                raise TheasServerError(
-                    'Error due to request of file {} from the file system.  Server is configured to server resources only from the database.'.format(
-                        from_filename))
+        if not theas_server().is_running and from_filename is None and not all_static_blocks:
+            return None
         else:
-            # load resource from database
 
-            if all_static_blocks:
-                log(None, 'Resource', 'Will load all static resources from the database.')
-            else:
-                if resource_code == '~':
-                    log(None, 'Resource',
-                                   'Requesting ~.  Will load default resource for this session.')
-                    get_default_resource = True
-                else:
-                    log(None, 'Resource', 'ThCachedResources.load_resource fetching from database',
-                                   resource_code if resource_code is not None else 'None')
+            global G_cached_resources
 
-            proc = None
+            if from_filename:
+                # load resource from file
 
-            # Get SysWebResourcesdata from database
-            proc = ThStoredProc('theas.spgetSysWebResources', None, conn=conn)
+                if from_filename.endswith('Theas.js'):
+                    try:
+                        with open(from_filename, 'r') as f:
+                            buf = f.read()
+                            f.close()
+                    except Exception:
+                        raise TheasServerError('Error while starting the Theas Server:  File Theas.js could not be read.')
 
-            is_ok = await proc.is_ok()
-            if is_ok:
-
-                # Note:  we could check for existence of @GetDefaultResource down below to help with backwards
-                # compatibility ... but that would mean having to call refresh_parameter_list, which is
-                # unnecessary overhead.
-
-                proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
-                proc.bind(str(int(all_static_blocks)), _mssql.SQLCHAR, '@AllStaticBlocks')
-
-                # if '@GetDefaultResource' in proc.parameter_list:
-                proc.bind(1 if (get_default_resource) else 0, _mssql.SQLCHAR, '@GetDefaultResource')
-
-                exec_result = await proc.execute()
-
-                row_count = 0
-
-                this_static_blocks_dict = {}
-
-                if exec_result and proc.resultset is not None:
-                    for row in proc.resultset:
-                        row_count += 1
-                        buf = row['ResourceText']
-                        if not buf:
-                            buf = row['ResourceData']
-                            if buf:
-                                buf = bytes(buf)
-
-                        elif not all_static_blocks and buf and '$thInclude_' in buf:
-                            # Perform replacement of includes.  Template may include string like:
-                            # $thInclude_MyResourceCode
-                            # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
-                            try:
-                                tmp = string.Template(buf)
-                                buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
-                            except Exception as e:
-                                log(None, 'Resource', 'Error in load_resource() when processing $thInclude_xxx', e)
-
-                        this_resource = ThResource()
-
-                        this_resource.resource_code = row['ResourceCode']
-                        this_resource.filename = row['Filename']
-                        if 'Filetype' in row:
-                            this_resource.filetype = row['Filetype']
-                        if 'DateUpdated' in row:
-                            this_resource.date_updated = row['DateUpdated']
-                        this_resource.data = buf
-
-                        if row['APIStoredProc']:
-                            this_resource.api_stored_proc = row['APIStoredProc'].split(' ')[0]
-                            this_resource.api_stored_proc_paramstr = row['APIStoredProc'][len(this_resource.api_stored_proc):]
-                            if this_resource.api_stored_proc_paramstr:
-                                this_resource.api_stored_proc_paramstr  = this_resource.api_stored_proc_paramstr .strip()
-
-                        this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
-                        this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
-                        this_resource.is_public = row['IsPublic']
-                        this_resource.is_static = row['IsStaticBlock']
-                        this_resource.requires_authentication = row['RequiresAuthentication']
-                        this_resource.render_jinja_template = row['RenderJinjaTemplate']
-                        this_resource.skip_xsrf = row['SkipXSRF']
-
-                        if 'OnBefore' in row:
-                            this_resource.on_before = row['OnBefore']
-
-                        if 'OnAfter' in row:
-                            this_resource.on_after = row['OnAfter']
-
-                        if 'Revision' in row:
-                            this_resource.revision = row['Revision']
-
-                        if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
-                            # added 2/11/2019:  don't want to cache default resource
-                            self.add_resource(row['ResourceCode'], this_resource)
-
-                        if all_static_blocks:
-                            this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
-                            this_static_blocks_dict['thInclude_' + row['ResourceCode']] = buf
-
-                if 1 == 0 and resource_code and not resource_code  in ('~', '/', '')  and row_count == 0:
-                    # do negative cache
-                    # Negative caching disabled 5/23/2022 due to causing some problems related to:
-                    #  UseSysWebResource, timing and PurgeCache, etc.
                     this_resource = ThResource()
-                    this_resource.exists = False
+                    this_resource.resource_code = resource_code
+                    this_resource.filename = from_filename
+                    this_resource.filename = 'application/javascript'
+                    this_resource.data = buf
+                    this_resource.api_stored_proc = None
+                    this_resource.api_stored_proc_paramstr = None
+                    this_resource.api_async_stored_proc = None
+                    this_resource.api_stored_proc_resultset_str = None
+                    this_resource.is_public = is_public
+                    this_resource.is_static = is_static
+                    this_resource.requires_authentication = False
+                    this_resource.revision = self.static_file_version_no # use Theas version
+                    this_resource.redir_url = None
+
                     self.add_resource(resource_code, this_resource)
 
+                else:
+                    raise TheasServerError(
+                        'Error due to request of file {} from the file system.  Server is configured to server resources only from the database.'.format(
+                            from_filename))
+            else:
+                # load resource from database
+
                 if all_static_blocks:
-                    ThCachedResources.static_blocks_dict = this_static_blocks_dict
+                    log(None, 'Resource', 'Will load all static resources from the database.')
+                else:
+                    if resource_code == '~':
+                        log(None, 'Resource',
+                                       'Requesting ~.  Will load default resource for this session.')
+                        get_default_resource = True
+                    else:
+                        log(None, 'Resource', 'ThCachedResources.load_resource fetching from database',
+                                       resource_code if resource_code is not None else 'None')
 
-                    for rs in proc.resultsets[1:]:
-                        for row in rs:
-                            # note:  should only be one row
-                            row_count += 1
-                            buf = row['JSON_CurResourceRevisions']
-
-                            new_dict = dict((v["ResourceCode"], v) for v in json.loads(buf))
-                            ThCachedResources.resource_versions_dict = new_dict
                 proc = None
-                del proc
 
-        return this_resource
+                # Get SysWebResourcesdata from database
+                proc = ThStoredProc('theas.spgetSysWebResources', None, conn=conn)
+                language = None
+                branch_code = None
+
+                is_ok = await proc.is_ok()
+                if is_ok:
+
+                    # Note:  we could check for existence of @GetDefaultResource down below to help with backwards
+                    # compatibility ... but that would mean having to call refresh_parameter_list, which is
+                    # unnecessary overhead.
+
+                    proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
+                    proc.bind(str(int(all_static_blocks)), _mssql.SQLCHAR, '@AllStaticBlocks')
+
+                    if '@Language' in proc.parameter_list:
+                        proc.bind(resource_code, _mssql.SQLINT4, '@Language', null=(language is None)) #int
+                    if '@BranchCode' in proc.parameter_list:
+                        proc.bind(resource_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None)) #varchar(40)
+
+                    # if '@GetDefaultResource' in proc.parameter_list:
+                    proc.bind(1 if (get_default_resource) else 0, _mssql.SQLCHAR, '@GetDefaultResource')
+
+                    exec_result = await proc.execute()
+
+                    row_count = 0
+
+                    this_static_blocks_dict = {}
+
+                    if exec_result and proc.resultset is not None:
+                        for row in proc.resultset:
+                            row_count += 1
+                            buf = row['ResourceText']
+                            if not buf:
+                                buf = row['ResourceData']
+                                if buf:
+                                    buf = bytes(buf)
+
+                            elif not all_static_blocks and buf and '$thInclude_' in buf:
+                                # Perform replacement of includes.  Template may include string like:
+                                # $thInclude_MyResourceCode
+                                # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
+                                try:
+                                    tmp = string.Template(buf)
+                                    buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
+                                except Exception as e:
+                                    log(None, 'Resource', 'Error in load_resource() when processing $thInclude_xxx', e)
+
+                            this_resource = ThResource()
+
+                            this_resource.resource_code = row['ResourceCode']
+                            this_resource.filename = row['Filename']
+                            if 'Filetype' in row:
+                                this_resource.filetype = row['Filetype']
+                            if 'DateUpdated' in row:
+                                this_resource.date_updated = row['DateUpdated']
+                            this_resource.data = buf
+
+                            if row['APIStoredProc']:
+                                this_resource.api_stored_proc = row['APIStoredProc'].split(' ')[0]
+                                this_resource.api_stored_proc_paramstr = row['APIStoredProc'][len(this_resource.api_stored_proc):]
+                                if this_resource.api_stored_proc_paramstr:
+                                    this_resource.api_stored_proc_paramstr  = this_resource.api_stored_proc_paramstr.strip()
+
+                            this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
+                            this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
+                            this_resource.is_public = row['IsPublic']
+                            this_resource.is_static = row['IsStaticBlock']
+                            this_resource.requires_authentication = row['RequiresAuthentication']
+                            this_resource.render_jinja_template = row['RenderJinjaTemplate']
+                            this_resource.skip_xsrf = row['SkipXSRF']
+
+                            if 'OnBefore' in row:
+                                this_resource.on_before = row['OnBefore']
+
+                            if 'OnAfter' in row:
+                                this_resource.on_after = row['OnAfter']
+
+                            if 'Revision' in row:
+                                this_resource.revision = row['Revision']
+
+                            if 'RedirURL' in row:
+                                this_resource.redir_url = row['RedirURL']
+
+                            if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
+                                # added 2/11/2019:  don't want to cache default resource
+                                self.add_resource(row['ResourceCode'], this_resource)
+
+                            if all_static_blocks:
+                                this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
+                                this_static_blocks_dict['thInclude_' + row['ResourceCode']] = buf
+
+                    if 1 == 0 and resource_code and not resource_code  in ('~', '/', '')  and row_count == 0:
+                        # do negative cache
+                        # Negative caching disabled 5/23/2022 due to causing some problems related to:
+                        #  UseSysWebResource, timing and PurgeCache, etc.
+                        this_resource = ThResource()
+                        this_resource.exists = False
+                        self.add_resource(resource_code, this_resource)
+
+                    if all_static_blocks:
+                        ThCachedResources.static_blocks_dict = this_static_blocks_dict
+
+                        for rs in proc.resultsets[1:]:
+                            for row in rs:
+                                # note:  should only be one row
+                                row_count += 1
+                                buf = row['JSON_CurResourceRevisions']
+
+                                new_dict = dict((v["ResourceCode"], v) for v in json.loads(buf))
+                                ThCachedResources.resource_versions_dict = new_dict
+                    proc = None
+                    del proc
+
+            return this_resource
 
     async def delete_resource(self, resource_code=None, delete_all=False):
         result = False
@@ -322,6 +338,7 @@ class ThCachedResources:
     async def get_resource(self, resource_code, th_session, all_static_blocks=False, from_filename=None,
                            is_public=False, is_static=False, get_default_resource=False,
                            conn=None):
+
         global DEFAULT_RESOURCE_CODE
 
         this_resource = None
@@ -389,3 +406,4 @@ class ThCachedResources:
     async def load_global_resources(self, conn=None):
         await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
         await self.get_resource(None, None, all_static_blocks=True, conn=conn)
+        pass

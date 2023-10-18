@@ -101,9 +101,6 @@ class ThSessions:
                 self.__sessions[this_session_token] = None
             self.__sessions.clear()
 
-    def stop(self):
-        self.background_thread_running = False
-
     def __len__(self):
         return len(self.__sessions)
 
@@ -436,7 +433,7 @@ class ThSession():
             start_waiting = time.time()
             seconds_to_wait = 30 #wakt up to 30 seconds for a lock
 
-            while not lock_succeeded and not give_up:
+            while not lock_succeeded and not give_up and G_server.is_running:
                 await asyncio.sleep(0.5)  #wait .5 seconds between retrries
                 retry_count = retry_count + 1
                 log(this_sess, 'Session', 'Session lock retry', retry_count)
@@ -486,7 +483,7 @@ class ThSession():
             self.conn = None
 
         if force_init or self.conn is None or\
-                (self.conn is not None and self.conn.sql_conn is not None and not self.sql_conn.connected):
+                (self.conn is not None and self.conn.sql_conn is not None and not self.conn.connected):
             self.initialized = False
 
         if (self.conn  is None or\
@@ -498,7 +495,7 @@ class ThSession():
 
                 log(None, 'Session', 'init_session obtained connection name:', self.conn.name, 'id:', self.conn.id)
                 self.conn.name = 'initializing'
-                log(None, 'Session', 'init_session set connection name to:', self.conn.name, 'id:', self.conn_id)
+                log(None, 'Session', 'init_session set connection name to:', self.conn.name, 'id:', self.conn.id)
 
                 self.initialized = False
 
