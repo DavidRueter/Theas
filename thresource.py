@@ -8,13 +8,20 @@ from thbase import log, TheasServerError, theas_server
 import string
 
 G_cached_resources = None
+G_branch_code = None
 
 def config_thresource(
         gresources=None,
+        branch_code=None
     ):
     global G_cached_resources
     if gresources is not None:
         G_cached_resources = gresources
+
+    global G_branch_code
+    if branch_code is not None:
+        G_branch_code = branch_code
+
 
 # -------------------------------------------------
 # Global cached resources
@@ -217,8 +224,10 @@ class ThCachedResources:
 
                     if '@Language' in proc.parameter_list:
                         proc.bind(resource_code, _mssql.SQLINT4, '@Language', null=(language is None)) #int
+
+                    global G_branch_code
                     if '@BranchCode' in proc.parameter_list:
-                        proc.bind(resource_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None)) #varchar(40)
+                        proc.bind(G_branch_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None)) #varchar(40)
 
                     # if '@GetDefaultResource' in proc.parameter_list:
                     proc.bind(1 if (get_default_resource) else 0, _mssql.SQLCHAR, '@GetDefaultResource')
@@ -339,7 +348,7 @@ class ThCachedResources:
                            is_public=False, is_static=False, get_default_resource=False,
                            conn=None):
 
-        global DEFAULT_RESOURCE_CODE
+        #global DEFAULT_RESOURCE_CODE
 
         this_resource = None
 

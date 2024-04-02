@@ -231,13 +231,16 @@ class TheasControlNV:
 class Theas():
     def __init__(self, theas_session=None, jinja_environment=None):
 
+        self.th_session = theas_session
+        self.control_names = {}
+
         # if not isinstance(jinja_environment, Environment):
         if True:
             # set up new jinja environment
             self.jinja_env = Environment()
 
             self.jinja_env.theas_page = self
-            self.jinja_env.current_request = {}
+            self.jinja_env.current_request = None
 
             self.jinja_env.undefined = SilentUndefined
 
@@ -309,8 +312,6 @@ class Theas():
             # reuses existing jinja environment
             self.jinja_env = jinja_environment
 
-        self.th_session = theas_session
-        self.control_names = {}
 
         self.set_value('th:ST', str(self.th_session.session_token), include_in_json=False)
         self.set_value('th:ErrorMessage', '')
@@ -860,14 +861,26 @@ class Theas():
     @pass_environment
     def theas_resource(self, this_env, this_value, quotes=False, *args, **kwargs):
 
+        is_remote = False
+
+        # We unfairly assume that if the request starts with http:// or https:// that it is "remote"
+        # i.e. being made to a remote (non-Theas) server.
+
+        if this_value.startswith('http://') or this_value.startswith('https://'):
+            is_remote = True
+
         relative = True
-        if this_value[0] == '/':
+
+        if is_remote or this_value.startswith('/'):
             relative = False
 
+        # Note that we don't fully support relative path syntax.
+        # For example, ./xxx and ../xxx and ../../x are all treated just as x
         this_value = this_value.lstrip('.')
         this_value = this_value.lstrip('/')
 
         busted_filename = this_value
+
 
         # The idea is that this_value contains a resource code that may have been cached by the browser.
         # If the resource has subsequently been updated on the server, we want the browser to request the
@@ -889,6 +902,24 @@ class Theas():
         # quotes to be added to the result.  (The default is no quotes will be added to the result.
 
 
+        # If this_value is for a resource on this server, it may be either absolute or relative.
+        # In either case, we want to make sure that we output a tab id if needed and possible.
+        # If this_value starts with 'http:// or https:// we will assume it refers to
+        # a remote (non-Theas) server, and should NOT get a tab id prepended.
+
+
+
+        need_tabid = False
+        if not is_remote and self.th_session and self.th_session.use_multi_tabs and self.th_session.tab_id:
+            need_tabid = True
+
+
+        if need_tabid:
+            if busted_filename.startswith('/' + self.th_session.multi_tab_prefix):
+                # Strip out this tabid because we want to use the one from the session instead.
+                # We don't expect that there is a tabid...but still, we want to be careful.
+                busted_filename = '/'.join(req_path.split('/')[2:])
+
         if this_value in this_env.theas_page.th_session.resource_versions:
             this_version = str(this_env.theas_page.th_session.resource_versions[this_value]['Revision'])
 
@@ -897,15 +928,39 @@ class Theas():
 
         this_path = ''
 
-        if relative and this_env.current_request:
-            this_path = this_env.current_request.path
-            if this_path:
-                this_path = '/'.join(this_path.split('/')[:-1]) + '/'
+        if need_tabid:
+            #prepend tab_id if the session uses multi_tabs
+            this_path = '/' + self.th_session.multi_tab_prefix + self.th_session.tab_id + '/'
 
-        if not this_path:
-            this_path = '/'
 
-        busted_filename = this_path + busted_filename
+        if relative and this_env and this_env.current_request:
+            # Note: even if this_path started out as relative, it will now be rewritten as absolute
+
+            # We can use the request path to use the path. But we do need to strip off the resource code.
+
+            # Then again...the whole concept of a relative path in Theas requires some thought:
+            # Really to Theas the "path" is just a resource code.  The resource code may or may not have
+            # embedded  slashes.
+
+            # But HTTP handles slashes and relative paths differently.
+
+            # When a relative path is received we just parce the request path and strip out the last
+            # filename after a slash. (i.e. we treat the path the way HTTP does.
+
+            req_path = this_env.current_request.path
+
+            # trim off the last segment
+            req_path = '/'.join(req_path.split('/')[:-1])
+
+            if req_path and req_path.startswith('/' + self.th_session.multi_tab_prefix):
+                # Strip out this tabid because we want to use the one from the session instead.
+                # Should be the same...but still, we want to be careful.
+                req_path = '/'.join(req_path.split('/')[2:])
+
+            this_path = this_path + req_path + '/'
+
+
+        busted_filename = this_path +  busted_filename
 
         result = json.dumps(busted_filename)
 
@@ -1466,7 +1521,7 @@ class Theas():
 
             buf = this_template.render(data=data)
         except Exception as ex:
-            buf = 'Error when rendering Jinja template #2: ' + ex.message
+            buf = 'Error when rendering Jinja template #2: ' + str(ex)
 
         # Call doOnAfterRender function(s) if provided
         if len(self.doOnAfterRender):

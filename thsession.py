@@ -3,6 +3,7 @@ import datetime
 import uuid
 import time
 import asyncio
+from nanoid import generate
 
 
 from thbase import log, G_server
@@ -10,7 +11,7 @@ from thbase import log, G_server
 from thcore import Theas
 from thsql import call_auth_storedproc, call_logout_storedproc
 
-#module-level constances, set by config_thsession()
+#module-level constants, set by config_thsession()
 _LOGGING_LEVEL = 1
 _REMEMBER_USER_TOKEN = True
 _SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
@@ -19,6 +20,8 @@ _LOGIN_RESOURCE_CODE = 'login'
 _SERVER_PREFIX = 'localhost:8881'
 _LOGIN_AUTO_USER_TOKEN = None
 _REMOVE_EXPIRED_THREAD_SLEEP = 60
+_USE_MUTLI_TABS = False
+_MULTI_TAB_PREFIX = ''
 
 #aliases to the globals lists in TheasServer.py
 G_sessions = None
@@ -36,7 +39,9 @@ def config_thsession(
         server_prefix = _SERVER_PREFIX,
         login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
         logging_level=_LOGGING_LEVEL,
-        remove_expired_thread_sleep=_REMOVE_EXPIRED_THREAD_SLEEP
+        remove_expired_thread_sleep=_REMOVE_EXPIRED_THREAD_SLEEP,
+        use_multi_tabs=_USE_MUTLI_TABS,
+        multi_tab_prefix=_MULTI_TAB_PREFIX
     ):
 
     global G_sessions
@@ -72,6 +77,13 @@ def config_thsession(
     global _REMOVE_EXPIRED_THREAD_SLEEP
     _REMOVE_EXPIRED_THREAD_SLEEP = remove_expired_thread_sleep
 
+    global _USE_MULTI_TABS
+    _USE_MULTI_TABS = use_multi_tabs
+
+    global _MULTI_TAB_PREFIX
+    _MULTI_TAB_PREFIX = multi_tab_prefix
+
+
 
 # -------------------------------------------------
 # Global session list
@@ -97,25 +109,25 @@ class ThSessions:
 
     def __del__(self):
         with self.lock:
-            for this_session_token in self.__sessions:
-                self.__sessions[this_session_token] = None
+            for this_session_key in self.__sessions:
+                self.__sessions[this_session_key] = None
             self.__sessions.clear()
 
     def __len__(self):
         return len(self.__sessions)
 
-    def remove_session(self, session_token):
+    def remove_session(self, session_key):
         this_session = None
         with self.lock:
-            if session_token in self.__sessions:
-                this_session = self.__sessions[session_token]
-                del self.__sessions[session_token]
+            if session_key in self.__sessions:
+                this_session = self.__sessions[session_key]
+                del self.__sessions[session_key]
 
         return this_session
 
     def remove_all_sessions(self):
         with self.lock:
-            for session_token, this_sess in self.__sessions.items():
+            for session_key, this_sess in self.__sessions.items():
                 if this_sess is not None and\
                         this_sess.conn is not None and\
                         this_sess.conn.sql_conn is not None and\
@@ -129,8 +141,8 @@ class ThSessions:
 
             log(None, 'ExpiredSess', 'Checking for expired sessions.' 'Total sessions at start:', len(self.__sessions))
 
-            for session_token in self.__sessions:
-                this_session = self.__sessions[session_token]
+            for session_key in self.__sessions:
+                this_session = self.__sessions[session_key]
                 if (
                     remove_all or
                     this_session is None or
@@ -143,13 +155,13 @@ class ThSessions:
                         this_session.date_sql_timeout < datetime.datetime.now()
                         )
                             ):
-                        expireds[session_token] = this_session
+                        expireds[session_key] = this_session
 
-            for session_token in expireds:
-                this_session = expireds[session_token]
+            for session_key in expireds:
+                this_session = expireds[session_key]
                 this_session.conn = None
-                self.__sessions[session_token] = None
-                del self.__sessions[session_token]
+                self.__sessions[session_key] = None
+                del self.__sessions[session_key]
                 if this_session is not None:
                     del this_session
 
@@ -163,18 +175,29 @@ class ThSessions:
     #    if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
     #        print(datetime.datetime.now(), 'ThSessions [{}]'.format(category), *args)
 
-    def retrieve_session(self, session_token=None, comments=''):
+    def retrieve_session(self, session_token=None, comments='', handler=None, tab_id=None):
         this_sess = None
+        this_sess_key = None
+
+        global _USE_MULTI_TABS
+
+        if session_token:
+            if _USE_MULTI_TABS:
+                this_sess_key = ('' if tab_id is None else tab_id + ':') + session_token
+            else:
+                this_sess_key = session_token
+
         with self.lock:
-            if session_token and session_token in self.__sessions:
+            if this_sess_key and (this_sess_key in self.__sessions):
                 # have existing session
-                this_sess = self.__sessions[session_token]
-                log(this_sess, 'Sessions', 'retrieve_session() retrieving existing session', this_sess.session_token, comments)
+                this_sess = self.__sessions[this_sess_key]
+                log(this_sess, 'Sessions', 'retrieve_session() retrieving existing session', this_sess.session_key, comments)
 
             else:
-                this_sess = ThSession()
-                self.__sessions[this_sess.session_token] = this_sess
-                log(this_sess, 'Sessions', 'retrieve_session() creating new session', this_sess.session_token, comments)
+                # create a new session
+                this_sess = ThSession(handler=handler, tab_id=tab_id)
+                self.__sessions[this_sess.session_key] = this_sess
+                log(this_sess, 'Sessions', 'retrieve_session() creating new session', this_sess.session_key, comments)
 
         return this_sess
 
@@ -201,7 +224,7 @@ class ThSessions:
 # -------------------------------------------------
 # ThSession
 # -------------------------------------------------
-class ThSession():
+class ThSession:
     """Class ThSession manages all aspects of an individual user session.
 
      Each session has a unique session_token, and is stored in a ThSessions object.
@@ -215,17 +238,30 @@ class ThSession():
      he future it might make sense to move this retrieval to a method of ThSessions()
     """
 
-    def __init__(self):
+    def __init__(self, handler=None, tab_id=None):
         self.theas_page = None
         self.conn = None
 
         self.log_current_request = True
-        self.current_handler = None
+        self.current_handler = handler
         self.comments = None
 
         self.session_token = None
 
+        self.tab_id = None
+
+        global _USE_MULTI_TABS
+        global _MULTI_TAB_PREFIX
+        self.use_multi_tabs = _USE_MULTI_TABS
+        self.multi_tab_prefix = _MULTI_TAB_PREFIX
+
         self.session_token = str(uuid.uuid4())
+
+        if tab_id:
+            self.tab_id = tab_id
+        else:
+            self.tab_id = generate(size=8)
+
         self.__error_message = ''
 
         self.logged_in = False
@@ -234,6 +270,7 @@ class ThSession():
 
         self.__locked_by = None
         self.__date_locked = None
+        self.__locked_by_path = None
 
         self.__current_resource = None
 
@@ -262,7 +299,12 @@ class ThSession():
 
         self.component_state = {}
 
-        self.log('Session', 'Created new session', self.session_token)
+        this_resource_code = '(no handler)'
+        if handler:
+            this_resource_code = handler.request.path
+            handler.write_cookies() # experimental
+
+        self.log('Session', 'Created new session', self.session_key, this_resource_code)
         self.date_started = datetime.datetime.now()
 
         self.current_xsrf_form_html = None
@@ -290,6 +332,21 @@ class ThSession():
 
             global G_conns
             G_conns.release_conn_sync(this_conn)
+
+    @property
+    def session_key(self):
+        this_session_key = None
+
+        global _USE_MULTI_TABS
+
+        if _USE_MULTI_TABS:
+            # concatenate tab_id + ':' + session_token
+            this_session_key = (('' if self.tab_id is None else self.tab_id + ':') + self.session_token)
+        else:
+            this_session_key = self.session_token
+
+        return this_session_key
+
     @property
     def current_resource(self):
         return self.__current_resource
@@ -340,9 +397,17 @@ class ThSession():
     async def get_lock(self, handler=None, handler_guid=None):
         result = False
 
+        this_handler = self.current_handler
+        if handler:
+            # override self.current_handler with what was passed in
+            this_handler = handler
+            self.current_handler = handler # experimental
+
         this_handler_guid = None
-        if handler is not None:
-            this_handler_guid = handler.handler_guid
+        this_handler_path = None
+        if this_handler is not None:
+            this_handler_guid = this_handler.handler_guid
+            this_handler_path = this_handler.request.path
 
         if this_handler_guid is None:
             this_handler_guid = handler_guid
@@ -359,7 +424,12 @@ class ThSession():
 
             if self.__locked_by is not None and self.__locked_by != this_handler_guid and not this_give_up:
                 this_give_up = True
-                self.log('Session', 'Waiting for busy session. Wanted by {}'.format(this_handler_guid))
+
+                self.log('Session', f'Waiting for busy session. Wanted by {this_handler_guid} ')
+                self.log('Session', f'Waiting on prior request for {self.__locked_by_path} so far { round((time.time() -self.__date_locked) * 1000, 0)}ms')
+
+
+
             # if self.__date_locked is not None and time.time() - self.__date_locked > 30000:
             #                    self.log('Session', 'Giving up waiting for busy session:  killing stuck session wanted by {}'.format(handler.handler_guid))
             #                    if self.sql_conn is not None and\
@@ -375,7 +445,7 @@ class ThSession():
             # self.sql_conn = None # discard this SQL connection
             # self.logged_in = False # without a SQL connection we will need to re-authenticate
             # this_sess.logout()
-            # G_sessions.remove_session(self.session_token)
+            # G_sessions.remove_session(self.session_key)
             # this_sess = None
 
             # Note:  We expect this code to be run in a separate thread.  If it is run in the main thread, it will
@@ -384,11 +454,22 @@ class ThSession():
 
             if not this_give_up:
                 result = True
-                self.__locked_by = handler_guid
+                self.__locked_by = this_handler_guid
                 self.__date_locked = time.time()
+                self.__locked_by_path = this_handler_path
                 self.request_count += 1
-                log(self, 'Session', 'LOCK obtained by handler ({})'.format(self.__locked_by))
+                log(self, 'Session', f'LOCK obtained by handler ({self.__locked_by}) for {this_handler_path}')
         return result
+
+    def get_login_url(self):
+        redir_url = ''
+
+        if _USE_MULTI_TABS:
+            redir_url = '/' + _MULTI_TAB_PREFIX + self.tab_id + '/' + _LOGIN_RESOURCE_CODE
+        else:
+            redir_url = self.redirect('/' + _LOGIN_RESOURCE_CODE)
+
+        return redir_url
 
 
     #@classmethod
@@ -398,7 +479,7 @@ class ThSession():
 
     @classmethod
     async def get_session(cls, retrieve_from_db=False, inhibit_create=False,
-                    comments=None, session_token=None, handler_guid=None):
+                    comments=None, session_token=None, handler=None, handler_guid=None, tab_id=None):
 
         global G_sessions
         # Retrieve or create a session as needed.
@@ -412,20 +493,20 @@ class ThSession():
         log(None, 'Session', 'get_session() was asked for session_token', session_token)
 
         # try to retrieve the session from the global list, or else create a new one
-        this_sess = G_sessions.retrieve_session(session_token, comments=comments)
+        this_sess = G_sessions.retrieve_session(session_token, comments=comments, handler=handler, tab_id=tab_id)
 
         if this_sess is None:
             cls.cls_log('Sessions', 'Failed to obtain a session with call to retrieve_session()')
         elif session_token != this_sess.session_token:
-            log(this_sess, 'Session', 'Obtained NEW session', this_sess.session_token)
+            log(this_sess, 'Session', 'Obtained NEW session', this_sess.session_key)
         else:
-            log(this_sess, 'Session', 'Obtained EXISTING session', this_sess.session_token)
+            log(this_sess, 'Session', 'Obtained EXISTING session', this_sess.session_key)
 
         if this_sess is not None:
-            log(this_sess, 'Session', 'Attempting lock.', this_sess.session_token)
+            log(this_sess, 'Session', 'Attempting lock.', this_sess.session_key)
 
             give_up = False
-            lock_succeeded = await this_sess.get_lock(handler_guid=handler_guid)
+            lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
 
             give_up = False
             retry_count = 0
@@ -437,17 +518,18 @@ class ThSession():
                 await asyncio.sleep(0.5)  #wait .5 seconds between retrries
                 retry_count = retry_count + 1
                 log(this_sess, 'Session', 'Session lock retry', retry_count)
-                lock_succeeded = await this_sess.get_lock(handler_guid=handler_guid)
+                lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
 
                 if not lock_succeeded:
                     give_up = time.time() - start_waiting > seconds_to_wait
 
+            #todo:  we may want to refactor this to defer obtaining a SQL connection until we need it in init_session
             if lock_succeeded:
                 if this_sess.conn is None:
-                    this_sess.conn = await G_conns.get_conn(conn_name=this_sess.session_token)
+                    this_sess.conn = await G_conns.get_conn(conn_name=this_sess.session_key)
                     log(this_sess, 'Session', 'get_session obtained connection name:', this_sess.conn.name, 'id:', this_sess.conn.id)
             else:
-                log(this_sess, 'Session', 'Could not lock session.', this_sess.session_token)
+                log(this_sess, 'Session', 'Could not lock session.', this_sess.session_key)
                 failed_to_lock = True
                 this_sess = None
 
@@ -467,13 +549,12 @@ class ThSession():
             if self.log_current_request:
                 # print(datetime.datetime.now(), 'ThSession [{}:{}] ({}) - {} ({})'.format(
                 print(datetime.datetime.now(), 'ThSession [{}:{}] - {} ({})'.format(
-                    self.session_token,
+                    self.session_key,
                     self.request_count,
                     # self.__locked_by,
                     category,
                     self.comments if self.comments is not None else '',
                 ), *args)
-
 
     async def init_session(self, force_init=False):
         global G_program_options
@@ -546,7 +627,7 @@ class ThSession():
 
             if self.conn is None:
                 self.log('Session', 'Destroying session')
-                G_sessions.remove_session(self.session_token)
+                G_sessions.remove_session(self.session_key)
             else:
                 self.log('Session', 'Will time out at', self.date_expire)
 
@@ -564,6 +645,10 @@ class ThSession():
             self.release_lock(handler=self.current_handler)
 
     async def finished(self):
+        if self.current_handler:
+            self.current_handler.set_header('X-St', self.session_token) #session token
+            self.current_handler.set_header('X-Tid', self.tab_id) #tab id
+
         if not self.__locked_by:
             pass
         else:
@@ -587,11 +672,8 @@ class ThSession():
             self.log('Session', 'Total requests for this session: ', self.request_count)
             self.log('Session', 'Finished with this request')
 
-            if self.conn is None:
-                self.log('Session', 'Destroying session')
-                G_sessions.remove_session(self.session_token)
-            else:
-                self.log('Session', 'Will time out at', self.date_expire)
+
+            self.log('Session', 'Will time out at', self.date_expire)
 
             self.log_current_request = True
             self.current_handler.cookies_changed = False
@@ -604,6 +686,7 @@ class ThSession():
                 await G_conns.release_conn(this_conn)
 
             self.release_lock(handler=self.current_handler)
+
     async def authenticate(self, username=None, password=None, user_token=None, retrieve_existing=False, conn=None):
         """
         :param username: Username of user.  If provided, provide password as well
@@ -615,6 +698,11 @@ class ThSession():
 
         self.logged_in = False
         result = False
+
+        temp_remember = None
+
+        if self.theas_page:
+            temp_remember = self.theas_page.get_value('theas:th:RememberUser', auto_create=False)
 
         if self.current_handler is not None:
             if username is None and password is None and user_token is None and not retrieve_existing:
@@ -630,19 +718,11 @@ class ThSession():
                 elif 'theas:Login:Password' in self.current_handler.request.arguments:
                     password = self.current_handler.get_argument('theas:Login:Password')
 
-                # theas:th:RememberUser is a checkbox (which will not be submitted if unchecked)--so default to '0'
-                temp_remember = '0'
+            # see if form tells us whether to remember the user
+            # theas:th:RememberUser is a checkbox (which will not be submitted if unchecked)--so default to '0'
+            if 'theas:th:RememberUser' in self.current_handler.request.arguments:
+                temp_remember = self.current_handler.get_argument('theas:th:RememberUser')
 
-                # see if form tells us whether to remember the user
-                temp_remember_arg = self.current_handler.get_arguments('theas:th:RememberUser')
-                if len(temp_remember_arg):
-                    temp_remember = temp_remember_arg[0]
-                self.theas_page.set_value('theas:th:RememberUser', temp_remember)
-
-        if self.theas_page:
-            temp_remember = self.theas_page.get_value('theas:th:RememberUser', auto_create=False)
-            if temp_remember is not None:
-                self.remember_user_token = temp_remember == '1'
 
         self.log('Session', 'Attempting authentication')
 
@@ -684,9 +764,11 @@ class ThSession():
                         # Store some user information (so the information can be accessed in templates)
                         self.username = username
                         self.user_token = user_token
+                        self.remember_user_token = bool(temp_remember)
 
                         self.theas_page.set_value('th:UserName', self.username)
                         self.theas_page.set_value('th:ST', self.session_token)
+                        self.theas_page.set_value('theas:th:RememberUser', self.remember_user_token)
 
 
                         if self.current_data:
@@ -700,23 +782,25 @@ class ThSession():
             proc = None
             del proc
 
+
         except Exception as e:
             self.logged_in = False
             self.user_token = None
             self.log('Session', 'Authentication failed:', e)
             self.error_message = repr(e) + '|' + 'Invalid username or password.|1|Could Not Log In'
 
-        if self.current_handler:
-            # If authentication was successful, we want to make sure the UserToken
-            # cookie is set properly.  (If authentication was not successful,
-            # we make no changes to the UserToken cookie.)
-            self.current_handler.cookie_usertoken = None
+            if self.current_handler:
+                # If authentication was successful, we want to make sure the UserToken
+                # cookie is set properly.  (If authentication was not successful,
+                # we make no changes to the UserToken cookie.)
+                self.current_handler.cookie_usertoken = None
 
-            if self.logged_in and self.remember_user_token:
-                self.current_handler.cookie_usertoken = self.user_token
+
+        if self.logged_in and self.remember_user_token:
+            self.current_handler.cookie_usertoken = self.user_token
 
             # always write the cookie...even if authentication failed (in which case we need to clear it)
-            self.current_handler.write_cookies()
+        self.current_handler.write_cookies()
 
         return self.logged_in, self.error_message
 
@@ -730,7 +814,6 @@ class ThSession():
         if self.conn is not None and self.conn.sql_conn is not None and self.conn.sql_conn.connected:
             self.log('SQL', 'Closing SQL connection in ThSession.logout')
             await call_logout_storedproc(th_session=self, conn=self.conn)
-
 
     def clientside_redir(self, url=None, action='get'):
         # returns tiny html document to send to browser to cause the browser to post back to us
@@ -787,7 +870,7 @@ class ThSession():
 
             buf = buf.format(action=url, session_token=self.session_token,
                              xsrf=self.current_handler.xsrf_form_html(),
-                             session_cookie_name=SESSION_COOKIE_NAME)
+                             session_cookie_name=self.current_handler.session_cookie_name)
 
         return buf
 
@@ -845,28 +928,29 @@ class ThSession():
 
         return this_data
 
-    async def build_login_screen(self):
-        global G_cached_resources
-
-        self.log('Response', 'Building login screen')
-
-        buf = '<html><body>No data in build_login_screen</body></html>'
-
-        resource = None
-        template_str = ''
-
-        self.log('Resource', 'Fetching login page resource')
-        resource = await G_cached_resources.get_resource(_LOGIN_RESOURCE_CODE, self)
-
-        if resource is None:
-            # raise Exception ('Could not load login screen template from the database.  Empty template returned from call to theas.spgetSysWebResources.')
-            buf = '<html><head><meta http-equiv="refresh" content="30"></meta><body>Could not load login screen template from the database server.  Empty template returned from call to theas.spgetSysWebResources.<br /><br />Will try again shortly... </body></html>'
-
-        else:
-            template_str = resource.data
-            this_data = self.init_template_data()
-
-            buf = self.theas_page.render(template_str, data=this_data)
-
-        return buf
+    # async def build_login_screen(self):
+    #     global G_cached_resources
+    #
+    #     self.log('Response', 'Building login screen')
+    #
+    #     buf = '<html><body>No data in build_login_screen</body></html>'
+    #
+    #     resource = None
+    #     template_str = ''
+    #
+    #     self.log('Resource', 'Fetching login page resource')
+    #     resource = await G_cached_resources.get_resource(_LOGIN_RESOURCE_CODE, self)
+    #
+    #     if resource is None:
+    #         # raise Exception ('Could not load login screen template from the database.  Empty template returned from call to theas.spgetSysWebResources.')
+    #         buf = '<html><head><meta http-equiv="refresh" content="30"></meta><body>Could not load login screen template from the database server.  Empty template returned from call to theas.spgetSysWebResources.<br /><br />Will try again shortly... </body></html>'
+    #
+    #     else:
+    #         template_str = resource.data
+    #         this_data = self.init_template_data()
+    #
+    #         buf = self.theas_page.render(template_str, data=this_data, request=self.current_handler.request)
+    #
+    #
+    #     return buf
 

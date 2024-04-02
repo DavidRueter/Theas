@@ -4,7 +4,7 @@ del \Projects\Theas\dist\*.exe
 cd \Projects\Theas
 python makeversion.py
 
-REM See https://pythonhosted.org/PyInstaller/usage.html for more options
+REM See https://pythonhosted.org/PyInstaller for more options
 pyinstaller TheasServerSvc.py --onefile --icon Theas.ico --version-file versioninfo.cfg
 
 copy Theas.js .\dist\
