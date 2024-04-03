@@ -3442,34 +3442,40 @@ def all_done():
     write_winlog(msg)
 
 def make_app():
+    my_handlers = [
+        (r'/stop', ThHandler_Stop),
+        (r'/attach', ThHandler_Attach),
+        (r'/attach/(.*)', ThHandler_Attach),
+        (r'/logout', ThHandler_Logout),
+        (r'/login', ThHandler_Login),
+        (r'/back', ThHandler_Back),
+        (r'/stat', ThHandler_Stat),
+        (r'/purgecache', ThHandler_PurgeCache),
+        # (r'/test', TestThreadedHandler),
+        (r'/ws', ThWSHandler_Test),
+        (r'/rest', ThHandler_REST),
+        (r'/rest/(.*)', ThHandler_REST),
+
+        (r'/async', ThHandler_Async),
+        (r'/async/(.*)', ThHandler_Async)
+        # note that /r/* has special meaning, though it is handled by ThHandler.  When /r/resourcecode/param1/param2
+        # is specified, this indicates that the resource code is "resourcecode".  "param1/param2" will be passed
+        # in to @PathParams in the stored procedure.
+    ]
+
+    if USE_MULTI_TABS:
+        my_handlers += [
+            (r'/({}.*)/async'.format(MULTI_TAB_PREFIX), ThHandler_Async),
+            (r'/({}.*)/async/(.*)'.format(MULTI_TAB_PREFIX), ThHandler_Async)
+        ]
+
+    # catch-all must be at the end of th elist
+    my_handlers += [
+        (r'/(.*)', ThHandler)
+    ]
 
     return tornado.web.Application(
-        [
-            (r'/stop', ThHandler_Stop),
-            (r'/attach', ThHandler_Attach),
-            (r'/attach/(.*)', ThHandler_Attach),
-            (r'/logout', ThHandler_Logout),
-            (r'/login', ThHandler_Login),
-            (r'/back', ThHandler_Back),
-            (r'/stat', ThHandler_Stat),
-            (r'/purgecache', ThHandler_PurgeCache),
-            # (r'/test', TestThreadedHandler),
-            (r'/ws', ThWSHandler_Test),
-            (r'/rest', ThHandler_REST),
-            (r'/rest/(.*)', ThHandler_REST),
-
-            (r'/async', ThHandler_Async),
-            (r'/({}.*)/async'.format(MULTI_TAB_PREFIX), ThHandler_Async),
-
-            (r'/async/(.*)', ThHandler_Async),
-            (r'/({}.*)/async/(.*)'.format(MULTI_TAB_PREFIX), ThHandler_Async),
-
-            (r'/(.*)', ThHandler)
-            # note that /r/* has special meaning, though it is handled by ThHandler.  When /r/resourcecode/param1/param2
-            # is specified, this indicates that the resource code is "resourcecode".  "param1/param2" will be passed
-            # in to @PathParams in the stored procedure.
-        ],
-
+        my_handlers,
         debug=False,
         autoreload=False,
         xsrf_cookies=True,
