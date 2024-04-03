@@ -1,5 +1,4 @@
 #usr/bin/python
-#usr/bin/python
 import asyncio
 import platform
 import contextlib
@@ -24,8 +23,8 @@ from thsession import *
 from thsql import *
 from thresource import *
 
-import TheasCustom
 
+import TheasCustom
 
 __author__ = 'DavidRueter'
 """
@@ -250,6 +249,7 @@ class ThResponseInfo:
         self.content_type = None
         self.content_filename = None
         self.etag = None
+
 
 # -------------------------------------------------
 # ThHandler main request handler
@@ -1930,6 +1930,7 @@ class ThHandler(tornado.web.RequestHandler):
             if not handled and not self._finished:
                 await self.finish()
 
+
 # -------------------------------------------------
 # ThHandler_Attach attachment handler
 # -------------------------------------------------
@@ -2284,7 +2285,7 @@ class ThHandler_Async(ThHandler):
             this_document = None
             path_params = None
 
-            first_path_elem = self.request.path.split('/')[1]
+            first_path_elem = self.request_path.split('/')[0]
 
             if first_path_elem == 'async':
                 # this_document = self.request.path.split('/')[2]
@@ -2293,9 +2294,9 @@ class ThHandler_Async(ThHandler):
                 # The rest of the path (after async) is taken to be the resource code.
                 # The resource code may contain /'s
                 # Therefore it is not possible to pass in path params on a request to async
-                this_document = "/".join(self.request.path.split('/')[2:])
+                this_document = "/".join(self.request_path.split('/')[1:])
             else:
-                this_document = self.request.path
+                this_document = self.request_path
 
             cmd = None
             if self.get_arguments('cmd'):
@@ -3456,8 +3457,13 @@ def make_app():
             (r'/ws', ThWSHandler_Test),
             (r'/rest', ThHandler_REST),
             (r'/rest/(.*)', ThHandler_REST),
+
             (r'/async', ThHandler_Async),
+            (r'/({}.*)/async'.format(MULTI_TAB_PREFIX), ThHandler_Async),
+
             (r'/async/(.*)', ThHandler_Async),
+            (r'/({}.*)/async/(.*)'.format(MULTI_TAB_PREFIX), ThHandler_Async),
+
             (r'/(.*)', ThHandler)
             # note that /r/* has special meaning, though it is handled by ThHandler.  When /r/resourcecode/param1/param2
             # is specified, this indicates that the resource code is "resourcecode".  "param1/param2" will be passed
