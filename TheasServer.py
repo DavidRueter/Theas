@@ -434,24 +434,35 @@ class ThHandler(tornado.web.RequestHandler):
         #             'Cleared cookie {} because USE_SESSION_COOKIE is not true'.format(self.session_cookie_name))
 
     def write_cookies(self):
-        if self.cookie_st is None or len(self.cookie_st) == 0:
-            self.clear_cookie(self.session_cookie_name, path='/')
-        else:
-            if USE_SECURE_COOKIES:
-                self.set_secure_cookie(self.session_cookie_name, self.cookie_st, path='/')
+        if self.session:
+            if self.cookie_st is None or len(self.cookie_st) == 0:
+                self.clear_cookie(self.session_cookie_name, path='/')
             else:
-                self.set_cookie(self.session_cookie_name, self.cookie_st, path='/')
+                if USE_SECURE_COOKIES:
+                    self.set_secure_cookie(self.session_cookie_name, self.cookie_st, path='/')
+                else:
+                    self.set_cookie(self.session_cookie_name, self.cookie_st, path='/')
 
-        if (self.cookie_usertoken is None or
-                len(self.cookie_usertoken) == 0 or
-                self.session is None or
-                not self.session.remember_user_token):
-            self.clear_cookie(USER_COOKIE_NAME, path='/')
-        else:
-            if USE_SECURE_COOKIES:
-                self.set_secure_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
-            else:
-                self.set_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
+            if not USE_MULTI_TABS:
+                if (self.cookie_usertoken is None or
+                        len(self.cookie_usertoken) == 0 or
+                        self.session is None or
+                        not REMEMBER_USER_TOKEN or
+                        not self.session.remember_user_token):
+                    self.clear_cookie(USER_COOKIE_NAME, path='/')
+                else:
+                    if not REMEMBER_USER_TOKEN:
+                        self.clear_cookie(USER_COOKIE_NAME, path='/')
+
+            if (REMEMBER_USER_TOKEN and
+                    self.session.remember_user_token and
+                    self.session.logged_in and
+                    not self.session.autologged_in):
+
+                if USE_SECURE_COOKIES:
+                    self.set_secure_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
+                else:
+                    self.set_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
 
     def check_xsrf_cookie(self):
         """
@@ -3469,7 +3480,7 @@ def make_app():
             (r'/({}.*)/async/(.*)'.format(MULTI_TAB_PREFIX), ThHandler_Async)
         ]
 
-    # catch-all must be at the end of th elist
+    # catch-all must be at the end of the list
     my_handlers += [
         (r'/(.*)', ThHandler)
     ]

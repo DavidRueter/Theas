@@ -302,7 +302,7 @@ class ThSession:
         this_resource_code = '(no handler)'
         if handler:
             this_resource_code = handler.request.path
-            handler.write_cookies() # experimental
+            #handler.write_cookies() # experimental
 
         self.log('Session', 'Created new session', self.session_key, this_resource_code)
         self.date_started = datetime.datetime.now()
