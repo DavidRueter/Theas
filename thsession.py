@@ -499,13 +499,16 @@ class ThSession:
             seconds_to_wait = 30 #wakt up to 30 seconds for a lock
 
             while not lock_succeeded and not give_up and G_server.is_running:
-                await asyncio.sleep(0.2)  #wait .5 seconds between retrries
-                retry_count = retry_count + 1
-                log(this_sess, 'Session', 'Session lock retry', retry_count)
+
                 lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
 
                 if not lock_succeeded:
                     give_up = time.time() - start_waiting > seconds_to_wait
+
+                    retry_count = retry_count + 1
+                    log(this_sess, 'Session', 'Session lock retry', retry_count)
+
+                    await asyncio.sleep(0.1)  # wait .5 seconds between retrries
 
             #todo:  we may want to refactor this to defer obtaining a SQL connection until we need it in init_session
             if lock_succeeded:
