@@ -1,4 +1,4 @@
-CALL \Projects\Theas\venv_py310_theas\scripts\activate.bat
+CALL \Projects\Theas\venv_py311_theas\scripts\activate.bat
 del \Projects\Theas\dist\*.exe
 
 cd \Projects\Theas

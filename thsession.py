@@ -6,7 +6,7 @@ import asyncio
 from nanoid import generate
 
 
-from thbase import log, G_server
+from thbase import log, theas_server
 
 from thcore import Theas
 from thsql import call_auth_storedproc, call_logout_storedproc
@@ -204,7 +204,7 @@ class ThSessions:
     def _poll_remove_expired(self):
         last_poll = datetime.datetime.now()
 
-        while self.background_thread_running and G_server.is_running:
+        while self.background_thread_running and theas_server().is_running:
             # self.log('PollRemoveExpired', 'Running background_thread_running')
             if (datetime.datetime.now() - last_poll).total_seconds() > _REMOVE_EXPIRED_THREAD_SLEEP:
                 last_poll = datetime.datetime.now()
@@ -498,7 +498,7 @@ class ThSession:
             start_waiting = time.time()
             seconds_to_wait = 30 #wakt up to 30 seconds for a lock
 
-            while not lock_succeeded and not give_up and G_server.is_running:
+            while not lock_succeeded and not give_up and theas_server().is_running:
 
                 lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
 
@@ -508,7 +508,10 @@ class ThSession:
                     retry_count = retry_count + 1
                     log(this_sess, 'Session', 'Session lock retry', retry_count)
 
-                    await asyncio.sleep(0.1)  # wait .5 seconds between retrries
+                    try:
+                        await asyncio.sleep(0.1)  # wait .5 seconds between retrries
+                    except asyncio.exceptions.CancelledError as e:
+                        log(this_sess, 'Session', 'get_session() asyncio.sleep() cancelled...probably shutting down ', e)
 
             #todo:  we may want to refactor this to defer obtaining a SQL connection until we need it in init_session
             if lock_succeeded:

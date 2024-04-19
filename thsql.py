@@ -485,7 +485,13 @@ class ThStoredProc:
         if result and self.full_ok_checks:
             try:
                 sql_str = 'SELECT 1 AS IsOK'
-                await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str)
+                # executor #1: check connection health
+                if theas_server().is_running or theas_server().is_starting:
+                    await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str)
+                pass
+            except asyncio.exceptions.CancelledError as e:
+                log(self.th_session, 'Sessions', '***Canceled executor #1...probably shutting down ', e)
+                result = False
             except Exception as e:
                 log(self.th_session, 'StoredProc', 'Connection in is_ok is NOT OK:', e)
                 result = False
@@ -507,7 +513,12 @@ class ThStoredProc:
         if self.stored_proc_name is not None and self.conn is not None and self.conn.connected:
             try:
                 sql_str = 'EXEC theas.sputilGetParamNames @ObjectName = \'{}\''.format(self.stored_proc_name)
-                await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_query, sql_str)
+
+                # executor #2: refresh parameter list
+                if theas_server().is_running or theas_server().is_starting:
+                    await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_query, sql_str)
+
+                pass
 
                 resultset = [row for row in self.conn.sql_conn]
                 for row in resultset:
@@ -519,12 +530,16 @@ class ThStoredProc:
                     self.parameter_list[row['ParameterName']] = this_param_info
                     # self.parameter_list.append(row['ParameterName'])
 
+            except asyncio.exceptions.CancelledError as e:
+                log(self.th_session, 'Sessions', '***Canceled executor #2...probably shutting down ', e)
             except Exception as e:
                 if self.have_session:
                     log(self.th_session, 'Sessions', '***Error accessing SQL connection', e)
                     self.th_session.conn = None
                     self.parameter_list = None
                 raise
+
+
     def do_exec(self, sql_str):
         result = False
         self.conn.last_error = None
@@ -617,12 +632,20 @@ class ThStoredProc:
             #   this_sql + '@Param1=%s, @Param2=%s', list(self.parameters.values()))
 
             sql_str = this_sql + ' ' + this_params_str
-            result = await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.do_exec, sql_str)
+
+            # executor #3: exec stored procedure
+            if theas_server().is_running or theas_server().is_starting:
+                result = await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.do_exec, sql_str)
+
+            pass
 
             if result:
                 if self.have_session:
                     self.th_session.do_on_sql_done(self)
                     result = True
+
+        except asyncio.exceptions.CancelledError as e:
+            log(self.th_session, 'Sessions', '***Canceled executor #3...probably shutting down ', e)
 
         except Exception as e:
             if _LOGGING_LEVEL:

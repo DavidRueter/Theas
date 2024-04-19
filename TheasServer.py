@@ -91,7 +91,7 @@ G_break_handler = None
 
 G_conns = None
 
-G_periodic_wait = 15 # number of seconds to wait between execution of periodic function
+G_periodic_wait = 5 # number of seconds to wait between execution of periodic function
 G_periodic_proc = None  # optional function to call periodically on the async loop
 
 
@@ -206,7 +206,7 @@ class BreakHandler:
 
         print('Ctrl-C Pressed (caught by BreakHandler {})'.format(signame))
 
-        thbase.G_server.stop(reason='BreakHandler')
+        thbase.theas_server().stop(reason='BreakHandler')
 
         # If we've exceeded the "emphatic" count disable this handler.
         if self._count >= self._emphatic:
@@ -1539,7 +1539,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         redirect_to = None
 
-        if not thbase.G_server.is_running:
+        if not thbase.theas_server().is_running:
             self.send_error(status_code=503)
         else:
 
@@ -1673,7 +1673,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         global G_cached_resources
 
-        if not thbase.G_server.is_running:
+        if not thbase.theas_server().is_running:
             # serviedr is shutting down
             self.send_error(status_code=503)
         else:
@@ -1924,7 +1924,10 @@ class ThHandler(tornado.web.RequestHandler):
                                  ))
 
             if not handled and not self._finished:
-                await self.finish()
+                try:
+                    await self.finish()
+                except:
+                    pass
 
 
 # -------------------------------------------------
@@ -2257,7 +2260,7 @@ class ThHandler_Async(ThHandler):
         log(None, 'Async', '*******************************')
 
 
-        if not thbase.G_server.is_running:
+        if not thbase.theas_server().is_running:
             self.send_error(status_code=503)
         else:
 
@@ -2846,7 +2849,7 @@ class ThHandler_Stop(tornado.web.RequestHandler):
 
         self.finish()
 
-        thbase.G_server.stop()
+        thbase.theas_server().stop()
 
     def data_received(self, chunk):
         pass
@@ -3476,10 +3479,12 @@ async def each_period():
     # Note: to stop the service, we can do: thbase.G_service_send_stop()
 
     global G_sessions
-    await G_sessions.remove_expired()
+    if G_sessions is not None:
+        await G_sessions.remove_expired()
 
     global G_conns
-    await G_conns.process_release_conns()
+    if G_conns is not None:
+        await G_conns.process_release_conns()
 
     # we can do other things here if we want
     global G_periodic_proc
@@ -3490,7 +3495,7 @@ async def periodic():
     # run every 5 seconds (or G_periodic_wait seconds)
     global G_periodic_wait
 
-    while thbase.G_server.is_running:
+    while thbase.theas_server().is_running:
         asyncio.create_task(each_period())
         await asyncio.sleep(G_periodic_wait)
 
@@ -3500,12 +3505,13 @@ async def main(run_as_svc=False):
 
     app = make_app()
 
+    global SERVER_PORT
+
     try:
-        global SERVER_PORT
         http_server = app.listen(SERVER_PORT)
         shutdown_event = asyncio.Event()
 
-        thbase.G_server.start(shutdown_event=shutdown_event, http_server=http_server, reason='TheasServer.main')
+        thbase.theas_server().start(shutdown_event=shutdown_event, http_server=http_server, reason='TheasServer.main')
 
     except Exception as e:
         msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port? {}'.format(
@@ -3517,8 +3523,8 @@ async def main(run_as_svc=False):
     if shutdown_event is not None:
         await shutdown_event.wait()
 
-    if thbase.G_server is not None:
-        thbase.G_server.stop(reason='TheasServer.main() exiting')
+    if thbase.theas_server() is not None:
+        thbase.theas_server().stop(reason='TheasServer.main() exiting')
 
 async def parallel(run_as_svc=False):
     with contextlib.suppress(asyncio.CancelledError):

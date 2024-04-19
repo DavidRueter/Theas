@@ -153,8 +153,10 @@ def set_all_done(all_done):
 class TheasServerIsRunning():
     def __init__(self, shutdown_event=None):
         self.__is_running = False
+        self.__is_starting = True
         self.shutdown_event = shutdown_event
         self.http_server = None
+        self.ioloop = None
 
     def __del__(self):
         self.__is_running= False
@@ -163,9 +165,17 @@ class TheasServerIsRunning():
     def is_running(self):
         return self.__is_running
 
+    @property
+    def is_starting(self):
+        return self.__is_starting
+
     @is_running.setter
     def is_running(self, running):
         try:
+            # regardless of whether running is True or False we want to set is_starting to False
+            if self.__is_starting:
+                self.__is_starting = False
+
             if running:
                 if not self.__is_running:
                     self.__is_running = running
@@ -199,15 +209,16 @@ class TheasServerIsRunning():
             self.shutdown_event.set()
 
 
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except:
-            loop = None
+        loop = self.ioloop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except:
+                loop = None
 
         if loop and loop.is_running():
             asyncio.create_task(shutdown())
-
+            log(None, 'Shutdown', '***create_task(shutdown()')
 
         if service is not None:
             global G_service
@@ -229,12 +240,15 @@ class TheasServerIsRunning():
 
             log(None, 'Shutdown', '***stop() done')
 
-    def start(self, shutdown_event=None, http_server=None, reason=''):
+    def start(self, shutdown_event=None, http_server=None, ioloop=None, reason=''):
         if shutdown_event is not None:
             self.shutdown_event = shutdown_event
 
         if http_server is not None:
             self.http_server = http_server
+
+        if ioloop is not None:
+            self.ioloop = ioloop
 
         log(None, 'TheasServerIsRunning', 'Start() called', reason)
 
@@ -243,10 +257,13 @@ class TheasServerIsRunning():
 
 
 
-G_server = TheasServerIsRunning()
+G_server = None
 
 def theas_server():
     global G_server
+    if G_server is None:
+        G_server = TheasServerIsRunning()
+
     return G_server
 
 
@@ -311,8 +328,34 @@ async def shutdown():
         pass
 
     if loop is not None and loop.is_running():
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        #tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+        tasks = [
+            t
+            for t
+            in asyncio.all_tasks()
+            if (
+                t is not asyncio.current_task()
+                and t._coro.__name__ != 'main'
+            )
+        ]
+
         [task.cancel() for task in tasks]
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+
+            # note:  the rest of this code may be unreachable, for when all the tasks are cancelled
+            # the running asyncio.run(parallel(run_as_svc=run_as_svc)) in TheasServer.run(run_as_svc=False)
+            # will be complete and execution will continue there.
+        except Exception as e:
+            print('Fatal error; cancelling')
+            print(repr(e))
+            for t in tasks:
+                t.cancel()
+
+        log(None, 'Shutdown', '***shutdown() is done with await asyncio.gather(*tasks)')
 
         loop.call_soon_threadsafe(loop.stop)
+        log(None, 'Shutdown', '***shutdown() called loop.call_soon_threadsafe(loop.stop)')
+
+

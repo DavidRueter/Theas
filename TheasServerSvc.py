@@ -362,7 +362,7 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         win32event.SetEvent(self.hWaitStop)
 
         # Tell the TheasServer event loop to stop
-        thbase.G_server.stop(service=self, reason='Service SvcStop()')
+        thbase.theas_server().stop(service=self, reason='Service SvcStop()')
 
 def service_poll():
     global G_current_service
