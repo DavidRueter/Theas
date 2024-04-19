@@ -299,12 +299,6 @@ class ThSession:
 
         self.component_state = {}
 
-        this_resource_code = '(no handler)'
-        if handler:
-            this_resource_code = handler.request.path
-            #handler.write_cookies() # experimental
-
-        self.log('Session', 'Created new session', self.session_key, this_resource_code)
         self.date_started = datetime.datetime.now()
 
         self.current_xsrf_form_html = None
@@ -320,6 +314,18 @@ class ThSession:
         self.remember_user_token = _REMEMBER_USER_TOKEN
 
         self.theas_page = Theas(theas_session=self)
+
+        self.wait_list = []
+
+        this_resource_code = '(no handler)'
+        if handler:
+            this_resource_code = handler.request.path
+            handler.session = self
+
+        self.log('Session', 'Created new session', self.session_key, this_resource_code)
+
+        if handler:
+            handler.write_cookies() # experimental
 
     def __del__(self):
         if self.theas_page is not None:
@@ -417,48 +423,27 @@ class ThSession:
         if self.__locked_by == this_handler_guid:
             # Requestor already has a lock.  Nothing to do.
             result = True
-        else:
-            this_give_up = False
-            # while self.__locked_by is not None and self.__locked_by != handler.handler_guid and not this_give_up:
-            # note:  can't really wait for a lock here.  Return quickly, and let the caller retry.
-
-            if self.__locked_by is not None and self.__locked_by != this_handler_guid and not this_give_up:
-                this_give_up = True
-
-                self.log('Session', f'Waiting for busy session. Wanted by {this_handler_guid} ')
-                self.log('Session', f'Waiting on prior request for {self.__locked_by_path} so far { round((time.time() -self.__date_locked) * 1000, 0)}ms')
-
-
-
-            # if self.__date_locked is not None and time.time() - self.__date_locked > 30000:
-            #                    self.log('Session', 'Giving up waiting for busy session:  killing stuck session wanted by {}'.format(handler.handler_guid))
-            #                    if self.sql_conn is not None and\
-            #                            self.date_sql_timeout is not None and\
-            #                            datetime.datetime.now() > self.date_sql_timeout:
-            # Still waiting for a response from sql in a different thread.  Yuck.
-            #                        self.log('Session', 'SQL connection is stuck waiting for a response in a different thread!!!')
-            #
-            #                    # We can't forcibly access this session--not thread-safe to do so.  Must abandon.
-            #                    this_give_up = True
-            # self.__date_busy_start = None
-            # self.sql_conn.cancel()  # is likely to crash us / is not thread-safe
-            # self.sql_conn = None # discard this SQL connection
-            # self.logged_in = False # without a SQL connection we will need to re-authenticate
-            # this_sess.logout()
-            # G_sessions.remove_session(self.session_key)
-            # this_sess = None
-
-            # Note:  We expect this code to be run in a separate thread.  If it is run in the main thread, it will
-            # never be able to access the busy session (because the main thread will just be running this loop and
-            # will never be allowed to release the other lock on the session.
-
-            if not this_give_up:
+        elif not self.__locked_by:
+            if not self.wait_list or len(self.wait_list) == 0 or self.wait_list[0]==this_handler_guid:
+                # We are able to lock the session
                 result = True
                 self.__locked_by = this_handler_guid
                 self.__date_locked = time.time()
                 self.__locked_by_path = this_handler_path
                 self.request_count += 1
+                if self.wait_list and len(self.wait_list) > 0 and self.wait_list[0]==this_handler_guid:
+                    self.wait_list.pop(0)
                 log(self, 'Session', f'LOCK obtained by handler ({self.__locked_by}) for {this_handler_path}')
+        else:
+            # Session is locked by someone else
+            result = False
+
+            # note:  can't really wait for a lock here.  Return quickly, and let the caller retry.
+
+
+            self.log('Session', f'Waiting for busy session. Wanted by {this_handler_guid} ')
+            self.log('Session', f'Waiting on prior request for {self.__locked_by_path} so far { round((time.time() -self.__date_locked) * 1000, 0)}ms')
+
         return result
 
     def get_login_url(self):
@@ -505,8 +490,7 @@ class ThSession:
         if this_sess is not None:
             log(this_sess, 'Session', 'Attempting lock.', this_sess.session_key)
 
-            give_up = False
-            lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
+            this_sess.wait_list.append(handler.handler_guid)
 
             give_up = False
             retry_count = 0
@@ -515,7 +499,7 @@ class ThSession:
             seconds_to_wait = 30 #wakt up to 30 seconds for a lock
 
             while not lock_succeeded and not give_up and G_server.is_running:
-                await asyncio.sleep(0.5)  #wait .5 seconds between retrries
+                await asyncio.sleep(0.2)  #wait .5 seconds between retrries
                 retry_count = retry_count + 1
                 log(this_sess, 'Session', 'Session lock retry', retry_count)
                 lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
@@ -927,6 +911,9 @@ class ThSession:
         self.current_data = this_data
 
         return this_data
+
+    def locked_by(self, handler):
+        return self.__locked_by == handler
 
     # async def build_login_screen(self):
     #     global G_cached_resources

@@ -1432,7 +1432,7 @@ class ThHandler(tornado.web.RequestHandler):
 
         return buf, redirect_to, history_go_back, handled
 
-    async def wait_for_session(self, seconds_to_wait=30, write_to_cookie=True):
+    async def obtain_session(self, seconds_to_wait=30, write_to_cookie=True):
         this_sess = None
 
         orig_cookie_session_token = self.cookie_st
@@ -1442,21 +1442,12 @@ class ThHandler(tornado.web.RequestHandler):
         this_session_token = orig_cookie_session_token
         this_tab_id = orig_tab_id
 
-        log(None, 'Session', f'wait_for_session() [{self.request.path}] found this session token in a cookie: ', this_session_token)
+        log(None, 'Session', f'obtain_session() [{self.request.path}] found this session token in a cookie: ', this_session_token)
 
-        give_up = False
-        failed_to_lock = False
-        start_waiting = time.time()
-        while this_sess is None and not give_up and thbase.G_server.is_running:
-            this_sess, failed_to_lock = await ThSession.get_session(session_token=this_session_token,
-                                                              tab_id= this_tab_id,
-                                                              handler=self,
-                                                              handler_guid=self.handler_guid,
-                                                              comments='ThHandler.wait_for_session')
-            if this_sess is None:
-                await asyncio.sleep(0.5)
-                give_up = time.time() - start_waiting > seconds_to_wait
-
+        this_sess, failed_to_lock = await ThSession.get_session(session_token=this_session_token,
+                                                          tab_id= this_tab_id,
+                                                          handler=self,
+                                                          comments='ThHandler.obtain_session')
 
         if this_sess:
             this_sess.current_handler = self
@@ -1468,7 +1459,7 @@ class ThHandler(tornado.web.RequestHandler):
                     self.cookie_st = this_sess.session_token
                     self.tab_id = this_sess.tab_id
                     log(None, 'Cookies',
-                                      'Updating cookie {} wait_for_session() gave different token ({} vs {})'.format(
+                                      'Updating cookie {} obtain_session() gave different token ({} vs {})'.format(
                                           self.session_cookie_name, orig_cookie_session_token, this_sess.session_token))
 
             # silently re-authenticate if needed and there is a user cookie
@@ -1481,16 +1472,11 @@ class ThHandler(tornado.web.RequestHandler):
                         log(None, 'Sessions', 'FAILED to reauthenticate user from usertoken cookie')
                         self.cookie_usertoken = None
                         log(None, 'Cookies',
-                                          'Updating cookie {} wait_for_session() could not authenticate original usertoken'.format(
+                                          'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
                                               USER_COOKIE_NAME))
 
-#            else:
-#                self.cookie_st = None
-
-#            self.write_cookies()
-
         else:
-            log(None, 'Sessions', 'Failed to obtain session in wait_for_session()')
+            log(None, 'Sessions', 'Failed to obtain session in obtain_session()')
 
 
         return this_sess
@@ -1557,8 +1543,7 @@ class ThHandler(tornado.web.RequestHandler):
             self.send_error(status_code=503)
         else:
 
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
             self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
             self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
@@ -1745,16 +1730,16 @@ class ThHandler(tornado.web.RequestHandler):
             # note: self.session is probably not yet assigned
 
             if self.session is None:
-                log(None, 'SessionRetrive', 'At start session is None')
+                log(None, 'SessionRetrieve', 'At start session is None')
             else:
                 log(None, 'SessionRetrieve', 'At start session is:', self.session.session_key)
 
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
             if self.session is None:
-                log(None, 'SessionRetrive', 'After wait_for_session() session is None')
+                log(None, 'SessionRetrieve', 'After obtain_session() session is None')
             else:
-                log(None, 'SessionRetrieve', 'After wait_for_session() session is:', self.session.session_key)
+                log(None, 'SessionRetrieve', 'After obtain_session() session is:', self.session.session_key)
 
 
             if self.session and (self.tab_id != self.session.tab_id):
@@ -2023,8 +2008,7 @@ class ThHandler_Attach(ThHandler):
         log(None, 'Attach', '*******************************')
         log(None, 'Attach', args[0])
 
-        #self.session = yield self.wait_for_session(write_to_cookie=False)
-        self.session = await self.wait_for_session()
+        self.session = await self.obtain_session()
 
         if self.session is not None:
             self.session.log('Attach', 'Have session')
@@ -2096,8 +2080,7 @@ class ThHandler_Logout(ThHandler):
         global G_sessions
 
         if self.session is None:
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
         nextURL = '/'
 
@@ -2148,8 +2131,7 @@ class ThHandler_Login(ThHandler):
         global G_sessions
 
         if self.session is None:
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
         skip_logout = True  # todo:  review skip_logout
 
@@ -2174,8 +2156,7 @@ class ThHandler_Login(ThHandler):
             ##no self.finish needed, due to redirect
             ##self.finish()
 
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
 
         #buf = await self.session.build_login_screen()
@@ -2214,8 +2195,7 @@ class ThHandler_Login(ThHandler):
         global G_sessions
 
         if self.session is None:
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
         success = False
         error_message = ''
@@ -2315,8 +2295,7 @@ class ThHandler_Async(ThHandler):
             if not cmd and self.get_body_arguments('cmd'):
                 cmd = self.get_body_argument('cmd')
 
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
             if self.session is not None:
 
@@ -2571,8 +2550,7 @@ class ThHandler_REST(ThHandler):
 
         try:
             # spin up a new session
-            #self.session = yield self.wait_for_session()
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
             if self.session is None:
                 raise TheasServerError('Session could not be established for REST request.')
@@ -2906,8 +2884,7 @@ class ThHandler_Back(ThHandler):
 
         if self.session is None:
             # try to get the session, but do not wait for it
-            #self.session = yield self.wait_for_session(seconds_to_wait=0)
-            self.session = await self.wait_for_session()
+            self.session = await self.obtain_session()
 
         if self.session is not None:
             if len(self.session.history) > 1:
