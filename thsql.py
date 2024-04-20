@@ -131,6 +131,8 @@ class ConnectionPool:
             for conn in self.conns_inuse:
                 self.conns = None
 
+
+
     def kill_threads(self, reason=''):
         log(None, 'SQL', 'thsql.py Killing all executor threads in kill_threads() {}'.format(reason))
         executor = thsql_executor()
@@ -195,7 +197,7 @@ class ConnectionPool:
         conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
 
         if conn_name:
-            conn.name = conn_name
+            conn.name = conn_name   # note:  conn.name may not work as expected
 
         log(None, 'SQL', 'created_conn() Created new SQL connection name:', conn.name, 'id:', conn.id)
 
@@ -246,11 +248,11 @@ class ConnectionPool:
 
         return conn
 
-    def release_conn_sync(self,conn):
+    def release_conn_sync(self, conn):
         if conn is not None:
             with self.lock:
                 self.conns_torelease.append(conn)
-                log(None, 'Conn', 'SQL connection is scheduled to be released. Name:', conn.name, 'id:', id)
+                log(None, 'Conn', 'SQL connection is scheduled to be released. Name: {}'.format(conn.name))
 
     async def process_release_conns(self):
         with self.lock:
@@ -271,8 +273,6 @@ class ConnectionPool:
                 if this_conn == conn:
                     self.conns_inuse.pop(i)
 
-                    #if conn.is_user_authed or not conn.is_public_authed:
-                        #connection must be reset before going back into the pool
                     await self.reset_conn(this_conn)
                     self.conns.append(conn)
 

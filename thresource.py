@@ -386,12 +386,17 @@ class ThCachedResources:
 
                 created_conn = True
 
+            this_resource = None
+            try:
+                this_resource = await self.load_resource(resource_code,
+                                                   all_static_blocks=all_static_blocks,
+                                                   get_default_resource=get_default_resource,
+                                                   from_filename=from_filename,
+                                                   conn=conn)
+            except:
+                log(None, 'Resource', 'Exception when calling load_resource()')
+                this_resource = None
 
-            this_resource = await self.load_resource(resource_code,
-                                               all_static_blocks=all_static_blocks,
-                                               get_default_resource=get_default_resource,
-                                               from_filename=from_filename,
-                                               conn=conn)
 
             if created_conn and conn is not None:
                 #conn.close()

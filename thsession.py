@@ -400,25 +400,13 @@ class ThSession:
         self.__locked_by = None
         self.__date_locked = None
 
-    async def get_lock(self, handler=None, handler_guid=None):
+    async def get_lock(self, handler=None):
         result = False
 
-        this_handler = self.current_handler
-        if handler:
-            # override self.current_handler with what was passed in
-            this_handler = handler
-            self.current_handler = handler # experimental
+        assert handler is not None, 'ThSession.get_lock requires a value for handler'
 
-        this_handler_guid = None
-        this_handler_path = None
-        if this_handler is not None:
-            this_handler_guid = this_handler.handler_guid
-            this_handler_path = this_handler.request.path
-
-        if this_handler_guid is None:
-            this_handler_guid = handler_guid
-
-        assert this_handler_guid is not None, 'ThSession.get_lock requires a value for handler_guid (or handler.handler_guid)'
+        this_handler_guid = handler.handler_guid
+        this_handler_path = handler.request_path
 
         if self.__locked_by == this_handler_guid:
             # Requestor already has a lock.  Nothing to do.
@@ -430,16 +418,16 @@ class ThSession:
                 self.__locked_by = this_handler_guid
                 self.__date_locked = time.time()
                 self.__locked_by_path = this_handler_path
+                self.current_handler = handler
                 self.request_count += 1
                 if self.wait_list and len(self.wait_list) > 0 and self.wait_list[0]==this_handler_guid:
                     self.wait_list.pop(0)
                 log(self, 'Session', f'LOCK obtained by handler ({self.__locked_by}) for {this_handler_path}')
         else:
-            # Session is locked by someone else
+            # Session is locked by someone else, or handler is not first in queue to obtain a lock
             result = False
 
             # note:  can't really wait for a lock here.  Return quickly, and let the caller retry.
-
 
             self.log('Session', f'Waiting for busy session. Wanted by {this_handler_guid} ')
             self.log('Session', f'Waiting on prior request for {self.__locked_by_path} so far { round((time.time() -self.__date_locked) * 1000, 0)}ms')
@@ -500,7 +488,7 @@ class ThSession:
 
             while not lock_succeeded and not give_up and theas_server().is_running:
 
-                lock_succeeded = await this_sess.get_lock(handler=handler, handler_guid=handler_guid)
+                lock_succeeded = await this_sess.get_lock(handler=handler)
 
                 if not lock_succeeded:
                     give_up = time.time() - start_waiting > seconds_to_wait

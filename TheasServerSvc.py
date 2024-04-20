@@ -329,6 +329,10 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
 
         if control == win32service.SERVICE_CONTROL_PRESHUTDOWN:
             write_winlog('Service received a pre-shutdown notification in SvcOtherEx')
+
+            # Tell the TheasServer event loop to stop
+            thbase.theas_server().stop(service=self, reason='Service SvcStop()')
+
             self.SvcStop()
         else:
             write_winlog('Service received an event in SvcOtherEx: code={}, type={}, data={}'.
@@ -362,7 +366,7 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         win32event.SetEvent(self.hWaitStop)
 
         # Tell the TheasServer event loop to stop
-        thbase.theas_server().stop(service=self, reason='Service SvcStop()')
+        thbase.G_server.stop(service=self, reason='Service SvcStop()')
 
 def service_poll():
     global G_current_service

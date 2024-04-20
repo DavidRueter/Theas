@@ -3304,9 +3304,7 @@ async def get_ready(run_as_svc=False):
 
 
     if run_as_svc:
-        # make sure there is an ioloop in this thread (needed for Windows service)
-        #io_loop = tornado.ioloop.IOLoop()
-        #io_loop.make_current()
+        # make sure there is an ioloop in this thread (needed for Windows service
         loop = asyncio.get_running_loop()
         if loop is None:
             loop = asyncio.new_event_loop()
@@ -3405,26 +3403,6 @@ def all_done():
     log(None, 'Shutdown', msg)
     write_winlog(msg)
 
-    #experimental  Would like to kill SQL connections, but they may be running in an executor thread
-    #if G_conns is not None:
-    #    G_conns.kill_threads(reason='Called from all_done()')
-    #    G_conns = None
-    #    msg = 'TheasServer.py all_done() killing threads'
-    #    log(None, 'Shutdown', msg)
-    #    write_winlog(msg)
-
-
-    #G_sessions = None
-    #del G_sessions
-
-    #G_conns = None
-    #del G_conns
-
-    #G_cached_resources = None
-    #del G_cached_resources
-
-    #log(None, 'Shutdown', 'Winding down #5')
-
     if G_break_handler is not None:
         G_break_handler.disable()
 
@@ -3520,9 +3498,11 @@ async def main(run_as_svc=False):
         write_winlog(msg)
         #sys.exit()
 
+    # wait forever (i.e. server runs until there is a shutdown event)
     if shutdown_event is not None:
         await shutdown_event.wait()
 
+    # server is done running
     if thbase.theas_server() is not None:
         thbase.theas_server().stop(reason='TheasServer.main() exiting')
 
@@ -3550,6 +3530,11 @@ def run(run_as_svc=False):
     #log_memory('After end')
     #Clean up _mssql resources
  #_mssql.exit()
+
+    log(None, 'Shutdown', 'TheasServer.run() has ended.')
+
+
+    log(None, 'Shutdown', 'Theas has been shut down cleanly.')
 
 if __name__ == "__main__":
     run()
