@@ -133,6 +133,7 @@ G_service_poll = None
 G_service_send_stop = None
 G_all_done = None
 
+
 def set_service_poll(service_poll):
     global G_service_poll
     G_service_poll = service_poll
@@ -143,14 +144,15 @@ def set_all_done(all_done):
     global G_all_done
     G_all_done = all_done
 
-class TheasServerIsRunning():
-    def __init__(self, shutdown_event=None, ioloop=None):
+class TheasServerRunner():
+    def __init__(self, shutdown_event=None):
         self.__is_running = False
         self.__is_starting = True
         self.__is_stopping = False
         self.shutdown_event = shutdown_event
         self.http_server = None
-        self.ioloop = ioloop if ioloop is not None else asyncio.get_event_loop()
+
+        self.loop = asyncio.new_event_loop()
 
     def __del__(self):
         self.__is_running= False
@@ -184,29 +186,32 @@ class TheasServerIsRunning():
 
 
         except Exception as e:
-            log(None, 'TheasServerIsRunning', 'Exception in TheasServerIsRunning.is_running setter', e)
+            log(None, 'TheasServerRunner', 'Exception in TheasServerRunner.is_running setter', e)
             self.__is_running = False
 
         if self.__is_running:
-            log(None, 'TheasServerIsRunning', 'Server is running in TheasServerIsRunning.is_running setter')
+            log(None, 'TheasServerRunner', 'Server is running in TheasServerRunner.is_running setter')
         else:
-            log(None, 'TheasServerIsRunning', 'Server is stopped in TheasServerIsRunning.is_running setter')
+            log(None, 'TheasServerRunner', 'Server is stopped in TheasServerRunner.is_running setter')
 
 
     def stop(self, service=None, reason='', skip_service_stop=False):
         log(None, 'Shutdown', '***Stop() called because: {}'.format(reason))
+        self.write_winlog('Shutting Down: In thbase TheasServerRunner because {}'.format(reason))
 
         if not self.__is_stopping:
             self.__is_stopping = True
 
-            try:
-                loop = asyncio.get_running_loop()
-            except:
-                loop = None
-                log(None, 'Shutdown', 'PROBLEM: ioloop is not running in TheasServerIsRunning.stop()')
+
+            loop = self.loop
+
+            if loop is None or not loop.is_running():
+                self.write_winlog('Shutting Down: PROBLEM loop is not running in TheasServerRunner.stop()')
+                log(None, 'Shutdown', 'PROBLEM: loop is not running in TheasServerRunner.stop()')
+
 
             if loop and loop.is_running():
-                asyncio.create_task(shutdown())
+                loop.create_task(shutdown())
                 log(None, 'Shutdown', '***create_task(shutdown()')
 
 
@@ -240,22 +245,43 @@ class TheasServerIsRunning():
                 log(None, 'Shutdown', 'G_all_done() completed')
                 G_all_done = None
 
-                log(None, 'Shutdown', '***stop() done')
+        log(None, 'Shutdown', '***stop() done')
 
-    def start(self, shutdown_event=None, http_server=None, ioloop=None, reason=''):
+        self.write_winlog('Shutting Down: Done with thbase TheasServerRunner.stop()')
+
+
+
+    def start(self, shutdown_event=None, http_server=None, loop=None, reason=''):
         if shutdown_event is not None:
             self.shutdown_event = shutdown_event
 
         if http_server is not None:
             self.http_server = http_server
 
-        if ioloop is not None:
-            self.ioloop = ioloop
+        if loop is not None:
+            self.loop = loop
 
-        log(None, 'TheasServerIsRunning', 'Start() called', reason)
+        log(None, 'TheasServerRunner', 'Start() called', reason)
 
         self.is_running = True
         self.state = 'running'
+
+
+    def write_winlog(self, *args, is_error=False):
+        # for convenience, wrap LogInfoMsg for logging outside the TheasServerSvc class
+
+        import servicemanager  # See note above
+
+        fnc = None
+        if is_error:
+            fnc = servicemanager.LogErrorMsg
+        else:
+            fnc = servicemanager.LogInfoMsg
+
+        if len(args) >= 2:
+            fnc(args[1])
+        else:
+            fnc(args[0])
 
 
 
@@ -264,7 +290,7 @@ G_server = None
 def theas_server():
     global G_server
     if G_server is None:
-        G_server = TheasServerIsRunning()
+        G_server = TheasServerRunner()
 
     return G_server
 
@@ -319,20 +345,20 @@ def log_memory(obj=None, label="", print_details=False):
         else:
             log(None, 'Memory', 'Memory used', '({})'.format(label) , asizeof.asizeof(obj))
 
+async def stop_loop():
+    loop = theas_server().loop
+    loop.call_soon_threadsafe(loop.stop)
+
 async def shutdown():
+    theas_server().write_winlog('thbase.shutdown()')
+    log(None, 'TheasServerRunner', '***shutdown() called')
 
-    log(None, 'TheasServerIsRunning', '***shutdown() called')
-
-    loop = None
-    try:
-        loop = asyncio.get_running_loop()
-    except:
-        log(None, 'TheasServerIsRunning', 'PROBLEM in thbase.shutdown(): ioloop is not running')
-
+    loop = theas_server().loop
+    if loop is None or not loop.is_running():
+        log(None, 'TheasServerRunner', 'PROBLEM in thbase.shutdown(): loop is not running')
 
     if loop is not None and loop.is_running():
-        await asyncio.sleep(1)
-        #tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        #await asyncio.sleep(1)
 
         tasks = [
             t
@@ -344,25 +370,43 @@ async def shutdown():
             )
         ]
 
+        theas_server().loop.call_soon_threadsafe(loop.stop)
+
         [task.cancel() for task in tasks]
-        try:
-            await asyncio.gather(*tasks)
 
-            log(None, 'Shutdown', '***shutdown() is done with await asyncio.gather(*tasks)')
+        await asyncio.gather(*tasks)
 
-            # note:  the rest of this code may be unreachable, for when all the tasks are cancelled
-            # the running asyncio.run(parallel(run_as_svc=run_as_svc)) in TheasServer.run(run_as_svc=False)
-            # will be complete and execution will continue there.
 
-        except Exception as e:
-            log(None, 'Shutdown', '***shutdown() exception {}'.format(repr(e)))
-            for t in tasks:
-                try:
-                    t.cancel()
-                except:
-                    pass
+        log(None, 'Shutdown', '***shutdown() is done with await asyncio.gather(*tasks)')
 
-        loop.call_soon_threadsafe(loop.stop)
+        # note:  the rest of this code may be unreachable, for when all the tasks are cancelled
+        # the running asyncio.run(parallel(run_as_svc=run_as_svc)) in TheasServer.run(run_as_svc=False)
+        # will be complete and execution will continue there.
 
+
+        theas_server().write_winlog('Near end of thbase.shutdown()')
+
+        #if shutdown_event is not None:
+        #   await shutdown_event.wait()
+
+        # server is done running
+        if theas_server() is not None:
+            theas_server().stop(reason='TheasServer.main() exiting')
+
+        theas_server().loop.call_soon_threadsafe(loop.stop)
+
+
+        global G_service_poll
+
+        theas_server().write_winlog('thbase.shutdown() calling G_service_poll()')
+
+        if G_service_poll is not None:
+            G_service_poll()
+
+        theas_server().write_winlog('Done with thbase.shutdown()')
+        log(None, 'Shutdown', '*Done with thbase.shutdown()')
+
+def set_service_name(service_name: str):
+    theas_server().service_name = service_name
 
 

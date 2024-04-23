@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-import asyncio
 import sys
 
 import win32event
@@ -25,7 +24,6 @@ __author__ = 'DavidRueter'
 Theas web application server Windows service wrapper.
 
 Author: David Rueter (drueter@assyst.com)
-Date: 5/9/2016, last modified 8/30/2022
 Description : Wrapper to run TheasServer web server as a Windows service.
 Home:  https://github.com/davidrueter/Theas
 
@@ -40,7 +38,18 @@ Usage:
     TheasServerSvc.exe start
     TheasServerSvc.exe stop
 
+To clarify: this module is not needed when running Theas on a non-Windows system. (To run Theas on
+Linux-based systems, run TheasServer.py directly.)
 
+But when using Windows, pyinstaller can build TheasServerSvc.exe  That same .exe application can
+then be run in one of two ways:
+ 
+Run in "debug" mode...essentially as a normal Windows console application that
+writes detailed real-time log messages to as the console.
+
+Run in "service" mode, in which the service is installed, and is then controlled by the Windows
+service manager.
+ 
 Note:  You may rename TheasServerSvc.exe prior to installing the service--and the service will
 reflect the new name.
 
@@ -69,10 +78,21 @@ For more info about pywin32:
 # The name of the service will be SERVICE_NAME_PREFIX + _ + program_filename
 # For example, if the .exe is named MyApp.exe, the service would be Theas_MyApp
 SERVICE_NAME_PREFIX = 'Theas'
+"""
 
-# The .dll for Windows Event Manager messages
+"""
+'''The name of the service will be SERVICE_NAME_PREFIX + _ + program_filename
+
+For example, if the .exe is named MyApp.exe, the service would be Theas_MyApp
+'''
+
+
+
 MESSAGE_FILE_DLL = 'TheasMessages.dll'
-# see: https://www.eventsentry.com/blog/2010/11/creating-your-very-own-event-m.html
+"""The .dll that Windows will use for Windows Event Manager messages
+
+see: https://www.eventsentry.com/blog/2010/11/creating-your-very-own-event-m.html
+"""
 
 
 # Declare some globals
@@ -84,9 +104,17 @@ G_message_file = G_program_directory + '\\\\' + 'TheasMessages.dll'
 
 G_current_service = None # set by TheasServerSvc.__init__
 
+thbase.set_service_name(G_service_name)
 
-def write_winlog(*args, is_error=False):
-    # for convenience, wrap LogInfoMsg for logging outside the TheasServerSvc class
+def write_winlog(*args, is_error: bool=False):
+    """
+    :param args:
+    :param is_error:
+    :return:
+
+     Utility function that Wraps servermanager.LogInfoMsg for convenience in writing Windows Event messages
+
+    """
 
     import servicemanager # See note above
 
@@ -109,18 +137,25 @@ def write_winlog(*args, is_error=False):
     #)
 
 def _main():
-    # Declaring _main() as a module-level function provides a number of benefits that
-    # we would not have if this same code were implemented within the TheasServerSvc class.
+    '''
+    The "main" block of code that runs when starting the service.
+    It is conditionally executed at the bottom of this module:
+    if __name__ == '__main__':
+        _main()
 
-    # 1) allows runtime generation of the service name based on the EXE name, etc.
-    # 2) allows this module to be run as the __main__ module which simplifies launching from
-    #    the pycharm debugger
+    Declaring _main() as a module-level function (as opposed to having the statements
+    directly in the top level body of the modules) provides a number of benefits that
+    we would not have if this same code were implemented within the TheasServerSvc class.
 
-    # Note:  we assume that the class declaration of TheasServerSvc
-    # will populate the global variables (G_program_filename, etc.)
-    # Those must be populated before anything else happens (i.e. we
-    # can't change these values in initialize, etc.)
+    It allows runtime generation of the service name based on the EXE name, etc.
 
+    It alo allows this module to be run as the __main__ module which simplifies launching from
+    the pycharm debugger
+
+    Note:  we assume that the global code in this module will populate the global variables
+    (G_program_filename, etc.) Those must be populated before anything else happens (i.e. we
+    can't change these values in initialize, or after initialization, etc.)    
+    '''
 
     import servicemanager
 
@@ -134,7 +169,6 @@ def _main():
     # if the .exe is run without arguments, default to run as a service
     if len(sys.argv) == 1:
         run_service = True
-        # if the .exe is run without arguments, run the service
     else:
         # peek to see if there is a parameter /service to explicitly tell us to run as a service
         for arg in sys.argv:
@@ -149,8 +183,8 @@ def _main():
         try:
 
             import win32traceutil
-            # to help with error handling.
-            # See: http://python.6.x6.nabble.com/Running-a-Windows-Python-service-without-pythonservice-exe-tp1956976p1956982.html
+                # to help with error handling.
+                # See: http://python.6.x6.nabble.com/Running-a-Windows-Python-service-without-pythonservice-exe-tp1956976p1956982.html
 
             servicemanager.Initialize(G_service_name, G_program_directory + MESSAGE_FILE_DLL)
                 # note:  explicitly provide G_service_name so that the service is named according to the
@@ -173,6 +207,7 @@ def _main():
     elif debug_service:
         # handled explicitly here rather than relying on HandleCommandLine (called below)
         # to facilitate running within the pycharm debugger
+
         write_winlog('Running as debug service in _main()')
         win32serviceutil.DebugService(TSS, (G_program_filename, 'debug'))
 
@@ -184,9 +219,7 @@ def _main():
             win32serviceutil.HandleCommandLine(TSS)
             pass
         except Exception as e:
-            msg = 'Error while calling HandleCommandLine: {}'.format(e)
-            write_winlog('Error processing command line in _main() {}'.format(e), is_error=True)
-
+            write_winlog('Error while calling HandleCommandLine: {}'.format(e), is_error=True)
 
         if len(sys.argv) > 1:
             msg = 'Service ' + sys.argv[1] + ' performed.'
@@ -198,8 +231,7 @@ def _main():
             try:
                 servicemanager.SetEventSourceName(G_service_name, True)
             except Exception as e:
-                msg = 'Failed to SetEventSourceName: {}'.format(e)
-                write_winlog('Error Processing install or update from command line in _main() {}'.format(e), is_error=True)
+                write_winlog('Error while processing install or update from command line in _main() {}'.format(e), is_error=True)
                 sys.exit(1)
 
             try:
@@ -213,11 +245,9 @@ def _main():
                 # for reference.  It is no longer needed at present, but be could be called instead:
                 # RegisterEventLogMessage(SERVICE_NAME_PREFIX + G_program_name, G_program_directory)
 
-
             except Exception as e:
                 msg = 'Failed to RegisterEventLogMessage: {}'.format(e)
-                write_winlog('Error calling AddSourceToRegistry to add event source in _main() {} but continuing to run'.format(e), is_error=True)
-                #sys.exit(1)
+                write_winlog('Error calling AddSourceToRegistry to add event source in _main() {} but continuing to run.  {}'.format(e, msg), is_error=True)
 
 '''
 # Works, but no longer needed now that I am able to make use of win32evtlogutil.AddSourceToRegistry
@@ -262,9 +292,15 @@ def RegisterEventLogMessage(program_name='', program_directory='', message_file=
 '''
 
 class TheasServerSvc(win32serviceutil.ServiceFramework):
-    # Windows will call the methods of this class to control the service
+    """
+    Class to be controlled by the Windows service manager.
 
-    # Make sure that globals G_service_name is populated before this declaration
+    Windows will call the methods of this class to control the service
+
+    Make sure that globals G_service_name is populated before this declaration is interpreted
+
+
+    """
 
     _svc_name_ = G_service_name
     _svc_display_name_ = G_service_name
@@ -276,9 +312,9 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
     # are parameters, only HandleCommandLine is called (i.e. for installing, removing service, etc.)...
     # and the service is not run.
 
-    # If you want commandline parameters that are specified when the service is installed to be included here,
-    # you must process the parameters yourself and set _exe_args_ before HandleCommandLine is called.
-    # (HandleCommandLine will ignore or raise an error on additional parameters.)
+    # If you want command line parameters that are specified when the service is installed to be included here,
+    # you must process the parameters yourself and set _exe_args_ before HandleCommandLine (or equivalent
+    # code) is called.  (HandleCommandLine will ignore or raise an error on additional parameters.)
     _exe_args_ = None   # 'service param1 param2 param3'
 
     # note:  we save the service name in a global to facilitate using this name when logging
@@ -293,8 +329,9 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
 
 
         # Save this service object to G_current_service for convenience
-        global G_current_service#.set_service(self)        global G_current_service
+        global G_current_service
         G_current_service = self
+
 
     def GetAcceptedControls(self):
         result = win32serviceutil.ServiceFramework.GetAcceptedControls(self)
@@ -302,9 +339,6 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         return result
 
     def SvcDoRun(self):
-        # ---------------------------------------------------------------------
-        # Make entry in the event log that this service started
-        # ---------------------------------------------------------------------
 
         write_winlog('Service SvcDoRun() was called')
 
@@ -331,10 +365,13 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
             write_winlog('Service received a pre-shutdown notification in SvcOtherEx')
 
             # Tell the TheasServer event loop to stop
-            thbase.theas_server().stop(service=self, reason='Service SvcStop()')
+            #thbase.theas_server().stop(service=self, reason='Service SvcStop()')
 
-            self.SvcStop()
+            #self.SvcStop()
         else:
+
+            write_winlog('Starting SvcOtherEx()')
+
             write_winlog('Service received an event in SvcOtherEx: code={}, type={}, data={}'.
                          format(control, event_type, data))
             pass
@@ -372,12 +409,15 @@ def service_poll():
     global G_current_service
     if G_current_service is not None:
         G_current_service.onServicePoll()
+
 def service_send_stop():
     global G_current_service
     if G_current_service is not None and G_current_service.hWaitStop is not None:
-        write_winlog('service_send_stop() called')
+        write_winlog('Shutting Down: In TheasServerSvc.service_send_stop()')
         win32event.SetEvent(G_current_service.hWaitStop)
 
+
+# pass some references to thbase (to make it available to theas_server() / TheasServerRunner
 thbase.set_service_poll(service_poll)
 thbase.set_service_send_stop(service_send_stop)
 

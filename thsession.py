@@ -248,7 +248,7 @@ class ThSession:
 
         self.session_token = None
 
-        self.tab_id = None
+        self.tab_id = tab_id
 
         global _USE_MULTI_TABS
         global _MULTI_TAB_PREFIX
@@ -324,8 +324,8 @@ class ThSession:
 
         self.log('Session', 'Created new session', self.session_key, this_resource_code)
 
-        if handler:
-            handler.write_cookies() # experimental
+        #if handler:
+        #    handler.write_cookies() # experimental
 
     def __del__(self):
         if self.theas_page is not None:
@@ -434,15 +434,18 @@ class ThSession:
 
         return result
 
-    def get_login_url(self):
-        redir_url = ''
+    def get_tab_url(self):
+        result = '/'
 
         if _USE_MULTI_TABS:
-            redir_url = '/' + _MULTI_TAB_PREFIX + self.tab_id + '/' + _LOGIN_RESOURCE_CODE
-        else:
-            redir_url = self.redirect('/' + _LOGIN_RESOURCE_CODE)
+            result = '/' + _MULTI_TAB_PREFIX + self.tab_id + '/'
 
-        return redir_url
+        return result
+
+    def get_login_url(self):
+        result = self.get_tab_url() + _LOGIN_RESOURCE_CODE
+
+        return result
 
 
     #@classmethod
@@ -718,6 +721,7 @@ class ThSession:
             if resultset is None:
                 self.logged_in = False
                 self.user_token = None
+                self.remember_user_token = False
 
 
                 self.log('Session', 'Authentication failed:', self.error_message)
@@ -725,13 +729,19 @@ class ThSession:
                 #self.theas_page.set_value('theas:th:ErrorMessage', error_message)
 
             else:
-                for row in resultset:
-                    session_guid = row['SessionGUID']
-                    user_token = row['UserToken']
-                    username = row['UserName']
+                db_user_token = None
+                db_session_guid = None
+                db_username = None
 
-                if session_guid is not None:
-                    if user_token == _LOGIN_AUTO_USER_TOKEN:
+                for row in resultset:
+                    db_session_guid = row['SessionGUID']
+                    db_user_token = row['UserToken']
+                    db_username = row['UserName']
+
+                if db_session_guid is not None:
+                    # note: db_session_guid is different than self.session_token
+
+                    if db_user_token == _LOGIN_AUTO_USER_TOKEN:
                         self.logged_in = False
                         self.autologged_in = True
                         self.log('Auth', 'Authenticated as AUTO (public)... not a real login')
@@ -739,10 +749,12 @@ class ThSession:
                     else:
                         self.logged_in = True
 
+                        self.remember_user_token = bool(temp_remember) or (user_token == db_user_token)
+                            # preserve the user token cookie (since we just logged in using it, or were told to)
+
                         # Store some user information (so the information can be accessed in templates)
-                        self.username = username
-                        self.user_token = user_token
-                        self.remember_user_token = bool(temp_remember)
+                        self.username = db_username
+                        self.user_token = db_user_token
 
                         self.theas_page.set_value('th:UserName', self.username)
                         self.theas_page.set_value('th:ST', self.session_token)
@@ -866,6 +878,31 @@ class ThSession:
 
         elapsed = (now - self.date_last_sql_start) * 1000 if self.date_last_sql_start is not None else 0
         self.log('Timing', 'SQL Done.  Duration: {:.2f}ms'.format(elapsed))
+
+    async def build_login_screen(self):
+        global G_cached_resources
+
+        self.log('Response', 'Building login screen')
+
+        buf = '<html><body>No data in build_login_screen</body></html>'
+
+        resource = None
+        template_str = ''
+
+        self.log('Resource', 'Fetching login page resource')
+        resource = await G_cached_resources.get_resource(_LOGIN_RESOURCE_CODE, self)
+
+        if resource is None:
+            # raise Exception ('Could not load login screen template from the database.  Empty template returned from call to theas.spgetSysWebResources.')
+            buf = '<html><head><meta http-equiv="refresh" content="30"></meta><body>Could not load login screen template from the database server.  Empty template returned from call to theas.spgetSysWebResources.<br /><br />Will try again shortly... </body></html>'
+
+        else:
+            template_str = resource.data
+            this_data = self.init_template_data()
+
+            buf = self.theas_page.render(template_str, data=this_data, request=self.current_handler.request)
+
+        return buf
 
     def init_template_data(self):
         this_data = {}

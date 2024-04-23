@@ -486,8 +486,8 @@ class ThStoredProc:
             try:
                 sql_str = 'SELECT 1 AS IsOK'
                 # executor #1: check connection health
-                if theas_server().is_running or theas_server().is_starting:
-                    await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str)
+                if not theas_server().is_stopping and (theas_server().is_running or theas_server().is_starting):
+                    await theas_server().loop.run_in_executor(thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str)
                 pass
             except asyncio.exceptions.CancelledError as e:
                 log(self.th_session, 'Sessions', '***Canceled executor #1...probably shutting down ', e)
@@ -515,8 +515,8 @@ class ThStoredProc:
                 sql_str = 'EXEC theas.sputilGetParamNames @ObjectName = \'{}\''.format(self.stored_proc_name)
 
                 # executor #2: refresh parameter list
-                if theas_server().is_running or theas_server().is_starting:
-                    await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.conn.sql_conn.execute_query, sql_str)
+                if not theas_server().is_stopping and (theas_server().is_running or theas_server().is_starting):
+                    await theas_server().loop.run_in_executor(thsql_executor(), self.conn.sql_conn.execute_query, sql_str)
 
                 pass
 
@@ -634,8 +634,8 @@ class ThStoredProc:
             sql_str = this_sql + ' ' + this_params_str
 
             # executor #3: exec stored procedure
-            if theas_server().is_running or theas_server().is_starting:
-                result = await asyncio.get_running_loop().run_in_executor(thsql_executor(), self.do_exec, sql_str)
+            if not theas_server().is_stopping and (theas_server().is_running or theas_server().is_starting):
+                result = await theas_server().loop.run_in_executor(thsql_executor(), self.do_exec, sql_str)
 
             pass
 

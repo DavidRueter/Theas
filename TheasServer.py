@@ -427,42 +427,75 @@ class ThHandler(tornado.web.RequestHandler):
         else:
              self.__cookie_usertoken = self.get_cookie(USER_COOKIE_NAME)
 
-        #else:
-        #    self.current_handler.cookie_st = None
-        #    self.current_handler.write_cookies()
-        #    self.log('Cookies',
-        #             'Cleared cookie {} because USE_SESSION_COOKIE is not true'.format(self.session_cookie_name))
 
-    def write_cookies(self):
+    def write_cookies(self, clear_user: bool = False):
+        path = '/'
+        if USE_MULTI_TABS:
+            path = self.session.get_tab_url()
+            # note: we are being a bit redundant by including the tab id in both the cookie name
+            # and the cookie path.  Arguably we could/should use tab id in either the name or the
+            # path. But this redundancy should not cause any problems, and helps clarify when
+            # inspecting cookies in the browser's debugger.
+
         if self.session:
             if self.cookie_st is None or len(self.cookie_st) == 0:
-                self.clear_cookie(self.session_cookie_name, path='/')
+                self.clear_cookie(self.session_cookie_name, path=path)
             else:
                 if USE_SECURE_COOKIES:
-                    self.set_secure_cookie(self.session_cookie_name, self.cookie_st, path='/')
+                    self.set_secure_cookie(self.session_cookie_name, self.cookie_st, path=path, httponly=True, expires_days=1, expires=None)
                 else:
-                    self.set_cookie(self.session_cookie_name, self.cookie_st, path='/')
+                    self.set_cookie(self.session_cookie_name, self.cookie_st, path=path, httponly=True, expires_days=1, expires=None)
 
-            if not USE_MULTI_TABS:
-                if (self.cookie_usertoken is None or
-                        len(self.cookie_usertoken) == 0 or
-                        self.session is None or
-                        not REMEMBER_USER_TOKEN or
-                        not self.session.remember_user_token):
-                    self.clear_cookie(USER_COOKIE_NAME, path='/')
-                else:
-                    if not REMEMBER_USER_TOKEN:
-                        self.clear_cookie(USER_COOKIE_NAME, path='/')
+            # note: the browser's specific implementation of "session" cookies (i.e. no expiration date provided)
+            # varies by browser. Some browsers persist "session" cookies after browser close and/or system
+            # reboots without closing the browser. We don't want clutter (especially when using multi-tab).
+            # So we explicitly set the expiration to 1 day.  Calling write_cookies() will be called multiple
+            # times will have the effect of extending the timeout on each call.
 
-            if (REMEMBER_USER_TOKEN and
+
+            # clear usertoken cookie (i.e. for "remember me on this device")
+            if clear_user or (
+                    self.cookie_usertoken is None or
+                    len(self.cookie_usertoken) == 0 or
+                    self.session is None or
+                    not REMEMBER_USER_TOKEN or
+                    not self.session.remember_user_token
+            ):
+                self.clear_cookie(USER_COOKIE_NAME, path=path)
+                    # note: we are not currently setting a tab-specific user cookie, but
+                    # there is no harm in clearing it here just in case we change our minds
+                    # in the future.
+
+                #if not USE_MULTI_TABS:
+                self.clear_cookie(USER_COOKIE_NAME, path='/')
+                    # note: currently any tab will clear the global user cookie.
+                    # See below for a related todo
+
+
+            if (REMEMBER_USER_TOKEN and not clear_user and
                     self.session.remember_user_token and
+                    self.session.user_token is not None and
                     self.session.logged_in and
                     not self.session.autologged_in):
 
                 if USE_SECURE_COOKIES:
-                    self.set_secure_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
+                    #self.set_secure_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path=path, http_only=True, expires_days=30, expires=None)
+                    self.set_secure_cookie(USER_COOKIE_NAME, self.session.user_token, path='/', httponly=True, expires_days=30, expires=None)
                 else:
-                    self.set_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path='/')
+                    #self.set_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path=path, http_only=True, expires_days=30, expires=None)
+                    self.set_cookie(USER_COOKIE_NAME, self.session.user_token, path='/', httponly=True, expires_days=30, expires=None)
+
+            # todo: decide how user_token should be handled when multi-tab is in use:
+            # If one tab logs out, should that delete the browser-wide user_token cookie?
+            # Probably so...though that compromises tab isolation.
+            # Alternatively, perhaps USER_TOKEN should be scoped to a tab-id path. But
+            # how then would a user indicate they no longer want to be remembered on the
+            # device?
+            # At present user cookie is set only on the '/' path, not the tab-specific path.
+            # However the user cookie is cleared (when appropriate) from the '/' and also the
+            # tab-specific path (just to avoid security-related problems if code is changed in
+            # the future).
+
 
     def check_xsrf_cookie(self):
         """
@@ -507,6 +540,7 @@ class ThHandler(tornado.web.RequestHandler):
         if not xsrf_ok:
             log(None, 'xsrf', xsrf_message)
             self.send_error(status_code=403, message=xsrf_message)
+
 
     def write_error(self, status_code, **kwargs):
         global G_program_options
@@ -786,7 +820,7 @@ class ThHandler(tornado.web.RequestHandler):
             this_filedata=buf if buf else 'NULL'
         )
 
-        await asyncio.get_running_loop().run_in_executor(None, self.session.conn.sql_conn.execute_non_query, sql_str)
+        await theas_server().loop.run_in_executor(None, self.session.conn.sql_conn.execute_non_query, sql_str)
 
     async def process_uploaded_files(self):
         if not self.request_has_files():
@@ -1674,7 +1708,7 @@ class ThHandler(tornado.web.RequestHandler):
         global G_cached_resources
 
         if not thbase.theas_server().is_running:
-            # serviedr is shutting down
+            # server is shutting down
             self.send_error(status_code=503)
         else:
 
@@ -2136,7 +2170,7 @@ class ThHandler_Login(ThHandler):
         if self.session is None:
             self.session = await self.obtain_session()
 
-        skip_logout = True  # todo:  review skip_logout
+        skip_logout = False  # todo:  review skip_logout
 
         if 'skip_logout' in kwargs:
             skip_logout = kwargs['skip_logout']
@@ -2170,18 +2204,7 @@ class ThHandler_Login(ThHandler):
 
         self.write_cookies()
 
-        #self.write(buf)
-
-        buf = ''
-
-        if self.session is not None:
-            self.session.log('Response', 'Sending redirect to login screen')
-            # investigate self.session.bookmark_url
-            redir_url = self.session.get_login_url()
-
-            buf = self.session.clientside_redir(url=redir_url)
-        else:
-            buf = '<html><body>Something went wrong:  there is no session available in ThHandler_Login.get()</body></html>'
+        buf = await self.session.build_login_screen()
 
         self.write(buf)
 
@@ -3303,14 +3326,6 @@ async def get_ready(run_as_svc=False):
         G_break_handler.enable()
 
 
-    if run_as_svc:
-        # make sure there is an ioloop in this thread (needed for Windows service
-        loop = asyncio.get_running_loop()
-        if loop is None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-
     program_directory, program_filename = get_program_directory()
 
     get_program_settings()
@@ -3381,9 +3396,7 @@ async def get_ready(run_as_svc=False):
         write_winlog(msg)
         sys.exit()
 
-    #G_sessions.start_cleanup_thread()
 
-    log_memory('Ready to start in get_ready()')
 
     msg = 'In get_ready() ready to start Theas server {} (in {}) on port {}.'.format(
         program_filename, program_directory, G_program_options.port)
@@ -3411,6 +3424,7 @@ def all_done():
     write_winlog(msg)
 
 def make_app():
+
     my_handlers = [
         (r'/stop', ThHandler_Stop),
         (r'/attach', ThHandler_Attach),
@@ -3426,22 +3440,21 @@ def make_app():
         (r'/rest/(.*)', ThHandler_REST),
 
         (r'/async', ThHandler_Async),
-        (r'/async/(.*)', ThHandler_Async)
+        (r'/async/(.*)', ThHandler_Async),
         # note that /r/* has special meaning, though it is handled by ThHandler.  When /r/resourcecode/param1/param2
         # is specified, this indicates that the resource code is "resourcecode".  "param1/param2" will be passed
         # in to @PathParams in the stored procedure.
     ]
 
     if USE_MULTI_TABS:
-        my_handlers += [
-            (r'/({}.*)/async'.format(MULTI_TAB_PREFIX), ThHandler_Async),
-            (r'/({}.*)/async/(.*)'.format(MULTI_TAB_PREFIX), ThHandler_Async)
-        ]
+        # add version of these handlers that include the tab id
+        my_handlers += (
+            [(r'/({}.*)'.format(MULTI_TAB_PREFIX) + x, fn) for x, fn in my_handlers] # version of each of the existing handlers that include the tab id
+            ) + ([(r'/({}.*)'.format(MULTI_TAB_PREFIX), ThHandler)])  # version of the catch-all handler...which must be at end of list
 
-    # catch-all must be at the end of the list
-    my_handlers += [
-        (r'/(.*)', ThHandler)
-    ]
+    # MUST BE AT THE END OF THE LIST: catch-all
+    my_handlers += [(r'/(.*)', ThHandler)]
+
 
     return tornado.web.Application(
         my_handlers,
@@ -3464,17 +3477,24 @@ async def each_period():
     if G_conns is not None:
         await G_conns.process_release_conns()
 
+    #log_memory(print_details=True)
+    log_memory(obj=G_cached_resources)
+
     # we can do other things here if we want
     global G_periodic_proc
     if G_periodic_proc is not None:
         G_periodic_proc()
 
+    global G_periodic_wait
+    if (thbase.theas_server().is_running or thbase.theas_server().is_starting) and not thbase.theas_server().is_stopping:
+        await asyncio.sleep(G_periodic_wait)
+        theas_server().loop.create_task(each_period())
+
 async def periodic():
     # run every 5 seconds (or G_periodic_wait seconds)
     global G_periodic_wait
-
     while thbase.theas_server().is_running:
-        asyncio.create_task(each_period())
+        theas_server().loop.create_task(each_period())
         await asyncio.sleep(G_periodic_wait)
 
 async def main(run_as_svc=False):
@@ -3498,42 +3518,55 @@ async def main(run_as_svc=False):
         write_winlog(msg)
         #sys.exit()
 
-    # wait forever (i.e. server runs until there is a shutdown event)
-    if shutdown_event is not None:
-        await shutdown_event.wait()
+    if False:
+        # wait forever (i.e. server runs until there is a shutdown event)
+        if shutdown_event is not None:
+            await shutdown_event.wait()
 
-    # server is done running
-    if thbase.theas_server() is not None:
-        thbase.theas_server().stop(reason='TheasServer.main() exiting')
+        # server is done running
+        if thbase.theas_server() is not None:
+            thbase.theas_server().stop(reason='TheasServer.main() exiting')
 
 async def parallel(run_as_svc=False):
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.gather(main(run_as_svc=run_as_svc), periodic(), return_exceptions=True)
 
 def run(run_as_svc=False):
-    #gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
-    #set_exit_handler(on_exit)
+    gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
 
-    loop = None
-    try:
-        loop = asyncio.get_running_loop()
-    except:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    loop = theas_server().loop
 
     try:
-        asyncio.run(parallel(run_as_svc=run_as_svc))
+        #loop.create_task(parallel(run_as_svc=run_as_svc))
+        loop.create_task(main(run_as_svc=run_as_svc))
+        loop.create_task(each_period())
+        loop.run_forever()
     except Exception as e:
         log(None, 'Shutdown', 'Exception in TheasServer.run() {}'.format(str(e)))
 
     pass
-    #log_memory('After end')
-    #Clean up _mssql resources
- #_mssql.exit()
-
-    log(None, 'Shutdown', 'TheasServer.run() has ended.')
+    log_memory('After end')
 
 
+
+    # server is done running
+    if theas_server() is not None:
+        theas_server().stop(reason='TheasServer.main() exiting')
+
+    theas_server().loop.call_soon_threadsafe(loop.stop)
+
+    global G_service_poll
+
+    theas_server().write_winlog('thbase.shutdown() calling G_service_poll()')
+
+    if G_service_poll is not None:
+        G_service_poll()
+
+    theas_server().write_winlog('Done with thbase.shutdown()')
+
+
+
+    theas_server().write_winlog('Theas has been shut down cleanly.')
     log(None, 'Shutdown', 'Theas has been shut down cleanly.')
 
 if __name__ == "__main__":
