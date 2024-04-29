@@ -283,14 +283,13 @@ class ThHandler(tornado.web.RequestHandler):
             self.request_path = self.request.path
 
         global MULTI_TAB_PREFIX
-        if self.request_path is not None:
-            if self.request_path.split('/')[1].startswith(MULTI_TAB_PREFIX):
-                self.tab_id = self.request_path.split('/')[1][5:]
-                self.request_path = '/'.join(self.request_path.split('/')[2:])
-                self.received_tabid_url = True
-            else:
-                if self.request_path.startswith('/'):
-                    self.request_path = self.request_path[1:] #remove leading /
+        if self.request_path.split('/')[1].startswith(MULTI_TAB_PREFIX):
+            self.tab_id = self.request_path.split('/')[1][5:]
+            self.request_path = '/'.join(self.request_path.split('/')[2:])
+            self.received_tabid_url = True
+        else:
+            if self.request_path.startswith('/'):
+                self.request_path = self.request_path[1:] #remove leading /
 
         # Retrieve session and user token cookie values and save
         # them in the new session in __cookie_st and __cookie_usertoken
@@ -2821,14 +2820,6 @@ class ThHandler_REST(ThHandler):
 
                     await self.finish()
 
-                if 1 == 0:
-                    #if the async request came in on an existng session we don't want to close it!
-                    proc.conn.sql_conn.close()
-                    proc.conn.sql_conn = None
-                    proc.th_session.conn.sql_conn = None
-
-                    proc = None
-
                 await self.session.finished()
                 #note:  since sql_conn is None, finished() will destroy the session
 
@@ -3452,7 +3443,7 @@ def make_app():
             [(r'/({}.*)'.format(MULTI_TAB_PREFIX) + x, fn) for x, fn in my_handlers] # version of each of the existing handlers that include the tab id
             ) + ([(r'/({}.*)'.format(MULTI_TAB_PREFIX), ThHandler)])  # version of the catch-all handler...which must be at end of list
 
-    # MUST BE AT THE END OF THE LIST: catch-all
+    # MUST BE AT THE END OF THE LIST: catch-all handler
     my_handlers += [(r'/(.*)', ThHandler)]
 
 
@@ -3498,7 +3489,6 @@ async def periodic():
         await asyncio.sleep(G_periodic_wait)
 
 async def main(run_as_svc=False):
-    shutdown_event = None
     await get_ready(run_as_svc=run_as_svc)
 
     app = make_app()
@@ -3516,20 +3506,16 @@ async def main(run_as_svc=False):
             SERVER_PORT, e)
         print(msg)
         write_winlog(msg)
-        #sys.exit()
 
-    if False:
-        # wait forever (i.e. server runs until there is a shutdown event)
-        if shutdown_event is not None:
-            await shutdown_event.wait()
+    # note: this seems not to be needed.
+    ## wait forever (i.e. server runs until there is a shutdown event)
+    #if shutdown_event is not None:
+    #    await shutdown_event.wait()
 
-        # server is done running
-        if thbase.theas_server() is not None:
-            thbase.theas_server().stop(reason='TheasServer.main() exiting')
+    ## server is done running
+    #if thbase.theas_server() is not None:
+    #    thbase.theas_server().stop(reason='TheasServer.main() exiting')
 
-async def parallel(run_as_svc=False):
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.gather(main(run_as_svc=run_as_svc), periodic(), return_exceptions=True)
 
 def run(run_as_svc=False):
     gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
@@ -3537,16 +3523,30 @@ def run(run_as_svc=False):
     loop = theas_server().loop
 
     try:
-        #loop.create_task(parallel(run_as_svc=run_as_svc))
         loop.create_task(main(run_as_svc=run_as_svc))
         loop.create_task(each_period())
         loop.run_forever()
+
+        # note: old pattern was like this:
+
+        # async def parallel(run_as_svc=False):
+        #    with contextlib.suppress(asyncio.CancelledError):
+        #        await asyncio.gather(main(run_as_svc=run_as_svc), periodic(), return_exceptions=True)
+
+        # loop.create_task(parallel(run_as_svc=run_as_svc))
+        # asyncio.run(parallel(run_as_svc=run_as_svc))
+
+        #   ...but this had problems when shutting down.
+        #   Remember that shutdown can be initiated externally (i.e. by calling
+        #   TheasServerRunner.shutdown(), such as by Windows Service Manager,
+        #   and we don't want to hang.  Using run_forever() and explicitly cancelling
+        #   the loop is more straight forward and avoids problems
+
     except Exception as e:
         log(None, 'Shutdown', 'Exception in TheasServer.run() {}'.format(str(e)))
 
     pass
     log_memory('After end')
-
 
 
     # server is done running
@@ -3563,7 +3563,6 @@ def run(run_as_svc=False):
         G_service_poll()
 
     theas_server().write_winlog('Done with thbase.shutdown()')
-
 
 
     theas_server().write_winlog('Theas has been shut down cleanly.')

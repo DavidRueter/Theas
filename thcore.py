@@ -955,6 +955,8 @@ class Theas():
             if req_path and req_path.startswith('/' + self.th_session.multi_tab_prefix):
                 # Strip out this tabid because we want to use the one from the session instead.
                 # Should be the same...but still, we want to be careful.
+
+                #bb
                 req_path = '/'.join(req_path.split('/')[2:])
 
             this_path = this_path + req_path + '/'
