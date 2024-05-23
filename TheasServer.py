@@ -429,14 +429,15 @@ class ThHandler(tornado.web.RequestHandler):
 
     def write_cookies(self, clear_user: bool = False):
         path = '/'
-        if USE_MULTI_TABS:
-            path = self.session.get_tab_url()
-            # note: we are being a bit redundant by including the tab id in both the cookie name
-            # and the cookie path.  Arguably we could/should use tab id in either the name or the
-            # path. But this redundancy should not cause any problems, and helps clarify when
-            # inspecting cookies in the browser's debugger.
 
         if self.session:
+            if USE_MULTI_TABS:
+                path = self.session.get_tab_url()
+                # note: we are being a bit redundant by including the tab id in both the cookie name
+                # and the cookie path.  Arguably we could/should use tab id in either the name or the
+                # path. But this redundancy should not cause any problems, and helps clarify when
+                # inspecting cookies in the browser's debugger.
+
             if self.cookie_st is None or len(self.cookie_st) == 0:
                 self.clear_cookie(self.session_cookie_name, path=path)
             else:
@@ -710,11 +711,15 @@ class ThHandler(tornado.web.RequestHandler):
 
                         if 'ErrorMessage' in row:
                             if not row['ErrorMessage'] is None and row['ErrorMessage'] != '':
-                                # self.session.theas_page.set_value('theas:th:ErrorMessage', row['ErrorMessage'])
+                                self.session.error_message = urlparse.quote(format_error(row['ErrorMessage'])) #
+                                #todo: decide if the above line should be commented out (Has been commented out until
+                                # 2024/05/22 as per the following comments)
+
                                 # the stored proc can set th:ErrorMessage in TheasParams if it wants.
                                 # If the stored proc returns an ErrorMessage column, we send that as the response
-                                # without updating the TheasParam at the server
-                                buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(row['ErrorMessage'])) + '&'
+                                # without updating the Theas`Param at the server
+                                #todo: make sure that error handling is working for both normal and async requests
+                                #buf = 'theas:th:ErrorMessage=' + urlparse.quote(format_error(row['ErrorMessage'])) + '&'
 
                         if 'TheasParams' in row:
                             if row['TheasParams'] is not None:
@@ -949,7 +954,9 @@ class ThHandler(tornado.web.RequestHandler):
                 # if '@StepDefID' in proc.parameter_list and self.session.theas_page.get_value('stepDefID') is not None:
                 #    proc.bind(self.session.theas_page.get_value('stepDefID'), _mssql.SQLCHAR, '@StepDefID')
 
-                first_path_elem = self.request.path.split('/')[1]
+                first_path_elem = self.request_path
+                if first_path_elem.count('/') > 0:
+                    first_path_elem = first_path_elem.split('/')[1]
 
                 #@Paramstr is used to facilitate storing static parameters in a resource.
                 #If there is a space in the resources' stored proc name, everything after is
@@ -959,12 +966,13 @@ class ThHandler(tornado.web.RequestHandler):
                     proc.bind(resource.api_stored_proc_paramstr, _mssql.SQLCHAR, '@ParamStr')
 
                 if '@Document' in proc.parameter_list:
-                    this_document = None
+                    this_document = self.request_path
+
 
                     if first_path_elem == 'r':
-                        this_document = self.request.path.split('/')[2]
+                        this_document = self.request_path.split('/')[2]
                     else:
-                        this_document = self.request.path
+                        this_document = self.request_path
 
                     if len(this_document) == 0:
                         this_document = None
@@ -975,13 +983,13 @@ class ThHandler(tornado.web.RequestHandler):
                         proc.bind(this_document, _mssql.SQLCHAR, '@Document')
 
                 if '@PathFull' in proc.parameter_list:
-                    proc.bind(self.request.path, _mssql.SQLCHAR, '@PathFull')
+                    proc.bind(self.request_path, _mssql.SQLCHAR, '@PathFull')
 
                 if '@PathParams' in proc.parameter_list:
                     this_path = None
 
                     if first_path_elem == 'r':
-                        this_path = "/".join(self.request.path.split('/')[3:])
+                        this_path = "/".join(self.request_path.split('/')[3:])
 
                     if this_path is not None:
                         proc.bind(this_path, _mssql.SQLCHAR, '@PathParams')
@@ -1233,11 +1241,13 @@ class ThHandler(tornado.web.RequestHandler):
 
                                 self.session.log('Headers', 'Updating HTTP headers as per stored procedure E')
 
-                resultset_index = resultset_index + 1
-                if resultset_index < len(proc.resultsets):
+                if resultset_index < len(proc.resultsets) - 1:
+                    resultset_index = resultset_index + 1
                     resultset = proc.resultsets[resultset_index]
                 else:
                     break
+
+
 
                     # stored proc may have updated Theas controls, so update the copy in data._Theas
                     # this_data['_Theas']['theasParams'] = self.session.theas_page.get_controls()
@@ -1500,13 +1510,15 @@ class ThHandler(tornado.web.RequestHandler):
                 # try to auto-login if there is a user cookie
                 if self.cookie_usertoken:
                     log(None, 'Sessions', 'Reauthenticating user from usertoken cookie')
-                    await this_sess.authenticate(user_token=self.cookie_usertoken)
-                    if not this_sess.logged_in:
-                        log(None, 'Sessions', 'FAILED to reauthenticate user from usertoken cookie')
-                        self.cookie_usertoken = None
-                        log(None, 'Cookies',
-                                          'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
-                                              USER_COOKIE_NAME))
+                    try:
+                        await this_sess.authenticate(user_token=self.cookie_usertoken)
+                    finally:
+                        if not this_sess.logged_in:
+                            log(None, 'Sessions', 'FAILED to reauthenticate user from usertoken cookie')
+                            self.cookie_usertoken = None
+                            log(None, 'Cookies',
+                                              'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
+                                                  USER_COOKIE_NAME))
 
         else:
             log(None, 'Sessions', 'Failed to obtain session in obtain_session()')
@@ -1767,201 +1779,226 @@ class ThHandler(tornado.web.RequestHandler):
             else:
                 log(None, 'SessionRetrieve', 'At start session is:', self.session.session_key)
 
-            self.session = await self.obtain_session()
+            try:
+                self.session = await self.obtain_session()
+            except:
+                self.session = None
+
+            obtained_lock = False
 
             if self.session is None:
                 log(None, 'SessionRetrieve', 'After obtain_session() session is None')
             else:
                 log(None, 'SessionRetrieve', 'After obtain_session() session is:', self.session.session_key)
+                obtained_lock = self.session.locked
 
+            try:
 
-            if self.session and (self.tab_id != self.session.tab_id):
-                self.tab_id = self.session.tab_id
+                if self.session and (self.tab_id != self.session.tab_id):
+                    self.tab_id = self.session.tab_id
 
-            global USE_MULTI_TABS
-            global MULTI_TAB_PREFIX
+                global USE_MULTI_TABS
+                global MULTI_TAB_PREFIX
 
-            if USE_MULTI_TABS and (not self.received_tabid_url) and (thcore.Theas.mimetype_for_extension(resource_code) == 'text/html'):
-                self.write_cookies()
-                # mangle URL if needed
-                redirect_to = '/' + MULTI_TAB_PREFIX + self.tab_id + '/' + self.request_path
-
-            else:
-                # URL does not need to be mangled.  Process request as normal.
-
-                # A request for a cached public resource does not need a database connection.
-                # We can serve up such requests without even checking the session.
-                # If we do not check the session, multiple simultaneous requests can be processed,
-                if resource_code or self.session:
-                    resource = await G_cached_resources.get_resource(resource_code, self.session)
-
-                # see if the resource is public (so that we can serve up without a session)
-                if resource is not None and resource.exists and \
-                        resource.is_public and \
-                        not resource.render_jinja_template and \
-                        not resource.on_before and not resource.on_after:
-                    # note:  resource.data will usually be str but might be bytes
-                    log(None, 'CachedGET', 'Serving up cached resource', resource_code)
-                    buf = resource.data
+                if USE_MULTI_TABS and (not self.received_tabid_url) and (thcore.Theas.mimetype_for_extension(resource_code) == 'text/html'):
+                    self.write_cookies()
+                    # mangle URL if needed
+                    redirect_to = '/' + MULTI_TAB_PREFIX + self.tab_id + '/' + self.request_path
 
                 else:
-                    # Retrieve or create a session.  We want everyone to have a session (even if they are not authenticated)
-                    # We need to use the session's SQL connection to retrieve the resource
+                    # URL does not need to be mangled.  Process request as normal.
 
-                    log(None, 'GET', '*******************************')
-                    log(None, 'GET', args[0])
+                    # A request for a cached public resource does not need a database connection.
+                    # We can serve up such requests without even checking the session.
+                    # If we do not check the session, multiple simultaneous requests can be processed,
+                    if resource_code or self.session:
+                        resource = await G_cached_resources.get_resource(resource_code, self.session)
 
-                    if self.session is None:
-                        log(None, 'GET Error', 'No session.  Cannot continue to process request.')
-                        self.write('<html><body>Error: cannot process request without a valid session</body></html>')
+                    # see if the resource is public (so that we can serve up without a session)
+                    if resource is not None and resource.exists and \
+                            resource.is_public and \
+                            not resource.render_jinja_template and \
+                            not resource.on_before and not resource.on_after:
+                        # note:  resource.data will usually be str but might be bytes
+                        log(None, 'CachedGET', 'Serving up cached resource', resource_code)
+                        buf = resource.data
+
                     else:
-                        # we have a session, but are not necessarily logged in
-                        self.session.log('GET', 'Have session', self.session.session_key)
-                        self.session.log('GET', 'Received request for: {}'.format(self.request.path))
+                        # Retrieve or create a session.  We want everyone to have a session (even if they are not authenticated)
+                        # We need to use the session's SQL connection to retrieve the resource
 
-                        self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+                        log(None, 'GET', '*******************************')
+                        log(None, 'GET', args[0])
 
-                        # SOS Should have 404?  Take logged-in users back to where they were
-                        if not resource_code and self.session.logged_in:
-                            resource = self.session.current_resource
+                        if self.session is None:
+                            log(None, 'GET Error', 'No session.  Cannot continue to process request.')
+                            self.write('<html><body>Error: cannot process request without a valid session</body></html>')
+                        else:
+                            # we have a session, but are not necessarily logged in
+                            self.session.log('GET', 'Have session', self.session.session_key)
+                            self.session.log('GET', 'Received request for: {}'.format(self.request.path))
 
-                        if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
-                            # resource_code was not provided and user is not logged in:  use default resource
-                            # If the user is logged in, we want get_resource to select the appropriate
-                            # resource for the user.
-                            resource_code = DEFAULT_RESOURCE_CODE
+                            self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
-                        if resource is None or not resource.exists:
-                            # Call get_resources again, this time with a session
-                            resource = await G_cached_resources.get_resource(resource_code, self.session)
+                            # SOS Should have 404?  Take logged-in users back to where they were
+                            if not resource_code and self.session.logged_in:
+                                resource = self.session.current_resource
 
-                            #handle invalid resource when logged in
-                            if resource_code and resource is None or (resource and not resource.exists):
-                                # If the user is logged in, but resource_code is not specified, we explicitly set get_default_resource
-                                # so that the stored proc can look up the correct resource for us.
-                                # This change was made 9/21/2017 to correct a problem that led to 404 errors resulting in serving
-                                # up the default resource.
-                                self.session.log('Get Resource', 'Logged in?', self.session.logged_in)
-                                self.session.log('Get Resource', 'resource_code', resource_code if resource_code is not None else 'None')
-                                resource = await G_cached_resources.get_resource(resource_code, self.session,
-                                                                           get_default_resource=self.session.logged_in)
+                            if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
+                                # resource_code was not provided and user is not logged in:  use default resource
+                                # If the user is logged in, we want get_resource to select the appropriate
+                                # resource for the user.
+                                resource_code = DEFAULT_RESOURCE_CODE
 
-                        if resource is not None and resource.exists and\
-                                resource.render_jinja_template:
-                            # We may have retrieved a cached resource.  Set current_resource.
-                            if resource.resource_code != LOGIN_RESOURCE_CODE:
-                                self.session.current_resource = resource
+                            if resource is None or not resource.exists:
 
-                        if resource is not None and resource.exists:
-                            if resource.on_before:
-                                this_function = getattr(TheasCustom, resource.on_before)
-                                if this_function:
-                                    handled = this_function(self, args, kwargs)
+                                if self.session.conn is None:
+                                    # Unusual / possible SQL connectivity problem led to a no connection.
+                                    # Retry creation of a connection.
+                                    self.session.conn = await G_conns.get_conn(conn_name=self.session.session_key)
 
-                            if resource.requires_authentication and not self.session.logged_in:
+                                if self.session.conn is not None:
+                                    # Call get_resources again, this time with a session
+                                    resource = await G_cached_resources.get_resource(resource_code, self.session)
 
-                                if not self.session.logged_in:
-                                    # still not logged in:  present login screen
-                                    self.session.bookmark_url = resource.resource_code
-                                    # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
+                                    #handle invalid resource when logged in
+                                    if resource_code and resource is None or (resource and not resource.exists):
+                                        # If the user is logged in, but resource_code is not specified, we explicitly set get_default_resource
+                                        # so that the stored proc can look up the correct resource for us.
+                                        # This change was made 9/21/2017 to correct a problem that led to 404 errors resulting in serving
+                                        # up the default resource.
+                                        self.session.log('Get Resource', 'Logged in?', self.session.logged_in)
+                                        self.session.log('Get Resource', 'resource_code', resource_code if resource_code is not None else 'None')
+                                        resource = await G_cached_resources.get_resource(resource_code, self.session,
+                                                                                   get_default_resource=self.session.logged_in)
+
+                            if resource is not None and resource.exists and\
+                                    resource.render_jinja_template:
+                                # We may have retrieved a cached resource.  Set current_resource.
+                                if resource.resource_code != LOGIN_RESOURCE_CODE:
                                     self.session.current_resource = resource
 
-                                    # NOTE:  this needs further thought.
-                                    # Sometimes it is nice to send the login screen in response to a request
-                                    # for an auth-required resource if the user is not logged in.
-                                    # Other times, we might prefer to send a 404 error, or to navigate
-                                    # to index, etc. (consider <img src="xxx">, <audio>, etc.)
-                                    #buf = await self.session.build_login_screen()
-                                    redirect_to = self.session.get_login_url()
-                                    log(self.session, 'Response', 'Sending redirect to login screen')
+                            if resource is not None and resource.exists:
+                                if resource.on_before:
+                                    this_function = getattr(TheasCustom, resource.on_before)
+                                    if this_function:
+                                        handled = this_function(self, args, kwargs)
 
-                            if buf is None and (not resource.requires_authentication or self.session.logged_in):
-                                if resource.api_stored_proc or resource.render_jinja_template:
-                                    #buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
+                                if resource.requires_authentication and not self.session.logged_in:
 
-        #                            buf, redirect_to, history_go_back = yield tornado.gen.multi(tornado.ioloop.IOLoop.current().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource)))
+                                    if not self.session.logged_in:
+                                        # still not logged in:  present login screen
+                                        self.session.bookmark_url = resource.resource_code
+                                        # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
+                                        self.session.current_resource = resource
 
-        #                            buf, redirect_to, history_go_back = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource))
-                                    buf, redirect_to, history_go_back = await self.do_render_response(this_resource=resource)
+                                        # NOTE:  this needs further thought.
+                                        # Sometimes it is nice to send the login screen in response to a request
+                                        # for an auth-required resource if the user is not logged in.
+                                        # Other times, we might prefer to send a 404 error, or to navigate
+                                        # to index, etc. (consider <img src="xxx">, <audio>, etc.)
+                                        #buf = await self.session.build_login_screen()
+                                        redirect_to = self.session.get_login_url()
+                                        log(self.session, 'Response', 'Sending redirect to login screen')
 
-                                else:
-                                    # note:  resource.data will usually be str but might be bytes
-                                    buf = resource.data
+                                if buf is None and (not resource.requires_authentication or self.session.logged_in):
+                                    if resource.api_stored_proc or resource.render_jinja_template:
+                                        #buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
 
-                            if resource.on_after:
-                                this_function = getattr(TheasCustom, resource.on_after)
-                                if this_function:
-                                    handled = this_function(self, args, kwargs)
+            #                            buf, redirect_to, history_go_back = yield tornado.gen.multi(tornado.ioloop.IOLoop.current().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource)))
 
-            if not handled:
-                if redirect_to is not None:
-                    if self.cookies_changed:
-                        # must perform a client-side redirect in order to set cookies
-                        self.write(self.session.clientside_redir(redirect_to))
-                        handled = True
-                    else:
-                        # can send a normal redirect, since no cookies need to be written
-                        self.redirect(redirect_to)
-                        handled = True
+            #                            buf, redirect_to, history_go_back = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource))
+                                        buf, redirect_to, history_go_back = await self.do_render_response(this_resource=resource)
 
-                elif history_go_back:
-                    pass
+                                    else:
+                                        # note:  resource.data will usually be str but might be bytes
+                                        buf = resource.data
+
+                                if resource.on_after:
+                                    this_function = getattr(TheasCustom, resource.on_after)
+                                    if this_function:
+                                        handled = this_function(self, args, kwargs)
 
                 if not handled:
-                    if buf is None:
-                        log(self.session, 'Response',
-                            'Sending 404 error in response to HTTP GET request for {}'.format(resource_code))
-
-                        self.send_error(status_code=404)
-                        handled = True
-                    else:
-                        log(self.session, 'Response', 'Sending response to HTTP GET request for {}'.format(resource_code))
-
-                        self.write(buf)
-
-                        # CORS
-                        self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-                        self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
-
-                        if resource is not None and resource.is_public:
-                            self.set_header('Cache-Control', ' max-age=900')  # let browser cache for 15 minutes
+                    if redirect_to is not None:
+                        if self.cookies_changed:
+                            # must perform a client-side redirect in order to set cookies
+                            self.write(self.session.clientside_redir(redirect_to))
+                            handled = True
                         else:
-                            self.set_header('Cache-Control', 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0')
-                            self.add_header('Cache-Control', 'Cache-Control: post-check=0, pre-check=0')
-                            self.add_header('Cache-Control', 'Pragma: no-cache')
+                            # can send a normal redirect, since no cookies need to be written
+                            self.redirect(redirect_to)
+                            handled = True
 
-                        if self.filename is not None:
-                            self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(self.filename))
-                            self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
+                    elif history_go_back:
+                        pass
 
-                        elif resource is not None:
-                            if resource.filename:
-                                if resource.filetype:
-                                    self.set_header('Content-Type', resource.filetype)
-                                else:
-                                    self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.filename))
-                            self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
+                    if not handled:
+                        if buf is None:
+                            log(self.session, 'Response',
+                                'Sending 404 error in response to HTTP GET request for {}'.format(resource_code))
+
+                            self.send_error(status_code=404)
+
+                            handled = True
                         else:
-                            self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(resource.resource_code))
+                            log(self.session, 'Response',
+                                'Sending response to HTTP GET request for {}'.format(resource_code))
+
+                            self.write(buf)
+
+                            # CORS
+                            self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                            self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
+                            if resource is not None and resource.is_public:
+                                self.set_header('Cache-Control', ' max-age=900')  # let browser cache for 15 minutes
+                            else:
+                                self.set_header('Cache-Control',
+                                                'Cache-Control: no-store, no-cache, must-revalidate, max-age=0')
+                                self.add_header('Cache-Control', 'Cache-Control: post-check=0, pre-check=0')
+                                self.add_header('Cache-Control', 'Pragma: no-cache')
+
+                            if self.filename is not None:
+                                self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(self.filename))
+                                self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
+
+                            elif resource is not None:
+                                if resource.filename:
+                                    if resource.filetype:
+                                        self.set_header('Content-Type', resource.filetype)
+                                    else:
+                                        self.set_header('Content-Type',
+                                                        thcore.Theas.mimetype_for_extension(resource.filename))
+                                self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
+                            else:
+                                self.set_header('Content-Type',
+                                                thcore.Theas.mimetype_for_extension(resource.resource_code))
+
+                if self.session and self.session.locked:
+                    self.session.comments = None
+                    await self.session.finished()
+
+                    self.session.log('Request',
+                                     'At end, Current Resource is {}'.format(
+                                         self.session.current_resource.resource_code
+                                         if self.session.current_resource
+                                         else 'Not Assigned!'
+                                     ))
+
+                if not handled and not self._finished:
+                    try:
+                        await self.finish()
+                    except:
+                        pass
 
 
-            if self.session and self.session.locked:
-                self.session.comments = None
-                await self.session.finished()
-
-                self.session.log('Request',
-                                 'At end, Current Resource is {}'.format(
-                                     self.session.current_resource.resource_code
-                                     if self.session.current_resource
-                                     else 'Not Assigned!'
-                                 ))
-
-            if not handled and not self._finished:
-                try:
-                    await self.finish()
-                except:
-                    pass
-
+            finally:
+                # make sure we unlock the session, even if an error occurred.
+                if obtained_lock:
+                    if self.session.locked_by == self.handler_guid:
+                        self.session.log('Request', 'FAILSAFE unlock of session for', self.handler_guid)
+                        await self.session.finished()
 
 # -------------------------------------------------
 # ThHandler_Attach attachment handler
@@ -2979,6 +3016,14 @@ class ThHandler_PurgeCache(ThHandler):
         message = message + ' Items remaining in cache: ' + str(G_cached_resources.len())
 
         log(None, 'Cache', message)
+
+        #todo: make sure the following code is thread-safe
+        try:
+            await G_cached_resources.load_global_resources()
+        except Exception as e:
+            msg = 'Theas app: error global cached resources when calling G_cached_resources.load_global_resources() in PurgeCache.get(): {}'.format(
+                e)
+            log(None, 'Cache', msg)
 
         self.write('<html><body>' + message + '</body></html>')
         await self.finish()

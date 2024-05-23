@@ -183,26 +183,35 @@ class ConnectionPool:
         if self.sql_settings is None:
             raise TheasServerSQLError('Error: must provide sql_settings)')
 
-        # try:
-        conn = Conn(
-            sql_conn = _mssql.connect(
-                server=self.sql_settings.server,
-                port=self.sql_settings.port,
-                user=self.sql_settings.user,
-                password=self.sql_settings.password,
-                database=self.sql_settings.database,
-                appname=self.sql_settings.appname
+        conn = None
+        try:
+            conn = Conn(
+                sql_conn = _mssql.connect(
+                    server=self.sql_settings.server,
+                    port=self.sql_settings.port,
+                    user=self.sql_settings.user,
+                    password=self.sql_settings.password,
+                    database=self.sql_settings.database,
+                    appname=self.sql_settings.appname
+                )
             )
-        )
-        conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
+            conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
 
-        if conn_name:
-            conn.name = conn_name   # note:  conn.name may not work as expected
+            if conn_name:
+                conn.name = conn_name   # note:  conn.name may not work as expected
 
-        log(None, 'SQL', 'created_conn() Created new SQL connection name:', conn.name, 'id:', conn.id)
+            log(None, 'SQL', 'created_conn() Created new SQL connection name:', conn.name, 'id:', conn.id)
 
-        if not skip_init:
-            await self.init_conn(conn)
+            if not skip_init:
+                await self.init_conn(conn)
+
+        except Exception as e:
+            if conn is not None:
+                conn.last_error = repr(e)
+            log(None, 'Session', 'Unexpected exception in call_auth_storedproc(). ', str(e))
+
+            #msg = th_session.error_message = 'Could not access SQL database server. ' + str(
+            #        e) + '|Sorry, the server is not available right now|1|Cannot Continue'
 
         return conn
 
@@ -219,13 +228,14 @@ class ConnectionPool:
 
             conn = await self.new_conn(skip_init=skip_init, conn_name=conn_name)
 
-        conn.name = conn_name
+        if conn is not None:
+            conn.name = conn_name
 
-        with self.lock:
-            if use_now:
-                self.conns_inuse.append(conn)
-            else:
-                self.conns.append(conn)
+            with self.lock:
+                if use_now:
+                    self.conns_inuse.append(conn)
+                else:
+                    self.conns.append(conn)
 
         return conn
 
@@ -243,8 +253,9 @@ class ConnectionPool:
             #conn = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
 
             conn = await self.add_conn(skip_init=skip_init, conn_name=conn_name)
-            log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
-                '. Remaining in pool: ', len(self.conns))
+            if conn is not None:
+                log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
+                    '. Remaining in pool: ', len(self.conns))
 
         return conn
 

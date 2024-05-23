@@ -319,6 +319,8 @@ class ThCachedResources:
                                 buf = row['JSON_CurResourceRevisions']
 
                                 new_dict = dict((v["ResourceCode"], v) for v in json.loads(buf))
+
+                                # NOTE: this is not thread-safe. We assume that all_static_blocks will be true only when it is safe
                                 ThCachedResources.resource_versions_dict = new_dict
                     proc = None
                     del proc
@@ -382,7 +384,8 @@ class ThCachedResources:
 
             if not from_filename and conn is None:
                 conn = await self.conn_pool.get_conn(conn_name='get_resource()')
-                log(None, 'Resource', 'get_resource obtained connection name:', conn.name, 'id:', conn.id)
+                if conn is not None:
+                    log(None, 'Resource', 'get_resource obtained connection name:', conn.name, 'id:', conn.id)
 
                 created_conn = True
 
@@ -418,6 +421,6 @@ class ThCachedResources:
         return this_resource
 
     async def load_global_resources(self, conn=None):
-        await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
+        #await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
         await self.get_resource(None, None, all_static_blocks=True, conn=conn)
         pass

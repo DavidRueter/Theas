@@ -944,7 +944,7 @@ class Theas():
 
             # But HTTP handles slashes and relative paths differently.
 
-            # When a relative path is received we just parce the request path and strip out the last
+            # When a relative path is received we just parse the request path and strip out the last
             # filename after a slash. (i.e. we treat the path the way HTTP does.
 
             req_path = this_env.current_request.path
@@ -956,7 +956,6 @@ class Theas():
                 # Strip out this tabid because we want to use the one from the session instead.
                 # Should be the same...but still, we want to be careful.
 
-                #bb
                 req_path = '/'.join(req_path.split('/')[2:])
 
             this_path = this_path + req_path + '/'

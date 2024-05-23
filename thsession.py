@@ -386,6 +386,10 @@ class ThSession:
     def locked(self):
         return False if self.__locked_by is None else True
 
+    @property
+    def lockedby(self):
+        return self.__locked_by
+
     def release_lock(self, handler=None):
         if handler.handler_guid != self.__locked_by:
             self.log('Session',
@@ -500,15 +504,22 @@ class ThSession:
                     log(this_sess, 'Session', 'Session lock retry', retry_count)
 
                     try:
-                        await asyncio.sleep(0.1)  # wait .5 seconds between retrries
+                        await asyncio.sleep(0.2)  # wait .5 seconds between retries
                     except asyncio.exceptions.CancelledError as e:
                         log(this_sess, 'Session', 'get_session() asyncio.sleep() cancelled...probably shutting down ', e)
 
             #todo:  we may want to refactor this to defer obtaining a SQL connection until we need it in init_session
             if lock_succeeded:
                 if this_sess.conn is None:
-                    this_sess.conn = await G_conns.get_conn(conn_name=this_sess.session_key)
-                    log(this_sess, 'Session', 'get_session obtained connection name:', this_sess.conn.name, 'id:', this_sess.conn.id)
+                    try:
+                        this_sess.conn = await G_conns.get_conn(conn_name=this_sess.session_key)
+                        if this_sess.conn is not None:
+                            log(this_sess, 'Session', 'get_session obtained connection name:', this_sess.conn.name, 'id:', this_sess.conn.id)
+                        else:
+                            log(this_sess, 'Session', 'get_session could NOT obtain SQL connection')
+
+                    except Exception as e:
+                        log(this_sess, 'Session', 'Error creating SQL connection on call to G_conns.get_conn in get_session:', repr(e))
             else:
                 log(this_sess, 'Session', 'Could not lock session.', this_sess.session_key)
                 failed_to_lock = True
@@ -553,7 +564,10 @@ class ThSession:
                 not self.initialized):
 
             # Establish SQL connection, initialize
-                self.conn = await G_conns.get_conn()
+                try:
+                    self.conn = await G_conns.get_conn()
+                except Exception as e:
+                    log(None, 'Session', 'Error creating SQL connetion on call to G_conns.get_conn in init_session:', repr(e))
 
                 log(None, 'Session', 'init_session obtained connection name:', self.conn.name, 'id:', self.conn.id)
                 self.conn.name = 'initializing'
