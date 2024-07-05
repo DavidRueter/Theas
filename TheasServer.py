@@ -2596,6 +2596,7 @@ request.
 '''
 
 class ThHandler_REST(ThHandler):
+#class ThHandler_REST(tornado.web.RequestHandler):
     def __init__(self, application, request, **kwargs):
         super().__init__(application, request, **kwargs)
 
@@ -2616,6 +2617,8 @@ class ThHandler_REST(ThHandler):
 
             if self.session is None:
                 raise TheasServerError('Session could not be established for REST request.')
+
+           # Note that we are NOT checking XSRF for REST requests if the caller provided ?skipXSRF=1
 
             requesttype_guid_str = None
             requesttype_code = None
@@ -2673,6 +2676,8 @@ class ThHandler_REST(ThHandler):
             # Execute spDoRestRequest in the database
             proc = ThStoredProc(rest_proc_name, self.session)
 
+            if requesttype_code.startswith('rest/'):
+                requesttype_code = requesttype_code[len('rest/'):]
 
             self.session.log('REST', 'REST stored proc is: {}'.format(rest_proc_name))
 
@@ -2878,8 +2883,7 @@ class ThHandler_REST(ThHandler):
 
 
     async def get(self, *args, **kwargs):
-
-        return self.post(*args, **kwargs)
+        await self.post(*args, **kwargs)
 
     def data_received(self, chunk):
         pass

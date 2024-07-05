@@ -210,7 +210,10 @@ class ThCachedResources:
                 # Get SysWebResourcesdata from database
                 proc = ThStoredProc('theas.spgetSysWebResources', None, conn=conn)
                 language = None
-                branch_code = None
+
+                global G_branch_code
+                branch_code = G_branch_code
+
 
                 is_ok = await proc.is_ok()
                 if is_ok:
@@ -225,9 +228,9 @@ class ThCachedResources:
                     if '@Language' in proc.parameter_list:
                         proc.bind(resource_code, _mssql.SQLINT4, '@Language', null=(language is None)) #int
 
-                    global G_branch_code
+
                     if '@BranchCode' in proc.parameter_list:
-                        proc.bind(G_branch_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None)) #varchar(40)
+                        proc.bind(branch_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None)) #varchar(40)
 
                     # if '@GetDefaultResource' in proc.parameter_list:
                     proc.bind(1 if (get_default_resource) else 0, _mssql.SQLCHAR, '@GetDefaultResource')
