@@ -715,7 +715,7 @@ class ThHandler(tornado.web.RequestHandler):
                                 #todo: decide if the above line should be commented out (Has been commented out until
                                 # 2024/05/22 as per the following comments)
 
-                                # the stored proc can set th:ErrorMessage in TheasParams if it wants.
+                                # todo: consider...maybe don't handle @ErrorMessage, as the stored proc can set th:ErrorMessage in TheasParams if it wants.
                                 # If the stored proc returns an ErrorMessage column, we send that as the response
                                 # without updating the Theas`Param at the server
                                 #todo: make sure that error handling is working for both normal and async requests
@@ -739,6 +739,7 @@ class ThHandler(tornado.web.RequestHandler):
                         if 'AsyncResponse' in row:
                             if row['AsyncResponse'] is not None:
                                 buf = buf + row['AsyncResponse']
+
 
                 self.session.log('Handler', '{row_count} rows returned by handler stored proc'.format(
                     row_count=row_count))
@@ -2338,7 +2339,8 @@ class ThHandler_Async(ThHandler):
             this_document = None
             path_params = None
 
-            first_path_elem = self.request_path.split('/')[0]
+            path_split = self.request_path.split('/')
+            first_path_elem = path_split[0]
 
             if first_path_elem == 'async':
                 # this_document = self.request.path.split('/')[2]
@@ -2347,15 +2349,21 @@ class ThHandler_Async(ThHandler):
                 # The rest of the path (after async) is taken to be the resource code.
                 # The resource code may contain /'s
                 # Therefore it is not possible to pass in path params on a request to async
-                this_document = "/".join(self.request_path.split('/')[1:])
+                this_document = "/".join(path_split[1:])
+            elif path_split[-1:][0] == 'async':
+                # The last part of the path is 'async'. Especially when multi-tab support is
+                # in use, there is a good chance that the URL was a relative URL and thus
+                # the preceding  portion contains the "folder" of the resource...but does not
+                # contain the resource code itself. So this is useless information.
+                this_document = None
             else:
                 this_document = self.request_path
 
             cmd = None
-            if self.get_arguments('cmd'):
-                cmd = self.get_argument('cmd')
-            if not cmd and self.get_body_arguments('cmd'):
-                cmd = self.get_body_argument('cmd')
+            if self.get_arguments('command'):
+                cmd = self.get_argument('command')
+            if not cmd and self.get_body_arguments('command'):
+                cmd = self.get_body_argument('command')
 
             self.session = await self.obtain_session()
 
@@ -2368,7 +2376,8 @@ class ThHandler_Async(ThHandler):
                 if self.get_arguments('th'):
                     th_params = self.get_argument('th')
 
-                self.session.theas_page.process_client_request(request_handler=self, buf=th_params, accept_any=False)
+                if th_params:
+                    self.session.theas_page.process_client_request(request_handler=self, buf=th_params, accept_any=False)
 
                 # Resource code is determined by:
                 #   1) Specific resource that pertains to cmd, i.e. resetPassword -> login
@@ -2444,7 +2453,6 @@ class ThHandler_Async(ThHandler):
                         # send ALL Theas controls
                         self.write(self.session.theas_page.serialize())
                         await self.session.finished()
-
 
                 if cmd == 'login':
 
@@ -2720,6 +2728,10 @@ class ThHandler_REST(ThHandler):
                         headers_str = headers_str + '&' + key + '=' + urlparse.quote(this_val)
 
                     proc.bind(headers_str, _mssql.SQLCHAR, '@HTTPHeaders')
+
+                if '@Body' in proc.parameter_list:
+                    #proc.bind(self.request.body, _mssql.SQLCHAR, '@Body')
+                    proc.bind(self.request.body, _mssql.SQLVARBINARY,'@Body')
 
                 if '@Cookies' in proc.parameter_list:
                     proc.bind(cookies_str, _mssql.SQLCHAR, '@Cookies')

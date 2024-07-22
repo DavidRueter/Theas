@@ -627,8 +627,12 @@ class ThStoredProc:
 
                     # Replace each single quote with two single quotes.  If param value is None
                     # output NULL (with no quotes)
-                    this_params_str += '\'' + str(item['value']).replace('\'', '\'\'') + '\'' \
-                        if item['value'] is not None else 'NULL'
+                    if isinstance(item['value'], bytes):
+                        this_params_str += '0x' + str(item['value'].hex()) \
+                            if item['value'] is not None else 'NULL'
+                    else:
+                        this_params_str += '\'' + str(item['value']).replace('\'', '\'\'') + '\'' \
+                            if item['value'] is not None else 'NULL'
 
                     this_params_str += ','
 
