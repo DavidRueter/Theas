@@ -139,7 +139,7 @@ class ThSessions:
         with self.lock:
             expireds = {}
 
-            log(None, 'ExpiredSess', 'Checking for expired sessions.' 'Total sessions at start:', len(self.__sessions))
+            log(None, 'ExpiredSess', 'Checking for expired sessions.' ' Total sessions at start:', len(self.__sessions))
 
             for session_key in self.__sessions:
                 this_session = self.__sessions[session_key]
@@ -235,7 +235,7 @@ class ThSession:
      a new session and for retrieving a session from the global ThSessions object.
 
      ThSession.get_session() currently tries to retrieve a session from the global ThSessions object.  In
-     he future it might make sense to move this retrieval to a method of ThSessions()
+     the future it might make sense to move this retrieval to a method of ThSessions()
     """
 
     def __init__(self, handler=None, tab_id=None):
@@ -373,6 +373,7 @@ class ThSession:
                 self.log('Resource', 'Current_resource changed to: {}  Was: {}'.format(value.resource_code,
                                                                                        self.__current_resource.resource_code if self.__current_resource else 'not set'))
                 self.__current_resource = value
+
     @property
     def error_message(self):
         return self.__error_message
@@ -508,18 +509,11 @@ class ThSession:
                     except asyncio.exceptions.CancelledError as e:
                         log(this_sess, 'Session', 'get_session() asyncio.sleep() cancelled...probably shutting down ', e)
 
-            #todo:  we may want to refactor this to defer obtaining a SQL connection until we need it in init_session
+            #todo:  we may want to refactor this to defer obtaining a SQL connection until we need it
             if lock_succeeded:
                 if this_sess.conn is None:
-                    try:
-                        this_sess.conn = await G_conns.get_conn(conn_name=this_sess.session_key)
-                        if this_sess.conn is not None:
-                            log(this_sess, 'Session', 'get_session obtained connection name:', this_sess.conn.name, 'id:', this_sess.conn.id)
-                        else:
-                            log(this_sess, 'Session', 'get_session could NOT obtain SQL connection')
+                    await this_sess.init_session()
 
-                    except Exception as e:
-                        log(this_sess, 'Session', 'Error creating SQL connection on call to G_conns.get_conn in get_session:', repr(e))
             else:
                 log(this_sess, 'Session', 'Could not lock session.', this_sess.session_key)
                 failed_to_lock = True
@@ -559,7 +553,7 @@ class ThSession:
                 (self.conn is not None and self.conn.sql_conn is not None and not self.conn.connected):
             self.initialized = False
 
-        if (self.conn  is None or\
+        if (self.conn is None or\
                 self.conn.sql_conn is None or\
                 not self.initialized):
 
@@ -567,7 +561,7 @@ class ThSession:
                 try:
                     self.conn = await G_conns.get_conn()
                 except Exception as e:
-                    log(None, 'Session', 'Error creating SQL connetion on call to G_conns.get_conn in init_session:', repr(e))
+                    log(None, 'Session', 'Error creating SQL connection on call to G_conns.get_conn in init_session:', repr(e))
 
                 log(None, 'Session', 'init_session obtained connection name:', self.conn.name, 'id:', self.conn.id)
                 self.conn.name = 'initializing'
@@ -577,8 +571,8 @@ class ThSession:
 
                 if self.conn is not None:
                     # Note:  we have created a new user session, but the user still needs to be authenticated
-                       # make sure session has been initialized (to handle uploaded files, etc.)
-
+                    # make sure session has been initialized (to handle uploaded files, etc.)
+                    '''
                     if _LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in:
                         self.log('Auth', 'Authenticating as AUTO user (i.e. public)')
                         try:
@@ -591,6 +585,7 @@ class ThSession:
                             self.log('Auth',
                                      'Error: Authentication as AUTO user (i.e. public) FAILED.  Is your config file wrong?')
                             self.log('Auth', 'Bad AUTO user token: {}'.format(_LOGIN_AUTO_USER_TOKEN))
+                    '''
 
                     self.initialized = True
 
@@ -721,10 +716,13 @@ class ThSession:
 
         self.log('Session', 'Attempting authentication')
 
+        if not self.conn or not self.conn.connected:
+           await self.init_session()
+
         # The session keeps a copy of the user_name for convenience / to access in templates
         self.username = None
 
-        resultset = await call_auth_storedproc(th_session=self, conn=conn,
+        resultset = await call_auth_storedproc(th_session=self, conn=self.conn,
                                                username=username, password=password,
                                                user_token=user_token, retrieve_existing=retrieve_existing
                                                )

@@ -1182,8 +1182,15 @@ class ThHandler(tornado.web.RequestHandler):
                             if theas_params_str:
                                 # Incorporate any Theas control changes from SQL, so these values can be used
                                 # when rendering the template.
-                                self.session.theas_page.process_client_request(buf=theas_params_str, accept_any=True,
+                                changed_controls = self.session.theas_page.process_client_request(buf=theas_params_str, accept_any=True,
                                                                                from_stored_proc=True)
+                                if len(changed_controls) > 0:  #hanged_controlnd('th:LoggedIn=') >= 0:
+                                    login_control = [ctrl for ctrl in changed_controls if ctrl.name == 'th:LoggedIn']
+                                    if len(login_control) == 1:
+                                        if login_control[0].value == '1':
+                                            # Stored procedure is indicating authentication status changed.  Retrieve
+                                            # current session info.
+                                            perform_authenticate_existing = True
 
                                 if theas_params_str.find('th:LoggedIn=') >= 0:
                                     # Stored procedure is indicating authentication status changed.  Retrieve
@@ -1506,24 +1513,30 @@ class ThHandler(tornado.web.RequestHandler):
                                       'Updating cookie {} obtain_session() gave different token ({} vs {})'.format(
                                           self.session_cookie_name, orig_cookie_session_token, this_sess.session_token))
 
-            # silently re-authenticate if needed and there is a user cookie
-            if not this_sess.logged_in and REMEMBER_USER_TOKEN:
-                # try to auto-login if there is a user cookie
-                if self.cookie_usertoken:
+            this_usertoken = this_sess.user_token
+
+            if not this_usertoken:
+                this_usertoken = self.cookie_usertoken
+
+
+            # silently re-authenticate if needed and there is a user token
+            if not this_sess.logged_in: # and REMEMBER_USER_TOKEN:
+                # try to auto-login if there is a user token
+                if this_usertoken:
                     log(None, 'Sessions', 'Reauthenticating user from usertoken cookie')
                     try:
                         await this_sess.authenticate(user_token=self.cookie_usertoken)
                     finally:
                         if not this_sess.logged_in:
                             log(None, 'Sessions', 'FAILED to reauthenticate user from usertoken cookie')
+                            this_sess.user_token = None
                             self.cookie_usertoken = None
                             log(None, 'Cookies',
-                                              'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
-                                                  USER_COOKIE_NAME))
+                                    'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
+                                    USER_COOKIE_NAME))
 
         else:
             log(None, 'Sessions', 'Failed to obtain session in obtain_session()')
-
 
         return this_sess
 
@@ -1772,6 +1785,13 @@ class ThHandler(tornado.web.RequestHandler):
             if resource_code is not None and len(resource_code.strip()) == 0:
                 resource_code = None
 
+            if not resource_code:
+                if not self.session or (self.session and not self.session.logged_in):
+                    resource_code = DEFAULT_RESOURCE_CODE
+                elif self.session and self.session.logged_in:
+                    resource_code = '~'
+
+
             log(None, 'GET', f'**Starting get for {resource_code} (Handler:{self.handler_guid})')
             # note: self.session is probably not yet assigned
 
@@ -1801,6 +1821,7 @@ class ThHandler(tornado.web.RequestHandler):
                 global USE_MULTI_TABS
                 global MULTI_TAB_PREFIX
 
+
                 if USE_MULTI_TABS and (not self.received_tabid_url) and (thcore.Theas.mimetype_for_extension(resource_code) == 'text/html'):
                     self.write_cookies()
                     # mangle URL if needed
@@ -1812,12 +1833,14 @@ class ThHandler(tornado.web.RequestHandler):
                     # A request for a cached public resource does not need a database connection.
                     # We can serve up such requests without even checking the session.
                     # If we do not check the session, multiple simultaneous requests can be processed,
-                    if resource_code or self.session:
+
+
+                    if resource_code:
                         resource = await G_cached_resources.get_resource(resource_code, self.session)
 
                     # see if the resource is public (so that we can serve up without a session)
                     if resource is not None and resource.exists and \
-                            resource.is_public and \
+                            (resource.is_public or (self.session and self.session.logged_in)) and \
                             not resource.render_jinja_template and \
                             not resource.on_before and not resource.on_after:
                         # note:  resource.data will usually be str but might be bytes
@@ -1893,14 +1916,17 @@ class ThHandler(tornado.web.RequestHandler):
                                         # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
                                         self.session.current_resource = resource
 
-                                        # NOTE:  this needs further thought.
-                                        # Sometimes it is nice to send the login screen in response to a request
-                                        # for an auth-required resource if the user is not logged in.
-                                        # Other times, we might prefer to send a 404 error, or to navigate
-                                        # to index, etc. (consider <img src="xxx">, <audio>, etc.)
-                                        #buf = await self.session.build_login_screen()
-                                        redirect_to = self.session.get_login_url()
-                                        log(self.session, 'Response', 'Sending redirect to login screen')
+                                        await self.session.authenticate()
+
+                                        if not self.session.logged_in:
+                                            # NOTE:  this needs further thought.
+                                            # Sometimes it is nice to send the login screen in response to a request
+                                            # for an auth-required resource if the user is not logged in.
+                                            # Other times, we might prefer to send a 404 error, or to navigate
+                                            # to index, etc. (consider <img src="xxx">, <audio>, etc.)
+                                            #buf = await self.session.build_login_screen()
+                                            redirect_to = self.session.get_login_url()
+                                            log(self.session, 'Response', 'Sending redirect to login screen')
 
                                 if buf is None and (not resource.requires_authentication or self.session.logged_in):
                                     if resource.api_stored_proc or resource.render_jinja_template:
@@ -1922,6 +1948,10 @@ class ThHandler(tornado.web.RequestHandler):
 
                 if not handled:
                     if redirect_to is not None:
+                        self.redirect(redirect_to)
+                        handled = True
+
+                        '''
                         if self.cookies_changed:
                             # must perform a client-side redirect in order to set cookies
                             self.write(self.session.clientside_redir(redirect_to))
@@ -1930,6 +1960,7 @@ class ThHandler(tornado.web.RequestHandler):
                             # can send a normal redirect, since no cookies need to be written
                             self.redirect(redirect_to)
                             handled = True
+                        '''
 
                     elif history_go_back:
                         pass
@@ -2433,9 +2464,6 @@ class ThHandler_Async(ThHandler):
                     else:
                         self.write('invalidSession')
 
-                    if self.session is not None:
-                        await self.session.finished()
-
                 if cmd == 'clearError':
                     if self.session is not None and\
                             self.session.theas_page is not None and\
@@ -2444,15 +2472,14 @@ class ThHandler_Async(ThHandler):
                         #self.session.theas_page.set_value('th:ErrorMessage', '')
                         self.session.error_message = ''
 
-                    self.write('clearError')
+                    self.write('result=OK (clearError)&')
+                    self.write(self.session.theas_page.serialize())
 
-                    await self.session.finished()
 
                 if cmd == 'theasParams':
                     if self.session is not None:
                         # send ALL Theas controls
                         self.write(self.session.theas_page.serialize())
-                        await self.session.finished()
 
                 if cmd == 'login':
 
@@ -2488,8 +2515,6 @@ class ThHandler_Async(ThHandler):
 
                     self.write(buf)
 
-                    await self.finish()
-
                 else:
                     async_proc_name = None
 
@@ -2515,6 +2540,15 @@ class ThHandler_Async(ThHandler):
                             if async_proc_name:
                                 buf, changed_controls, redirect_to = await self.exec_stored_proc(async_proc_name, cmd=cmd, path_params=path_params)
 
+                                if len(changed_controls) > 0:  #hanged_controlnd('th:LoggedIn=') >= 0:
+                                    login_control = [ctrl for ctrl in changed_controls if ctrl.name == 'th:LoggedIn']
+                                    if len(login_control) == 1:
+                                        if login_control[0].value == '1':
+                                            # Stored procedure is indicating authentication status changed.  Retrieve
+                                            # current session info.
+                                            self.session.log('Auth', 'Authenticating due to resource stored proc th:LoggedIn')
+                                            await self.session.authenticate(retrieve_existing=True)
+
                         except TheasServerError as e:
                             # e = sys.exc_info()[0]
                             err_msg = e.value if hasattr(e, 'value') else e
@@ -2534,6 +2568,12 @@ class ThHandler_Async(ThHandler):
                             self.session.log('Async',
                                              'ERROR when executing stored proc {}: {}'.format(
                                                  async_proc_name, err_msg))
+
+                    else:
+                        # no session was available (i.e. timed out waiting for a session lock, etc.)
+
+                        self.write('theas:th:ErrorMessage:No session was available when processing the async request.')
+
 
                     if redirect_to:
                         if self.session is not None and self.session.locked:
@@ -2572,12 +2612,16 @@ class ThHandler_Async(ThHandler):
                         self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
                         self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
 
-                        if self.session and self.session.locked:
-                            await self.session.finished()
 
-                        self.session = None
 
-                        await self.finish()
+            else:
+                self.write('Could not obtain a session')
+
+            if self.session and self.session.locked:
+                await self.session.finished()
+                self.session = None
+
+            await self.finish()
 
     async def get(self, *args, **kwargs):
         await self.post(*args, **kwargs)
@@ -3324,6 +3368,11 @@ def get_program_settings():
     SQL_PORT = G_program_options.sql_port
     SERVER_PORT = G_program_options.port
     BRANCH_CODE = G_program_options.branch_code
+
+    if LOGGING_LEVEL:
+        msg = f"BRANCH_CODE={G_program_options.branch_code}"
+        write_winlog(msg)
+        print(msg)
 
 async def get_ready(run_as_svc=False):
 

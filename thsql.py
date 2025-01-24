@@ -64,8 +64,12 @@ class SQLSettings:
         self.login_auto_user_token = login_auto_user_token
         self.logging_level = logging_level
 
-
         _mssql.set_max_connections(max_conns)
+
+
+def sql_msg_handler(msgstate: int, severity: int, srvname: str,
+                    procname: str, line: int, msgtext: str):
+    log(None, 'SQL', '***Message from server: {}'.format(msgtext))
 
 class Conn():
     def __init__(self, sql_conn):
@@ -145,8 +149,9 @@ class ConnectionPool:
     # Some of them need to access resources in the pool connection list.
     # For these reasons they are methods of ConnectionPool instead of methods of Conn
     async def reset_conn(self, conn):
-        proc = ThStoredProc('theas.spactLogout', None, conn=conn)
+        proc = ThStoredProc('theas.spactResetConnection', None, conn=conn)
         exec_ok = await proc.execute()
+
         conn.name = "idle"
         conn.is_user_authed = False
         conn.is_public_authed = False
@@ -199,6 +204,8 @@ class ConnectionPool:
 
             if conn_name:
                 conn.name = conn_name   # note:  conn.name may not work as expected
+
+            conn.sql_conn.set_msghandler(sql_msg_handler)
 
             log(None, 'SQL', 'created_conn() Created new SQL connection name:', conn.name, 'id:', conn.id)
 

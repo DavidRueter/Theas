@@ -225,8 +225,9 @@ class ThCachedResources:
                     proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
                     proc.bind(str(int(all_static_blocks)), _mssql.SQLCHAR, '@AllStaticBlocks')
 
-                    if '@Language' in proc.parameter_list:
-                        proc.bind(resource_code, _mssql.SQLINT4, '@Language', null=(language is None)) #int
+
+                    #if '@Language' in proc.parameter_list:
+                    #    proc.bind(language, _mssql.SQLINT4, '@Language', null=(language is None)) #int
 
 
                     if '@BranchCode' in proc.parameter_list:
@@ -390,7 +391,7 @@ class ThCachedResources:
                 if conn is not None:
                     log(None, 'Resource', 'get_resource obtained connection name:', conn.name, 'id:', conn.id)
 
-                created_conn = True
+                    created_conn = True
 
             this_resource = None
             try:
@@ -404,7 +405,7 @@ class ThCachedResources:
                 this_resource = None
 
 
-            if created_conn and conn is not None:
+            if created_conn and conn is not None and (not th_session or  not th_session.logged_in):
                 #conn.close()
                 await self.conn_pool.release_conn(conn)
                 conn = None
