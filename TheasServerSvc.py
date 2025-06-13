@@ -126,7 +126,7 @@ def write_winlog(*args, is_error: bool=False):
 
     if len(args) >= 2:
         fnc(G_service_name + ': ' + args[1])
-    else:
+    elif len(args) >=1:
         fnc(G_service_name + ': ' + args[0])
 
     #servicemanager.LogMsg(
@@ -335,7 +335,12 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
 
     def GetAcceptedControls(self):
         result = win32serviceutil.ServiceFramework.GetAcceptedControls(self)
-        result |= win32service.SERVICE_ACCEPT_PRESHUTDOWN
+
+        try:
+            result |= win32service.SERVICE_ACCEPT_PRESHUTDOWN
+        except AttributeError:
+            write_winlog("SERVICE_ACCEPT_PRESHUTDOWN not supported on this OS, continuing...")
+
         return result
 
     def SvcDoRun(self):
@@ -412,8 +417,11 @@ def service_poll():
 
 def service_send_stop():
     global G_current_service
-    if G_current_service is not None and G_current_service.hWaitStop is not None:
-        write_winlog('Shutting Down: In TheasServerSvc.service_send_stop()')
+
+    if G_current_service is None or G_current_service.hWaitStop is None:
+        write_winlog("Service was already stopped when service_send_stop() was called.")
+    else:
+        write_winlog("Shutting Down: In TheasServerSvc.service_send_stop()")
         win32event.SetEvent(G_current_service.hWaitStop)
 
 

@@ -513,7 +513,8 @@ class ThHandler(tornado.web.RequestHandler):
         must be configured to accept SkipXSRF as well.)
         """
 
-        if self.get_argument('skipXSRF', default='0') == '1':
+        if (self.get_argument('skipXSRF', default='0') == '1' or # not ideal, but needed to support 3rd-party form posts
+                self.request.path.startswith('/rest/')): # do not enforce XSRF on /rest/ requests
             self.deferred_xsrf = True
 
             # since we are skipping XSRF validation we can't trust the session cookie
@@ -3567,7 +3568,8 @@ def make_app():
 
 async def each_period():
 
-    thbase.G_service_poll()
+    if thbase.G_service_poll is not None:
+        thbase.G_service_poll()
     # Note: to stop the service, we can do: thbase.G_service_send_stop()
 
     global G_sessions
