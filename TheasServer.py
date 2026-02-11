@@ -17,6 +17,7 @@ import tornado.options
 
 from pymssql import _mssql
 
+
 import thbase
 import thcore
 from thsession import *
@@ -25,6 +26,8 @@ from thresource import *
 
 
 import TheasCustom
+
+import thsqlhelp
 
 __author__ = 'DavidRueter'
 """
@@ -2776,7 +2779,14 @@ class ThHandler_REST(ThHandler):
 
                 if '@Body' in proc.parameter_list:
                     #proc.bind(self.request.body, _mssql.SQLCHAR, '@Body')
-                    proc.bind(self.request.body, _mssql.SQLVARBINARY,'@Body')
+                    thisBodyHex, thisBodyType, thisBodyMeta = thsqlhelp.body_to_sql_hex(self.request.body, self.request.headers)
+                    proc.bind(thisBodyHex, _mssql.SQLVARBINARY,'@Body')
+
+                    if '@BodyType' in proc.parameter_list:
+                      proc.bind(thisBodyType, _mssql.SQLCHAR, '@BodyType')
+
+                    if '@BodyMetaJSON' in proc.parameter_list:
+                      proc.bind(json.dumps(thisBodyMeta, ensure_ascii=False, separators=(',', ':')), _mssql.SQLCHAR, '@BodyMetaJSON')
 
                 if '@Cookies' in proc.parameter_list:
                     proc.bind(cookies_str, _mssql.SQLCHAR, '@Cookies')

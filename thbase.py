@@ -42,6 +42,7 @@ def get_program_directory():
         program_directory += os.sep
 
     return program_directory, program_filename
+
 def format_error(e):
     err_msg = ''
     err_msg_dblib = ''
@@ -109,6 +110,7 @@ def format_error(e):
     err_msg = '{}|{}|{}|{}'.format(err_msg_tech, err_msg_friendly, err_msg_showtech, err_msg_title)
 
     return err_msg
+
 def log(th_session, category, *args, severity=10000):
     if th_session is not None:
         th_session.log(category, *args, severity=severity)
@@ -137,9 +139,11 @@ G_all_done = None
 def set_service_poll(service_poll):
     global G_service_poll
     G_service_poll = service_poll
+
 def set_service_send_stop(service_send_stop):
     global G_service_send_stop
     G_service_send_stop = service_send_stop
+
 def set_all_done(all_done):
     global G_all_done
     G_all_done = all_done
@@ -283,8 +287,6 @@ class TheasServerRunner():
         else:
             fnc(args[0])
 
-
-
 G_server = None
 
 def theas_server():
@@ -309,7 +311,6 @@ def collect_garbage():
     # lists are cleared whenever a full collection or collection of the highest generation (2) is run
     gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
     return gc.collect()
-
 
 def memory_report():
     all_objects = muppy.get_objects()

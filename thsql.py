@@ -1,9 +1,12 @@
+import thsqlhelp
 from thbase import *
 from threading import RLock
 from pymssql import _mssql
 import asyncio
 import concurrent.futures
 import uuid
+
+import thsqlhelp
 
 
 '''thsql.py is part of Theas.  This module declares the class ThStoredProc, as well as ConnectionPool and SQLSettings.
@@ -215,7 +218,7 @@ class ConnectionPool:
         except Exception as e:
             if conn is not None:
                 conn.last_error = repr(e)
-            log(None, 'Session', 'Unexpected exception in call_auth_storedproc(). ', str(e))
+            log(None, 'Session', 'Could not connect to the SQL database: ', str(e))
 
             #msg = th_session.error_message = 'Could not access SQL database server. ' + str(
             #        e) + '|Sorry, the server is not available right now|1|Cannot Continue'
@@ -544,6 +547,8 @@ class ThStoredProc:
                     this_param_info['is_output'] = row['is_output']
                     this_param_info['value'] = None
                     this_param_info['is_null'] = True
+                    this_param_info['datatype'] = row['TypeName']
+                    this_param_info['literal_prefix'] = row['LiteralPrefix']
 
                     self.parameter_list[row['ParameterName']] = this_param_info
                     # self.parameter_list.append(row['ParameterName'])
@@ -631,15 +636,54 @@ class ThStoredProc:
                     # Strip out single quotes from parameter name.  (Shouldn't be any, but we don't
                     # want someone to try to use this as a SQL injection vector.)
                     this_params_str += ' ' + name.replace('\'', '') + '='
+                    
+                    this_value = item['value']
 
-                    # Replace each single quote with two single quotes.  If param value is None
-                    # output NULL (with no quotes)
-                    if isinstance(item['value'], bytes):
-                        this_params_str += '0x' + str(item['value'].hex()) \
-                            if item['value'] is not None else 'NULL'
+                    if this_value is None:
+                        this_params_str += 'NULL'
+
+                    elif item['datatype'] == 'varbinary':
+                        if isinstance(this_value, str):
+                            if this_value.startswith('0x'):
+                                # already a SQL binary literal
+                                this_params_str += this_value
+                            else:
+                                # Note that this conversion is a fallback and does not consider
+                                # character encoding. to_utf16le_bytes will default to treating this_value
+                                # as UTF-8
+
+                                # It is best if this_value already contains a hex string lteral that has been
+                                # created with the propper character encoding.
+                                # 
+                                # For example, In the case of @Body the caller should have already used
+                                # thsqlhelp.body_to_sql_hex()to build a hex string literal that reflects 
+                                # binary data normalized to UTF_16LE...so that the stored procedure can safely 
+                                # treat the data as nvarchar(MAX)
+                                
+                                this_params_str += '0x' + thsqlhelp.to_utf16le_bytes(this_value)
+                        else:
+                            this_params_str += '0x' + thsqlhelp.to_utf16le_bytes(this_value)
+                                
+
+                    elif item['datatype'] in ['char', 'nchar', 'varchar', 'nvarchar', 'sysname', 'text', 'ntext']:
+                        if isinstance(this_value, bytes):
+                            # this is a stop-gap fallback, where we are guessing the caller did something like:
+                            # roc.bind(thsqlhelp.to_utf16le_bytes(thisBodyMeta), _mssql.SQLCHAR, '@BodyMetaJSON')
+                            this_value = this_value.decode('utf-16le')
+
+                        # remove embedded quotes and then enclose the value in quotes
+                        this_params_str += item['literal_prefix'] + thsqlhelp.quotestr(this_value)
+                        
+                    elif item['datatype'] in ['date', 'time', 'datetime2','datetime', 'smalldatetime']:
+                        this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_literal(this_value, item.datatype))
+                                                                    
+                    elif item['datatype'] == 'datetimeoffset':
+                        this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_datetimeoffset_literal(this_value))
+                        
                     else:
-                        this_params_str += '\'' + str(item['value']).replace('\'', '\'\'') + '\'' \
-                            if item['value'] is not None else 'NULL'
+                        # this is a simplistic fallback that assumes that Python's stringify will
+                        # output a string that is t
+                        this_params_str += str(this_value)
 
                     this_params_str += ','
 
@@ -687,6 +731,30 @@ class ThStoredProc:
 
         if value is None:
             null = True
+        elif dbtype == _mssql.SQLVARBINARY:
+            # value may be either bytes or string. If a string, we assume that it is
+            # a hex string literal suitable for passing to SQL.
+            # If bytes, the bytes will be converted to a string literal when
+            # the procedure is executed.
+
+            # For textual data it is the responsibility of the caller to handle
+            # proper character encoding according to the desired charset.
+
+            # For example, see thresphep.py to see how request.body is normalized
+            # to UTF-16LE to pass to a SQL nvarchar(MAX) when body contains
+            # textual data.
+
+            #value = value
+            pass
+
+            # note: we will store whatever we are given, and handle appropriately
+            # on execute
+
+            #if isinstance(value, str):
+            #    pass
+            #else:
+            #    value = bytes(value, 'utf-8')
+
         elif dbtype in (_mssql.SQLCHAR, _mssql.SQLVARCHAR, _mssql.SQLUUID):
             value = str(value)
 

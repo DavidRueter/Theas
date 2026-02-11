@@ -254,6 +254,8 @@ class ThCachedResources:
                             elif not all_static_blocks and buf and '$thInclude_' in buf:
                                 # Perform replacement of includes.  Template may include string like:
                                 # $thInclude_MyResourceCode
+                                # Note that if the ResourceCode contains a / it MUST be replaced by ___ (triple underscore)
+                                # dut to requirements of safe_substitute()
                                 # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
                                 try:
                                     tmp = string.Template(buf)
@@ -302,8 +304,10 @@ class ThCachedResources:
                                 self.add_resource(row['ResourceCode'], this_resource)
 
                             if all_static_blocks:
-                                this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
-                                this_static_blocks_dict['thInclude_' + row['ResourceCode']] = buf
+                                #this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
+                                this_static_blocks_dict['thInclude_' + row['ResourceCode'].replace('/', '___')] = buf
+                                # note: the dict will be used in safe_substitute, so key must not include '/'
+                                # so we replace '/' with '___'
 
                     if 1 == 0 and resource_code and not resource_code  in ('~', '/', '')  and row_count == 0:
                         # do negative cache
