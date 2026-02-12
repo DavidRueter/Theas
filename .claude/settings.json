@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./**/settings*.cfg)",
+      "Read(./**/Settings*.cfg)",
+      "Read(./**/SETTINGS*.cfg)",
+      "Read(./**/settings*.xml)",
+      "Read(./**/Settings*.xml)",
+      "Read(./**/SETTINGS*.xml)"
+    ]
+  }
+}
