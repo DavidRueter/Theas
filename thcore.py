@@ -125,8 +125,10 @@ from time import strptime, strftime
 import datetime
 
 #from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
-from jinja2 import Undefined, pass_environment #environmentfilter  # , Markup, escape, Template,
+from jinja2 import BaseLoader, TemplateNotFound, Undefined, pass_environment #environmentfilter  # , Markup, escape, Template,
 from jinja2.environment import Environment
+
+from thresource import G_cached_resources
 
 ALLOW_UNSAFE_FUNCTIONS = False
 _i = 1
@@ -139,6 +141,37 @@ def format_str_if(this_str, fmt_str):
         this_str = this_str
         buf = fmt_str.format(this_str)
     return buf
+
+
+# -----Jinja2 template loader for database-cached resources-----
+class DatabaseLoader(BaseLoader):
+    """Jinja2 template loader that retrieves templates from the global resource cache.
+
+    Enables {% include %}, {% extends %}, and {% from "xxx" import yyy %} in Jinja2
+    templates by resolving template names to resource_codes in G_cached_resources.
+    """
+
+    def get_source(self, environment, template_name):
+        # Local import: G_cached_resources is None at module load time and is
+        # set later via config_thresource(), so we re-import here to get the
+        # current value.
+        from thresource import G_cached_resources
+
+        if G_cached_resources is None:
+            raise TemplateNotFound(template_name)
+
+        resource = G_cached_resources.get_cached(template_name)
+
+        if resource is None or resource.data is None:
+            raise TemplateNotFound(template_name)
+
+        source = resource.data
+        filename = f"db://{template_name}"
+
+        def uptodate():
+            return True
+
+        return source, filename, uptodate
 
 
 # -----Jinja2 undefined variable class-----
@@ -237,7 +270,7 @@ class Theas():
         # if not isinstance(jinja_environment, Environment):
         if True:
             # set up new jinja environment
-            self.jinja_env = Environment()
+            self.jinja_env = Environment(loader=DatabaseLoader())
 
             self.jinja_env.theas_page = self
             self.jinja_env.current_request = None

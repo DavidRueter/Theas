@@ -137,6 +137,11 @@ class ThCachedResources:
     def len(self):
         return len(self.__resources)
 
+    def get_cached(self, resource_code):
+        """Synchronously retrieve a resource from the cache, or None if not cached."""
+        with self.lock:
+            return self.__resources.get(resource_code)
+
     def add_resource(self, resource_code, resource_dict):
 
         if resource_dict.data is None or\
