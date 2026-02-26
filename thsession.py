@@ -139,35 +139,41 @@ class ThSessions:
         with self.lock:
             expireds = {}
 
-            log(None, 'ExpiredSess', 'Checking for expired sessions.' ' Total sessions at start:', len(self.__sessions))
+            log(None, 'ExpiredSess', 'Checking for expired sessions.', 'Total sessions at start:', len(self.__sessions))
 
-            for session_key in self.__sessions:
+            # Identify expired sessions (snapshot keys to avoid modifying dict during iteration)
+            for session_key in list(self.__sessions):
                 this_session = self.__sessions[session_key]
                 if (
                     remove_all or
                     this_session is None or
                     this_session.date_expire is None or
-                    this_session.date_expire < datetime.datetime.now() or
+                    this_session.date_expire < datetime.datetime.now() # or
+                    #(
+                    #    _SQL_TIMEOUT > 0 and
+                    #    this_session.date_sql_timeout is not None and
+                    #    this_session.date_sql_timeout < datetime.datetime.now()
+                    #)
+                ):
+                    expireds[session_key] = this_session
 
-                        (
-                        _SQL_TIMEOUT > 0 and
-                        this_session.date_sql_timeout is not None and
-                        this_session.date_sql_timeout < datetime.datetime.now()
-                        )
-                            ):
-                        expireds[session_key] = this_session
-
+            # Remove expired sessions from __sessions
             for session_key in expireds:
-                this_session = expireds[session_key]
-                this_session.conn = None
-                self.__sessions[session_key] = None
                 del self.__sessions[session_key]
-                if this_session is not None:
+
+            log(None, 'ExpiredSess', 'Done with expired sessions.', 'Total sessions at end:', len(self.__sessions))
+
+        # Cleanup outside the lock (no other code can reach these sessions)
+        for session_key in expireds:
+            this_session = expireds[session_key]
+            if this_session is not None:
+                if this_session.locked:
+                    log(this_session, 'ExpiredSess', 'Session is locked, re-adding:', session_key)
+                    with self.lock:
+                        self.__sessions[session_key] = this_session
+                else:
                     del this_session
-
-            del expireds
-
-            log(None, 'ExpiredSess', 'Done with expired sessions.' 'Total sessions at end:', len(self.__sessions))
+        expireds.clear()
 
 
     #@staticmethod
@@ -547,7 +553,13 @@ class ThSession:
         global G_sessions
 
         if force_init:
-            self.conn = None
+            if self.conn is not None:
+                this_conn = self.conn
+                self.conn = None
+
+                global G_conns
+                G_conns.release_conn_sync(this_conn)
+
 
         if force_init or self.conn is None or\
                 (self.conn is not None and self.conn.sql_conn is not None and not self.conn.connected):

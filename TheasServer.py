@@ -51,7 +51,6 @@ THEAS_VERSION = '0.90.1.255'  # from version.cfg
 THEAS_VERSION_INT = '255'
 
 SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
-REMOVE_EXPIRED_THREAD_SLEEP = 60  # Seconds to sleep in between polls in background thread to check for expired sessions, 0 to disable
 LOGGING_LEVEL = 1  # Enable all logging.  0 to disable all, other value to specify threshold.
 LOGIN_RESOURCE_CODE = 'login'
 LOGIN_AUTO_USER_TOKEN = None
@@ -366,37 +365,39 @@ class ThHandler(tornado.web.RequestHandler):
         conn = await G_conns.get_conn(conn_name='get_response_info()')
         log(None, 'ThHandler', 'get_response_info obtained connection name:', conn.name, 'id:', conn.id)
 
-        proc = ThStoredProc('theas.spgetResponseInfo', None, conn=conn)
-
         response_info = ThResponseInfo()
 
-        if await proc.is_ok():
-            proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
+        try:
+            proc = ThStoredProc('theas.spgetResponseInfo', None, conn=conn)
 
-            await proc.execute()
+            if await proc.is_ok():
+                proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
 
-            row_count = 0
+                await proc.execute()
 
-            self.set_header('Server', 'theas')
+                row_count = 0
 
-            th_session = None
+                self.set_header('Server', 'theas')
 
-            if proc.resultset is not None:
-                for row in proc.resultset:
-                    # note:  should only be one row
-                    row_count += 1
-                    response_info.current_date = row['CurrentDate']
-                    response_info.date_updated = row['DateUpdated']
-                    response_info.content_length = row['ContentLength']
-                    response_info.cache_control = row['CacheControl']
-                    response_info.content_type = row['ContentType']
-                    response_info.content_filename = row['ContentFilename']
-                    response_info.content_expires = row['ContentExpires']
-                    response_info.etag = row['Etag']
+                th_session = None
 
-            proc = None
-            del proc
+                if proc.resultset is not None:
+                    for row in proc.resultset:
+                        # note:  should only be one row
+                        row_count += 1
+                        response_info.current_date = row['CurrentDate']
+                        response_info.date_updated = row['DateUpdated']
+                        response_info.content_length = row['ContentLength']
+                        response_info.cache_control = row['CacheControl']
+                        response_info.content_type = row['ContentType']
+                        response_info.content_filename = row['ContentFilename']
+                        response_info.content_expires = row['ContentExpires']
+                        response_info.etag = row['Etag']
 
+                proc = None
+                del proc
+
+        finally:
             G_conns.release_conn(conn)
 
         return response_info
@@ -1804,10 +1805,7 @@ class ThHandler(tornado.web.RequestHandler):
             else:
                 log(None, 'SessionRetrieve', 'At start session is:', self.session.session_key)
 
-            try:
-                self.session = await self.obtain_session()
-            except:
-                self.session = None
+            self.session = await self.obtain_session()
 
             obtained_lock = False
 
@@ -3135,7 +3133,7 @@ def get_program_settings():
 
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
-    global REMOVE_EXPIRED_THREAD_SLEEP
+
     global LOGIN_RESOURCE_CODE
     global LOGIN_AUTO_USER_TOKEN
     global REMEMBER_USER_TOKEN
@@ -3229,10 +3227,6 @@ def get_program_settings():
     G_program_options.define("session_max_idle_minutes",
                              default=SESSION_MAX_IDLE,
                              help="Maximum idle time (in minutes) that user sessions will remain active", type=int)
-
-    G_program_options.define("session_expired_poll_seconds",
-                             default=REMOVE_EXPIRED_THREAD_SLEEP,
-                             help="Time (in seconds) between polls to check for expired sessions", type=int)
 
     G_program_options.define("logging_level",
                              default=LOGGING_LEVEL,
@@ -3358,7 +3352,7 @@ def get_program_settings():
     # want to update the value of the global constants based on what has been configured.
 
     SESSION_MAX_IDLE = G_program_options.session_max_idle_minutes
-    REMOVE_EXPIRED_THREAD_SLEEP = G_program_options.session_expired_poll_seconds
+
     LOGGING_LEVEL = int(G_program_options.logging_level)
     LOGIN_RESOURCE_CODE = G_program_options.login_resource_code
     LOGIN_AUTO_USER_TOKEN = G_program_options.login_auto_user_token
@@ -3397,7 +3391,7 @@ async def get_ready(run_as_svc=False):
 
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
-    global REMOVE_EXPIRED_THREAD_SLEEP
+
     global LOGIN_RESOURCE_CODE
     global LOGIN_AUTO_USER_TOKEN
     global REMEMBER_USER_TOKEN
