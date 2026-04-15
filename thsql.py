@@ -8,6 +8,8 @@ import uuid
 
 import thsqlhelp
 
+import re
+_RE_STRIP_QUOTED_IDENTIFIERS = re.compile(r'\[[^\]]*\]|"[^"]*"')
 
 '''thsql.py is part of Theas.  This module declares the class ThStoredProc, as well as ConnectionPool and SQLSettings.
 A helper function for convenience named call_auth_storedproc() is also defined.
@@ -52,7 +54,8 @@ class SQLSettings:
                  database='somedatabase', appname='someapp', max_conns=10, sql_timeout=120,
                  full_ok_checks=True, http_server_prefix='https://someserver.com',
                  login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
-                 logging_level=_LOGGING_LEVEL
+                 logging_level=_LOGGING_LEVEL,
+                 default_schema = 'theas'
                 ):
         self.server = server
         self.port = port
@@ -66,6 +69,7 @@ class SQLSettings:
         self.http_server_prefix = http_server_prefix
         self.login_auto_user_token = login_auto_user_token
         self.logging_level = logging_level
+        self.default_schema = default_schema
 
         _mssql.set_max_connections(max_conns)
 
@@ -75,13 +79,14 @@ def sql_msg_handler(msgstate: int, severity: int, srvname: str,
     log(None, 'SQL', '***Message from server: {}'.format(msgtext))
 
 class Conn():
-    def __init__(self, sql_conn):
+    def __init__(self, sql_conn, sql_settings):
         self.sql_conn = sql_conn #pymssql._mssql.MSSQLConnection
         self.name = "new"
         self.id = str(uuid.uuid4())
         self.is_public_authed = False
         self.is_user_authed = False
         self.last_error = None
+        self.sql_settings = sql_settings
 
 
     def __del___(self):
@@ -193,15 +198,18 @@ class ConnectionPool:
 
         conn = None
         try:
-            conn = Conn(
-                sql_conn = _mssql.connect(
+            this_sql_conn = sql_conn = _mssql.connect(
                     server=self.sql_settings.server,
-                    port=self.sql_settings.port,
+                    port=str(self.sql_settings.port),
                     user=self.sql_settings.user,
                     password=self.sql_settings.password,
                     database=self.sql_settings.database,
                     appname=self.sql_settings.appname
                 )
+
+            conn = Conn(
+                this_sql_conn,
+                sql_settings=self.sql_settings
             )
             conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
 
@@ -454,13 +462,27 @@ class ThStoredProc:
         self.resultsets = []
         self.full_ok_checks = True
 
-        self.stored_proc_name = this_stored_proc_name
-
         # Use provided session.
         self.th_session = this_th_session
         if self.conn is None and self.have_session:
             if self.th_session.conn is not None:
                 self.conn = this_th_session.conn
+
+        default_schema = 'theas'
+
+        # use default schema from sql_settings if applicable
+        if self.conn is not None and self.conn.sql_settings is not None:
+            if self.conn.sql_settings.default_schema:
+                default_schema = self.conn.sql_settings.default_schema
+
+        # if the stored proc name does not specify a schema, prepend '{schema}.'
+        if '.' not in _RE_STRIP_QUOTED_IDENTIFIERS.sub('', this_stored_proc_name):
+            this_stored_proc_name = '{schema}.' + this_stored_proc_name
+        elif default_schema != 'theas':
+            # treat literal theas. as a placeholder
+            this_stored_proc_name = this_stored_proc_name.replace('theas.', '{schema}.', 1)
+
+        self.stored_proc_name = this_stored_proc_name.format(schema=default_schema)
 
         # Note: Sessions have lazy-created conn:  when a session is created, the conn may not exist.
         # Subsequently, we check for (and establish if necessary) a connection in is_ok()
@@ -644,25 +666,22 @@ class ThStoredProc:
 
                     elif item['datatype'] == 'varbinary':
                         if isinstance(this_value, str):
-                            if this_value.startswith('0x'):
+                            if this_value.upper() == 'NULL':
+                                # body_to_sql_hex() returns the string "NULL" for empty
+                                # bodies.  Emit the SQL NULL keyword directly.
+                                this_params_str += 'NULL'
+                            elif this_value.startswith('0x'):
                                 # already a SQL binary literal
                                 this_params_str += this_value
                             else:
-                                # Note that this conversion is a fallback and does not consider
-                                # character encoding. to_utf16le_bytes will default to treating this_value
-                                # as UTF-8
-
-                                # It is best if this_value already contains a hex string lteral that has been
-                                # created with the propper character encoding.
-                                # 
-                                # For example, In the case of @Body the caller should have already used
-                                # thsqlhelp.body_to_sql_hex()to build a hex string literal that reflects 
-                                # binary data normalized to UTF_16LE...so that the stored procedure can safely 
-                                # treat the data as nvarchar(MAX)
-                                
-                                this_params_str += '0x' + thsqlhelp.to_utf16le_bytes(this_value)
+                                # Fallback: caller provided a plain string that is not
+                                # a hex literal.  Encode to UTF-16LE bytes and emit as
+                                # a hex literal so the SP can CAST(@Body AS nvarchar).
+                                # to_utf16le_bytes() returns bytes; .hex() gives str.
+                                this_params_str += '0x' + thsqlhelp.to_utf16le_bytes(this_value).hex().upper()
                         else:
-                            this_params_str += '0x' + thsqlhelp.to_utf16le_bytes(this_value)
+                            # this_value is bytes/bytearray — emit raw hex
+                            this_params_str += '0x' + bytes(this_value).hex().upper()
                                 
 
                     elif item['datatype'] in ['char', 'nchar', 'varchar', 'nvarchar', 'sysname', 'text', 'ntext']:

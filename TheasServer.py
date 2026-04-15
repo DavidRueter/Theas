@@ -59,6 +59,7 @@ DEFAULT_RESOURCE_CODE = None
 FULL_SQL_IS_OK_CHECK = False
 SQL_TIMEOUT = 60
 SQL_PORT = 1433
+SQL_DEFAULT_SCHEMA = 'theas'
 
 USE_WORKER_THREADS = False
 MAX_WORKERS = 30
@@ -2705,24 +2706,56 @@ class ThHandler_REST(ThHandler):
             # serialize form parameters (excluding theas: parameters) to pass into the stored procedure
             form_params = self.request.body_arguments
 
-            # We want to serialize form data
+            # We want to serialize form data.
+            #
+            # Character-decoding notes:
+            #   - Tornado returns body_arguments values as raw bytes from the wire.
+            #   - Tornado returns body_arguments keys as str, decoded as Latin-1 from
+            #     the raw URL-encoded bytes. To recover the intended UTF-8 key, we
+            #     re-encode Latin-1 and decode UTF-8.
+            #   - We preserve ALL values for repeated fields (a=1&a=2), not just [0].
+            #   - Decoded values are percent-encoded so the resulting form_params_str
+            #     is pure ASCII and safe for the SQL parser. The parameter is bound
+            #     as SQLNVARCHAR to a now-nvarchar(MAX) @FormParams column.
             form_params_str = ''
             for key in form_params:
-                this_val = form_params[key]
+                # Recover UTF-8 key from Tornado's Latin-1 decode
+                try:
+                    key_str = key.encode('latin-1').decode('utf-8')
+                except (UnicodeError, AttributeError):
+                    key_str = str(key)
 
-                if isinstance(this_val, list) and len(this_val) > 0:
-                    this_val = this_val[0]
+                values = form_params[key]
+                if not isinstance(values, list):
+                    values = [values]
 
-                if isinstance(this_val, bytes):
-                    this_val = this_val.decode('utf-8')
-                elif this_val:
-                    this_val = str(this_val)
+                for v in values:
+                    if isinstance(v, (bytes, bytearray)):
+                        try:
+                            v_str = bytes(v).decode('utf-8')
+                        except UnicodeDecodeError:
+                            # Don't blow up on a single bad byte; mark with replacement
+                            v_str = bytes(v).decode('utf-8', errors='replace')
+                    elif v is None:
+                        v_str = ''
+                    else:
+                        v_str = str(v)
 
-                form_params_str = form_params_str + key + '=' + urlparse.quote(this_val) + '&'
+                    form_params_str += urlparse.quote(key_str) + '=' + urlparse.quote(v_str) + '&'
 
             cookies_str = ''
             for key in self.cookies.keys():
-                cookies_str += key + '=' + urlparse.quote(self.cookies.get(key).value) + '&'
+                cval = self.cookies.get(key).value
+                if cval is None:
+                    cval = ''
+                # http.cookies decodes octets as Latin-1; attempt to repair to UTF-8
+                # so non-ASCII cookie values round-trip correctly. If the value was
+                # genuinely Latin-1 (or already a proper str), leave it alone.
+                try:
+                    cval = cval.encode('latin-1').decode('utf-8')
+                except (UnicodeError, AttributeError):
+                    pass
+                cookies_str += key + '=' + urlparse.quote(cval) + '&'
 
             # serialize theas parameters to pass into the stored procedure
             theas_params_str = self.session.theas_page.serialize()
@@ -2747,28 +2780,36 @@ class ThHandler_REST(ThHandler):
                 if '@RequestTypeCode' in proc.parameter_list:
                     proc.bind(requesttype_code, _mssql.SQLCHAR, '@RequestTypeCode', null=(requesttype_code is None))
 
+                # Note on SQLCHAR vs nvarchar: pymssql has no SQLNVARCHAR constant.
+                # ThStoredProc.bind() uses the dbtype only to coerce the value to str().
+                # The actual SQL literal type (N'...' vs '...') is determined by the
+                # literal_prefix from sputilGetParamNames, which reflects the SP
+                # parameter's declared type. So when the SP parameters are widened to
+                # nvarchar(MAX), the N' prefix is automatic — no Python change needed.
                 if '@HTTPParams' in proc.parameter_list:
                     proc.bind(self.request.query, _mssql.SQLCHAR, '@HTTPParams')
 
                 if '@FormParams' in proc.parameter_list:
                     proc.bind(form_params_str, _mssql.SQLCHAR, '@FormParams')
-                    # proc.bind(urlparse.urlencode(self.request.body_arguments, doseq=True), _mssql.SQLCHAR, '@FormParams')
 
                 if '@TheasParams' in proc.parameter_list:
                     proc.bind(theas_params_str, _mssql.SQLCHAR, '@TheasParams')
 
+                # @HTTPHeaders: HTTP headers are ASCII per RFC 7230 in modern usage.
+                # Tornado's HTTPHeaders has already produced str values. We keep the
+                # historical &key=value framing (the SP parses that) and use get_all()
+                # to preserve repeated headers (e.g. Set-Cookie).
                 if '@HTTPHeaders' in proc.parameter_list:
                     headers_str = ''
-                    this_dict = dict(self.request.headers)
-                    for key in this_dict:
-                        this_val = this_dict[key]
-
-                        if isinstance(this_val, list) and len(this_val) > 0:
-                            this_val = this_val[0]
-
-                        if isinstance(this_val, bytes):
-                            this_val = this_val.decode('utf-8')
-                        elif this_val:
+                    for key, this_val in self.request.headers.get_all():
+                        if isinstance(this_val, (bytes, bytearray)):
+                            try:
+                                this_val = bytes(this_val).decode('utf-8')
+                            except UnicodeDecodeError:
+                                this_val = bytes(this_val).decode('latin-1')
+                        elif this_val is None:
+                            this_val = ''
+                        else:
                             this_val = str(this_val)
 
                         headers_str = headers_str + '&' + key + '=' + urlparse.quote(this_val)
@@ -2918,7 +2959,16 @@ class ThHandler_REST(ThHandler):
                         self.set_header('Content-Length', len(bufbin))
                         self.write(bufbin)
                     elif buf:
-                        self.set_header('Content-Length', len(buf.encode('utf-8')))
+                        # Ensure the client decodes the response as UTF-8. Without an
+                        # explicit charset, browsers may sniff or default to
+                        # ISO-8859-1, displaying multi-byte UTF-8 sequences as mojibake.
+                        existing_ct = self.get_status() and self._headers.get('Content-Type', '')
+                        if not existing_ct:
+                            self.set_header('Content-Type', 'text/html; charset=utf-8')
+                        elif 'charset=' not in existing_ct.lower():
+                            self.set_header('Content-Type', existing_ct + '; charset=utf-8')
+                        # Let Tornado encode and compute Content-Length from the
+                        # actual UTF-8 byte length of the encoded body.
                         self.write(buf)
 
                     # CORS
@@ -3142,6 +3192,7 @@ def get_program_settings():
     global FULL_SQL_IS_OK_CHECK
     global SQL_TIMEOUT
     global SQL_PORT
+    global SQL_DEFAULT_SCHEMA
 
     global FORCE_REDIR_AFTER_POST
 
@@ -3179,6 +3230,7 @@ def get_program_settings():
         print(msg)
     write_winlog(msg)
 
+
     G_program_options = tornado.options.options
 
     G_program_options.define("settings_path",
@@ -3200,6 +3252,10 @@ def get_program_settings():
     G_program_options.define("sql_port",
                              default=SQL_PORT,
                              help="TCP/IP port for your MSSQL server connections", type=int)
+
+    G_program_options.define("sql_default_schema",
+                             default=SQL_DEFAULT_SCHEMA,
+                             help="Default SQL schema to substitute '{schema}' or 'theas.'", type=str)
 
     G_program_options.define("sql_user",
                              help="MSSQL login user name for SQL connections", type=str)
@@ -3232,6 +3288,7 @@ def get_program_settings():
                              default=LOGGING_LEVEL,
                              help="Controls logging.  0 to disable all, 1 to enable all, or threshold to exceed.",
                              type=int)
+
 
     G_program_options.define("login_resource_code",
                              default=LOGIN_RESOURCE_CODE,
@@ -3371,6 +3428,7 @@ def get_program_settings():
     MAX_WORKERS = G_program_options.max_worker_threads
     SQL_TIMEOUT = G_program_options.sql_timeout
     SQL_PORT = G_program_options.sql_port
+    SQL_DEFAULT_SCHEMA = G_program_options.sql_default_schema
     SERVER_PORT = G_program_options.port
     BRANCH_CODE = G_program_options.branch_code
 
@@ -3443,6 +3501,7 @@ async def get_ready(run_as_svc=False):
         SQLSettings(
             server=G_program_options.sql_server,
             port=G_program_options.sql_port,
+            default_schema=G_program_options.sql_default_schema,
             user=G_program_options.sql_user,
             password=G_program_options.sql_password,
             database=G_program_options.sql_database,

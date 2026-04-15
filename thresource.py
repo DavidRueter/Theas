@@ -434,6 +434,9 @@ class ThCachedResources:
         return this_resource
 
     async def load_global_resources(self, conn=None):
+        if conn is None:
+            conn = await self.conn_pool.get_conn(conn_name='load_global_resources()')
+
         #await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
         await self.get_resource(None, None, all_static_blocks=True, conn=conn)
         pass
