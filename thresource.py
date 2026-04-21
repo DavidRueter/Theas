@@ -134,8 +134,9 @@ class ThCachedResources:
     def resource_versions_dict(self, new_dict):
         self.__resource_versions_dict = new_dict
 
-    def len(self):
-        return len(self.__resources)
+    def __len__(self):
+        with self.lock:
+            return len(self.__resources)
 
     def get_cached(self, resource_code):
         """Synchronously retrieve a resource from the cache, or None if not cached."""
@@ -250,69 +251,71 @@ class ThCachedResources:
                     if exec_result and proc.resultset is not None:
                         for row in proc.resultset:
                             row_count += 1
-                            buf = row['ResourceText']
-                            if not buf:
-                                buf = row['ResourceData']
-                                if buf:
-                                    buf = bytes(buf)
 
-                            elif not all_static_blocks and buf and '$thInclude_' in buf:
-                                # Perform replacement of includes.  Template may include string like:
-                                # $thInclude_MyResourceCode
-                                # Note that if the ResourceCode contains a / it MUST be replaced by ___ (triple underscore)
-                                # dut to requirements of safe_substitute()
-                                # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
-                                try:
-                                    tmp = string.Template(buf)
-                                    buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
-                                except Exception as e:
-                                    log(None, 'Resource', 'Error in load_resource() when processing $thInclude_xxx', e)
+                            if 'ResourceCode' in row and row['ResourceCode']:
+                                buf = row['ResourceText']
+                                if not buf:
+                                    buf = row['ResourceData']
+                                    if buf:
+                                        buf = bytes(buf)
 
-                            this_resource = ThResource()
+                                elif not all_static_blocks and buf and '$thInclude_' in buf:
+                                    # Perform replacement of includes.  Template may include string like:
+                                    # $thInclude_MyResourceCode
+                                    # Note that if the ResourceCode contains a / it MUST be replaced by ___ (triple underscore)
+                                    # dut to requirements of safe_substitute()
+                                    # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
+                                    try:
+                                        tmp = string.Template(buf)
+                                        buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
+                                    except Exception as e:
+                                        log(None, 'Resource', 'Error in load_resource() when processing $thInclude_xxx', e)
 
-                            this_resource.resource_code = row['ResourceCode']
-                            this_resource.filename = row['Filename']
-                            if 'Filetype' in row:
-                                this_resource.filetype = row['Filetype']
-                            if 'DateUpdated' in row:
-                                this_resource.date_updated = row['DateUpdated']
-                            this_resource.data = buf
+                                this_resource = ThResource()
 
-                            if row['APIStoredProc']:
-                                this_resource.api_stored_proc = row['APIStoredProc'].split(' ')[0]
-                                this_resource.api_stored_proc_paramstr = row['APIStoredProc'][len(this_resource.api_stored_proc):]
-                                if this_resource.api_stored_proc_paramstr:
-                                    this_resource.api_stored_proc_paramstr  = this_resource.api_stored_proc_paramstr.strip()
+                                this_resource.resource_code = row['ResourceCode']
+                                this_resource.filename = row['Filename']
+                                if 'Filetype' in row:
+                                    this_resource.filetype = row['Filetype']
+                                if 'DateUpdated' in row:
+                                    this_resource.date_updated = row['DateUpdated']
+                                this_resource.data = buf
 
-                            this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
-                            this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
-                            this_resource.is_public = row['IsPublic']
-                            this_resource.is_static = row['IsStaticBlock']
-                            this_resource.requires_authentication = row['RequiresAuthentication']
-                            this_resource.render_jinja_template = row['RenderJinjaTemplate']
-                            this_resource.skip_xsrf = row['SkipXSRF']
+                                if row['APIStoredProc']:
+                                    this_resource.api_stored_proc = row['APIStoredProc'].split(' ')[0]
+                                    this_resource.api_stored_proc_paramstr = row['APIStoredProc'][len(this_resource.api_stored_proc):]
+                                    if this_resource.api_stored_proc_paramstr:
+                                        this_resource.api_stored_proc_paramstr  = this_resource.api_stored_proc_paramstr.strip()
 
-                            if 'OnBefore' in row:
-                                this_resource.on_before = row['OnBefore']
+                                this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
+                                this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
+                                this_resource.is_public = row['IsPublic']
+                                this_resource.is_static = row['IsStaticBlock']
+                                this_resource.requires_authentication = row['RequiresAuthentication']
+                                this_resource.render_jinja_template = row['RenderJinjaTemplate']
+                                this_resource.skip_xsrf = row['SkipXSRF']
 
-                            if 'OnAfter' in row:
-                                this_resource.on_after = row['OnAfter']
+                                if 'OnBefore' in row:
+                                    this_resource.on_before = row['OnBefore']
 
-                            if 'Revision' in row:
-                                this_resource.revision = row['Revision']
+                                if 'OnAfter' in row:
+                                    this_resource.on_after = row['OnAfter']
 
-                            if 'RedirURL' in row:
-                                this_resource.redir_url = row['RedirURL']
+                                if 'Revision' in row:
+                                    this_resource.revision = row['Revision']
 
-                            if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
-                                # added 2/11/2019:  don't want to cache default resource
-                                self.add_resource(row['ResourceCode'], this_resource)
+                                if 'RedirURL' in row:
+                                    this_resource.redir_url = row['RedirURL']
 
-                            if all_static_blocks:
-                                #this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
-                                this_static_blocks_dict['thInclude_' + row['ResourceCode'].replace('/', '___')] = buf
-                                # note: the dict will be used in safe_substitute, so key must not include '/'
-                                # so we replace '/' with '___'
+                                if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
+                                    # added 2/11/2019:  don't want to cache default resource
+                                    self.add_resource(row['ResourceCode'], this_resource)
+
+                                if all_static_blocks:
+                                    #this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
+                                    this_static_blocks_dict['thInclude_' + row['ResourceCode'].replace('/', '___')] = buf
+                                    # note: the dict will be used in safe_substitute, so key must not include '/'
+                                    # so we replace '/' with '___'
 
                     if 1 == 0 and resource_code and not resource_code  in ('~', '/', '')  and row_count == 0:
                         # do negative cache
@@ -331,7 +334,7 @@ class ThCachedResources:
                                 row_count += 1
                                 buf = row['JSON_CurResourceRevisions']
 
-                                new_dict = dict((v["ResourceCode"], v) for v in json.loads(buf))
+                                new_dict = {v["ResourceCode"]: v for v in json.loads(buf) if "ResourceCode" in v}
 
                                 # NOTE: this is not thread-safe. We assume that all_static_blocks will be true only when it is safe
                                 ThCachedResources.resource_versions_dict = new_dict
@@ -409,8 +412,8 @@ class ThCachedResources:
                                                    get_default_resource=get_default_resource,
                                                    from_filename=from_filename,
                                                    conn=conn)
-            except:
-                log(None, 'Resource', 'Exception when calling load_resource()')
+            except Exception as e:
+                log(None, 'Resource', 'Exception when calling load_resource(): ', str(e))
                 this_resource = None
 
 
@@ -439,4 +442,9 @@ class ThCachedResources:
 
         #await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
         await self.get_resource(None, None, all_static_blocks=True, conn=conn)
+
+        if conn is not None:
+            await self.conn_pool.release_conn(conn)
+
+
         pass

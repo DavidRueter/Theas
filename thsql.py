@@ -250,10 +250,9 @@ class ConnectionPool:
             conn.name = conn_name
 
             with self.lock:
+                self.conns.append(conn)
                 if use_now:
                     self.conns_inuse.append(conn)
-                else:
-                    self.conns.append(conn)
 
         return conn
 

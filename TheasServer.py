@@ -14,6 +14,7 @@ import tornado.websocket
 import tornado.ioloop
 import tornado.web
 import tornado.options
+import tornado.escape
 
 from pymssql import _mssql
 
@@ -320,8 +321,9 @@ class ThHandler(tornado.web.RequestHandler):
 
     @tab_id.setter
     def tab_id(self, new_val):
-        self.__tab_id = new_val
-        self.cookies_changed = True
+        if self.__tab_id != new_val:
+            self.__tab_id = new_val
+            self.cookies_changed = True
 
     @property
     def cookie_usertoken(self):
@@ -399,7 +401,7 @@ class ThHandler(tornado.web.RequestHandler):
                 del proc
 
         finally:
-            G_conns.release_conn(conn)
+            await G_conns.release_conn(conn)
 
         return response_info
 
@@ -3035,8 +3037,38 @@ class ThHandler_Stat(tornado.web.RequestHandler):
         self.session = None
 
     async def get(self, *args, **kwargs):
-        buf = 'Hello World.  Status is OK.'
-        self.write('<html><body>{}</body></html>'.format(memory_report()))
+        global G_sessions
+
+        if G_sessions is None:
+            self.write('<html><body>Sessions: 0 (G_sessions not initialized)</body></html>')
+            self.finish()
+            return
+
+        sessions = G_sessions.snapshot(include_details=True)
+
+        columns = [
+            'session_key', 'this_resource_code', 'logged_in', 'username', 'date_started', 'date_expire',
+            'date_request_start', 'date_request_done',
+            'locked', 'lockedby', 'request_count',
+        ]
+
+        rows = []
+        for s in sessions:
+            cells = ''.join(
+                '<td>{}</td>'.format(tornado.escape.xhtml_escape(str(s.get(c, ''))))
+                for c in columns
+            )
+            rows.append('<tr>{}</tr>'.format(cells))
+
+        header = ''.join('<th>{}</th>'.format(c) for c in columns)
+        table = (
+            '<table border="1" cellpadding="4" cellspacing="0">'
+            '<thead><tr>{}</tr></thead><tbody>{}</tbody></table>'
+        ).format(header, ''.join(rows))
+
+        self.write(
+            '<html><body><p>Sessions: {}</p>{}</body></html>'.format(len(sessions), table)
+        )
 
         self.finish()
 
@@ -3132,7 +3164,7 @@ class ThHandler_PurgeCache(ThHandler):
                 else:
                     message = 'Nothing purged.  Resource code "' + resource_code + '" not found.'
 
-        message = message + ' Items remaining in cache: ' + str(G_cached_resources.len())
+        message = message + ' Items remaining in cache: ' + str(len(G_cached_resources))
 
         log(None, 'Cache', message)
 
@@ -3630,31 +3662,41 @@ def make_app():
     )
 
 async def each_period():
+    try:
+        if thbase.G_service_poll is not None:
+            thbase.G_service_poll()
+        # Note: to stop the service, we can do: thbase.G_service_send_stop()
 
-    if thbase.G_service_poll is not None:
-        thbase.G_service_poll()
-    # Note: to stop the service, we can do: thbase.G_service_send_stop()
+        global G_sessions
+        if G_sessions is not None:
+            await G_sessions.remove_expired()
 
-    global G_sessions
-    if G_sessions is not None:
-        await G_sessions.remove_expired()
+        global G_conns
+        if G_conns is not None and len(G_conns.conns_torelease) > 0:
+            await G_conns.process_release_conns()
 
-    global G_conns
-    if G_conns is not None:
-        await G_conns.process_release_conns()
+        #log_memory(print_details=True)
+        #log_memory(obj=G_cached_resources)
+        if G_cached_resources is not None and len(G_cached_resources) > 0:
+            log(None, 'Memory', 'Cached resource count:', '{}'.format(len(G_cached_resources)))
+            # log_memory(print_details=True)
+            log_memory(obj=G_cached_resources)
 
-    #log_memory(print_details=True)
-    log_memory(obj=G_cached_resources)
+        # we can do other things here if we want
+        global G_periodic_proc
+        if G_periodic_proc is not None:
+            try:
+                G_periodic_proc()
+            except Exception as e:
+                log(None, 'each_period', 'Problem while calling G_periodic_proc()', str(e))
 
-    # we can do other things here if we want
-    global G_periodic_proc
-    if G_periodic_proc is not None:
-        G_periodic_proc()
+        global G_periodic_wait
+        if (thbase.theas_server().is_running or thbase.theas_server().is_starting) and not thbase.theas_server().is_stopping:
+            await asyncio.sleep(G_periodic_wait)
+            theas_server().loop.create_task(each_period())
 
-    global G_periodic_wait
-    if (thbase.theas_server().is_running or thbase.theas_server().is_starting) and not thbase.theas_server().is_stopping:
-        await asyncio.sleep(G_periodic_wait)
-        theas_server().loop.create_task(each_period())
+    except Exception as e:
+        log(None, 'each_period', 'Problem while running each_period()', str(e))
 
 async def periodic():
     # run every 5 seconds (or G_periodic_wait seconds)
