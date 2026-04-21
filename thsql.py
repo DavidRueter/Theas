@@ -157,14 +157,44 @@ class ConnectionPool:
     # Some of them need to access resources in the pool connection list.
     # For these reasons they are methods of ConnectionPool instead of methods of Conn
     async def reset_conn(self, conn):
-        proc = ThStoredProc('theas.spactResetConnection', None, conn=conn)
-        exec_ok = await proc.execute()
+        if conn is None:
+            log(None, 'SQL', 'reset_conn: conn is None, nothing to do.')
+            return False
 
-        conn.name = "idle"
-        conn.is_user_authed = False
-        conn.is_public_authed = False
+        if conn.sql_conn is None or not conn.sql_conn.connected:
+            log(None, 'SQL', 'reset_conn: conn not connected, removing from pool.', conn.id)
+            self.kill_conn(conn)
+            return False
 
-        log(None, 'SQL', 'Connection reset.', conn.id)
+        try:
+            # Drain any pending resultsets left behind by a prior failed execute,
+            # otherwise spactResetConnection can fail with "Results pending".
+            try:
+                conn.sql_conn.cancel()
+            except Exception:
+                pass
+
+            proc = ThStoredProc('theas.spactResetConnection', None, conn=conn)
+            exec_ok = await proc.execute()
+
+            if not exec_ok:
+                log(None, 'SQL', 'reset_conn: spactResetConnection failed, killing conn.',
+                    conn.id, conn.last_error)
+                self.kill_conn(conn)
+                return False
+
+            conn.name = "idle"
+            conn.is_user_authed = False
+            conn.is_public_authed = False
+
+            log(None, 'SQL', 'Connection reset.', conn.id)
+            return True
+
+        except Exception as e:
+            log(None, 'SQL', 'reset_conn: exception, killing conn.',
+                getattr(conn, 'id', None), repr(e))
+            self.kill_conn(conn)
+            return False
 
     async def init_conn(self, conn):
         # Initialize theas session:  stored proc returns SQL statements we need to execute
@@ -301,19 +331,23 @@ class ConnectionPool:
                 if this_conn == conn:
                     self.conns_inuse.pop(i)
 
-                    await self.reset_conn(this_conn)
-                    self.conns.append(conn)
-
-                    log(None, 'SQL', 'Returned conn to pool:', conn.id)
+                    if await self.reset_conn(this_conn):
+                        self.conns.append(conn)
+                        log(None, 'SQL', 'Returned conn to pool:', conn.id)
+                    else:
+                        log(None, 'SQL', 'Conn not re-pooled (reset failed or conn dead):', conn.id)
                     break
 
             log(None, 'SQL', 'Avail connection count:', len(self.conns))
     def kill_conn(self, conn):
+        if conn is None:
+            return
+
         with self.lock:
             for i, this_conn in enumerate(self.conns_inuse):
                 if this_conn == conn:
                     self.conns_inuse.pop(i)
-                    if this_conn.sql_conn.connected:
+                    if this_conn.sql_conn is not None and this_conn.sql_conn.connected:
                         this_conn.sql_conn.close()
 
                     del this_conn
