@@ -705,13 +705,12 @@ class ThSession:
             self.release_lock(handler=self.current_handler)
 
     async def finished(self):
-        if self.current_handler:
-            self.current_handler.set_header('X-St', self.session_token) #session token
-            self.current_handler.set_header('X-Tid', self.tab_id) #tab id
+        if (self.current_handler and self.__locked_by and getattr(self.current_handler, 'handler_guid', None) == self.__locked_by):
 
-        if not self.__locked_by:
-            pass
-        else:
+            #self.current_handler.set_header('X-St', self.session_token) #session token
+            #self.current_handler.set_header('X-Tid', self.tab_id) #tab id
+
+            # normal, healthy handler is done using this session.
 
             self.date_request_done = datetime.datetime.now()
 
@@ -738,6 +737,8 @@ class ThSession:
             self.log_current_request = True
             self.current_handler.cookies_changed = False
 
+        # Cleanup, even if this is an unusual call to finish the session (coding error, forced session destroy, etc.)
+        try:
             if not self.logged_in and self.conn is not None:
                 this_conn = self.conn
                 self.conn = None
@@ -745,7 +746,9 @@ class ThSession:
                 global G_conns
                 await G_conns.release_conn(this_conn)
 
-            self.release_lock(handler=self.current_handler)
+        finally:
+            if self.locked:
+                self.release_lock(handler=self.current_handler)
 
     async def authenticate(self, username=None, password=None, user_token=None, retrieve_existing=False, conn=None):
         """

@@ -345,6 +345,7 @@ class ThHandler(tornado.web.RequestHandler):
             log(None, 'Cookies', 'Flag cookies_changed set to {}'.format(new_val))
             self.__cookies_changed = new_val
 
+
     async def get_response_info(self, resource_code, th_session):
         '''
         Determine response length and content type.  Used for HEAD requests.
@@ -1507,8 +1508,12 @@ class ThHandler(tornado.web.RequestHandler):
                                                           tab_id= this_tab_id,
                                                           handler=self,
                                                           comments='ThHandler.obtain_session')
+        if this_sess is None or failed_to_lock:
+            log(None, 'Sessions', 'Failed to obtain session in obtain_session()')
+            return None
 
-        if this_sess:
+        else:
+
             this_sess.current_handler = self
             this_sess.current_xsrf_form_html = self.xsrf_form_html()
 
@@ -1542,9 +1547,6 @@ class ThHandler(tornado.web.RequestHandler):
                             log(None, 'Cookies',
                                     'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
                                     USER_COOKIE_NAME))
-
-        else:
-            log(None, 'Sessions', 'Failed to obtain session in obtain_session()')
 
         return this_sess
 
@@ -1612,17 +1614,23 @@ class ThHandler(tornado.web.RequestHandler):
 
             self.session = await self.obtain_session()
 
-            self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
-            self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+            if self.session is None or not obtained_lock:
+                self.send_error(status_code=500)
+                handled = True
+                return
 
-            this_finished = False
-            handled = False
+            try:
+                self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
+                self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
 
-            buf = None
-            redirect_to = None
-            history_go_back = False
+                this_finished = False
+                handled = False
 
-            if self.session is not None:
+                buf = None
+                redirect_to = None
+                history_go_back = False
+
+
                 # This is a post.  The next page may be specified in a form field theas:th:NextPage.
                 if not self.session.logged_in and self.get_arguments('u') and self.get_arguments('pw'):
                     # The requested page is the login screen
@@ -1722,16 +1730,16 @@ class ThHandler(tornado.web.RequestHandler):
 
                             self.session.log('Response', 'Sending response')
 
-            else:
-                self.write('<html><body>Error: cannot process request without a valid session</body></html>')
 
-            if not handled and not this_finished:
-                if self.session and self.session.locked:
-                    await self.session.finished()
 
-                await self.finish()
+            finally:
+                if not handled and not this_finished:
+                    if self.session and self.session.locked:
+                        await self.session.finished()
 
-            self.session = None
+                    await self.finish()
+
+                self.session = None
 
     async def get(self, *args, **kwargs):
         ##########################################################
@@ -1815,9 +1823,16 @@ class ThHandler(tornado.web.RequestHandler):
             if self.session is None:
                 log(None, 'SessionRetrieve', 'After obtain_session() session is None')
             else:
-                log(None, 'SessionRetrieve', 'After obtain_session() session is:', self.session.session_key)
                 obtained_lock = self.session.locked
+                log(None, 'SessionRetrieve', 'After obtain_session() session is:', self.session.session_key)
 
+
+            if self.session is None or not obtained_lock:
+                self.send_error(status_code=500)
+                handled = True
+                return
+
+            # we have a session and it is locked exclusivly for our use
             try:
 
                 if self.session and (self.tab_id != self.session.tab_id):
@@ -2029,7 +2044,6 @@ class ThHandler(tornado.web.RequestHandler):
                     except:
                         pass
 
-
             finally:
                 # make sure we unlock the session, even if an error occurred.
                 if obtained_lock:
@@ -2076,6 +2090,7 @@ class ThHandler_Attach(ThHandler):
                 await proc.execute()
                 for row in proc.resultset:
                     filename = row['Filename']
+                    filetype = row['Filetype']
                     buf = row['AttachmentData']
                     if 'Filetype' in row:
                         filetype = row['Filetype']
@@ -2085,8 +2100,20 @@ class ThHandler_Attach(ThHandler):
         if buf is not None:
             attachment = {}
             attachment['filename'] = filename
-            attachment['data'] = buf
             attachment['filetype'] = filetype
+
+            if filetype == 'text/plain; charset=UTF-16LE':
+                attachment['data']= buf.decode('utf-16-le').encode('utf-8')
+                attachment['filetype'] = 'text/plain; charset=UTF-8'
+            elif filetype == 'text/plain; charset=windows-1252':
+                attachment['data'] = buf.decode('cp1252').encode('utf-8')
+                attachment['filetype'] = 'text/plain; charset=UTF-8'
+            elif filetype == 'text/plain; charset=UTF-16BE':
+                attachment['data'] = buf.decode('utf-16-be').encode('utf-8')
+                attachment['filetype'] = 'text/plain; charset=UTF-8'
+            else:
+                attachment['data'] = buf
+
             log_memory(obj=buf, label='ThHandler_Attach.retrieve_attachment')
 
         return attachment
@@ -2155,7 +2182,6 @@ class ThHandler_Attach(ThHandler):
 
                 if attachment is not None:
                     self.session.log('Attach', 'Sending attachment response')
-                    self.write(attachment['data'])
                     self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(attachment['filename']))
 
                     if attachment['filetype']:
@@ -2164,6 +2190,8 @@ class ThHandler_Attach(ThHandler):
                         if attachment['filename']:
                             self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(attachment['filename']))
                             self.set_header('Content-Disposition', 'inline; filename=' + attachment['filename'])
+
+                    self.write(attachment['data'])
 
                     await self.finish()
                 else:
@@ -2671,11 +2699,20 @@ class ThHandler_REST(ThHandler):
         try:
             # spin up a new session
             self.session = await self.obtain_session()
+        except e as Exception:
+            self.session = None
 
-            if self.session is None:
-                raise TheasServerError('Session could not be established for REST request.')
 
-           # Note that we are NOT checking XSRF for REST requests if the caller provided ?skipXSRF=1
+        if self.session is None:
+            self.send_error(status_code=500)
+            return
+
+
+        try:
+            # We have self.session and it it locked (for our exclusive use)
+
+
+            # Note that we are NOT checking XSRF for REST requests if the caller provided ?skipXSRF=1
 
             requesttype_guid_str = None
             requesttype_code = None
@@ -2980,20 +3017,30 @@ class ThHandler_REST(ThHandler):
                     await self.finish()
 
                 await self.session.finished()
-                #note:  since sql_conn is None, finished() will destroy the session
+                # note:  since sql_conn is None, finished() will destroy the session
 
                 self.session = None
 
 
 
         except Exception as e:
+            if self.session is not None:
+                await self.session.finished()
+                # note:  since sql_conn is None, finished() will destroy the session
+
+                self.session = None
+
+            self.send_error(status_code=500)
+            return
+
+
             # We would like to catch specific MSSQL exceptions, but these are declared with cdef
             # in _mssql.pyx ... so they are not exported to python.  Should these be declared
             # with cpdef?
 
             err_msg = str(e)
             self.session.log('REST',
-                             'ERROR when executing REST stored proc {}: {}'.format(
+                             'ERROR: Could not process REST request. REST stored proc {}: {}'.format(
                                  rest_proc_name, err_msg))
 
 

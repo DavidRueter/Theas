@@ -5,7 +5,7 @@ cd \Projects\Theas
 python makeversion.py
 
 REM See https://pythonhosted.org/PyInstaller for more options
-pyinstaller TheasServerSvc.py --onefile --icon Theas.ico --version-file versioninfo.cfg
+pyinstaller TheasServerSvc.py --clean --onefile --icon Theas.ico --version-file versioninfo.cfg
 
 REM Try this if PythonService.exe doesn't get included by PyInstaller
 REM pyinstaller TheasServerSvc.py --onefile --icon Theas.ico --version-file versioninfo.cfg --hidden-import=win32serviceutil --hidden-import=win32event --hidden-import=win32service
