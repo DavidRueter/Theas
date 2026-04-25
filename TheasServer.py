@@ -346,23 +346,17 @@ class ThHandler(tornado.web.RequestHandler):
             self.__cookies_changed = new_val
 
 
-    async def get_response_info(self, resource_code, th_session):
+    async def get_response_info(self, resource_code):
         '''
         Determine response length and content type.  Used for HEAD requests.
-        :param resource_code:
-        :param th_session:
-        :param all_static_blocks:
-        :param from_filename:
-        :param is_public:
-        :param is_static:
-        :param get_default_resource:
-        :return:
+
+        Does not use a Theas session: HEAD traffic is dominated by anonymous clients
+        (bots, link-checkers, monitors), and the current scope is limited to public
+        cached resources.  If HEAD is ever extended to private resources, retrieve an
+        existing session from the request cookie rather than minting one here.
+        :param resource_code: resource code identifying the SysWebResource / attachment to look up
+        :return: a ThResponseInfo populated from theas.spgetResponseInfo, or an empty ThResponseInfo if no row was returned
         '''
-
-
-        # load resource from database
-        #if th_session is None:
-        #    th_session = ThSession(None, new_id=True)
 
         # Get stored proc theas.spGetResponseInfo
         global G_conns
@@ -382,8 +376,6 @@ class ThHandler(tornado.web.RequestHandler):
                 row_count = 0
 
                 self.set_header('Server', 'theas')
-
-                th_session = None
 
                 if proc.resultset is not None:
                     for row in proc.resultset:
@@ -1581,11 +1573,9 @@ class ThHandler(tornado.web.RequestHandler):
 
         self.set_header('Server', 'Theas/01')
 
-        th_session = None
-
         # Look up response info.
         # Will not return info for dynamic requests (only static requests for SysWebResource or attachment)
-        response_info = await self.get_response_info(resource_code, th_session)
+        response_info = await self.get_response_info(resource_code)
 
         if response_info is None:
             self.send_error(status_code=405)
@@ -1614,7 +1604,7 @@ class ThHandler(tornado.web.RequestHandler):
 
             self.session = await self.obtain_session()
 
-            if self.session is None or not obtained_lock:
+            if self.session is None:
                 self.send_error(status_code=500)
                 handled = True
                 return
@@ -2699,7 +2689,7 @@ class ThHandler_REST(ThHandler):
         try:
             # spin up a new session
             self.session = await self.obtain_session()
-        except e as Exception:
+        except Exception as e:
             self.session = None
 
 
