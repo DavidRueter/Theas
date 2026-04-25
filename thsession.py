@@ -167,7 +167,6 @@ class ThSessions:
                     this_sess.sql_conn.close()
 
     async def remove_expired(self, remove_all=False):
-        global G_program_options
         with self.lock:
             try:
                 expireds = {}
@@ -400,7 +399,6 @@ class ThSession:
             this_conn = self.conn
             self.conn = None
 
-            global G_conns
             G_conns.release_conn_sync(this_conn)
 
     @property
@@ -526,7 +524,6 @@ class ThSession:
     async def get_session(cls, retrieve_from_db=False, inhibit_create=False,
                     comments=None, session_token=None, handler=None, handler_guid=None, tab_id=None):
 
-        global G_sessions
         # Retrieve or create a session as needed.
         # See if requestor provided a session token (in cookie, URI, or form field).  If so, look up in global
         # list of sessions.  If no session token or session is not in list, create a new session.
@@ -607,15 +604,12 @@ class ThSession:
                 ), *args)
 
     async def init_session(self, force_init=False):
-        global G_program_options
-        global G_sessions
 
         if force_init:
             if self.conn is not None:
                 this_conn = self.conn
                 self.conn = None
 
-                global G_conns
                 G_conns.release_conn_sync(this_conn)
 
 
@@ -699,7 +693,6 @@ class ThSession:
                 this_conn = self.conn
                 self.conn = None
 
-                global G_conns
                 G_conns.release_conn_sync(this_conn)
 
             self.release_lock(handler=self.current_handler)
@@ -743,7 +736,6 @@ class ThSession:
                 this_conn = self.conn
                 self.conn = None
 
-                global G_conns
                 await G_conns.release_conn(this_conn)
 
         finally:
@@ -965,7 +957,6 @@ class ThSession:
         self.log('Timing', 'SQL Done.  Duration: {:.2f}ms'.format(elapsed))
 
     async def build_login_screen(self):
-        global G_cached_resources
 
         self.log('Response', 'Building login screen')
 

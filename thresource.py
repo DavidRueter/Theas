@@ -2,9 +2,10 @@ from threading import RLock
 import json
 from pymssql import _mssql
 
-from thbase import log, log_memory
+from thbase import log, log_memory, TheasServerError, theas_server
+
 from thsql import ThStoredProc
-from thbase import log, TheasServerError, theas_server
+
 import string
 
 G_cached_resources = None
@@ -163,8 +164,6 @@ class ThCachedResources:
             return None
         else:
 
-            global G_cached_resources
-
             if from_filename:
                 # load resource from file
 
@@ -217,7 +216,6 @@ class ThCachedResources:
                 proc = ThStoredProc('theas.spgetSysWebResources', None, conn=conn)
                 language = None
 
-                global G_branch_code
                 branch_code = G_branch_code
 
 

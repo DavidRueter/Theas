@@ -112,8 +112,6 @@ def set_executor(executor=None, max_workers=100):
             G_thsql_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='thsql')
 
 def thsql_executor():
-    global G_thsql_executor
-
     if G_thsql_executor is None:
         set_executor()
 

@@ -253,10 +253,6 @@ def _main():
 # Works, but no longer needed now that I am able to make use of win32evtlogutil.AddSourceToRegistry
 def RegisterEventLogMessage(program_name='', program_directory='', message_file=''):
 
-    global G_program_name
-    global G_program_directory
-    global G_message_file
-
     if not program_name:
         program_name = G_program_name
 
@@ -411,13 +407,10 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         thbase.G_server.stop(service=self, reason='Service SvcStop()')
 
 def service_poll():
-    global G_current_service
     if G_current_service is not None:
         G_current_service.onServicePoll()
 
 def service_send_stop():
-    global G_current_service
-
     if G_current_service is None or G_current_service.hWaitStop is None:
         write_winlog("Service was already stopped when service_send_stop() was called.")
     else:
