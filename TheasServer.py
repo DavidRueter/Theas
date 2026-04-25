@@ -247,7 +247,7 @@ class ThResponseInfo:
     def __init__(self):
         self.current_date = None
         self.date_updated = None
-        self.expires = None
+        self.content_expires = None
         self.content_length = None
         self.cache_control = None
         self.content_type = None
@@ -359,7 +359,6 @@ class ThHandler(tornado.web.RequestHandler):
         '''
 
         # Get stored proc theas.spGetResponseInfo
-        global G_conns
         conn = await G_conns.get_conn(conn_name='get_response_info()')
         log(None, 'ThHandler', 'get_response_info obtained connection name:', conn.name, 'id:', conn.id)
 
@@ -544,7 +543,6 @@ class ThHandler(tornado.web.RequestHandler):
 
 
     def write_error(self, status_code, **kwargs):
-        global G_program_options
         buf = '<html><body>Unhandled error in ThHandler</body></html>'
         try:
             this_err_cls = None
@@ -856,8 +854,6 @@ class ThHandler(tornado.web.RequestHandler):
                     await self.process_file(file_obj=this_file, fieldname=this_file_field)
 
     async def get_template(self, resource_code):
-        global G_cached_resources
-        global G_program_options
 
         # Get template
         template_str = None
@@ -945,7 +941,7 @@ class ThHandler(tornado.web.RequestHandler):
             try:
                 if not await proc.is_ok():
                     #await self.session.logout()
-                    raise TheasServerError('Stored proc {} is not OK in get_data()'.format(self.resource.api_stored_proc))
+                    raise TheasServerError('Stored proc {} is not OK in get_data()'.format(resource.api_stored_proc))
 
                 # if '@QuestGUID' in proc.parameter_list and self.session.theas_page.get_value('questGUID') is not None:
                 #    proc.bind(self.session.theas_page.get_value('questGUID'), _mssql.SQLCHAR, '@QuestGUID')
@@ -1609,12 +1605,12 @@ class ThHandler(tornado.web.RequestHandler):
                 handled = True
                 return
 
+            this_finished = False
+            handled = False
+
             try:
                 self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
                 self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
-
-                this_finished = False
-                handled = False
 
                 buf = None
                 redirect_to = None
@@ -1735,8 +1731,6 @@ class ThHandler(tornado.web.RequestHandler):
         ##########################################################
         # MAIN ENTRY POINT FOR HTTP GET REQUEST
         ##########################################################
-
-        global G_cached_resources
 
         if not thbase.theas_server().is_running:
             # server is shutting down
@@ -2113,8 +2107,6 @@ class ThHandler_Attach(ThHandler):
     #    return self.retrieve_attachment()
 
     async def retrieve_webresource(self):
-        global G_cached_resources
-
         # Do everything that is needed to process a request for a sys web resource
         self.session.log('Attach', 'Retrieving web resource')
 
@@ -2205,8 +2197,6 @@ class ThHandler_Logout(ThHandler):
         self.session = None
 
     async def get(self, *args, **kwargs):
-        global G_sessions
-
         if self.session is None:
             self.session = await self.obtain_session()
 
@@ -2256,8 +2246,6 @@ class ThHandler_Login(ThHandler):
         self.session = None
 
     async def get(self, *args, **kwargs):
-        global G_sessions
-
         if self.session is None:
             self.session = await self.obtain_session()
 
@@ -2308,8 +2296,6 @@ class ThHandler_Login(ThHandler):
     async def post(self, *args, **kwargs):
         # Note:  As of 1/7/2021 the preferred way of performing authentication is via Async (cmd='login')
         # Posting to special login URL is deprecated.
-
-        global G_sessions
 
         if self.session is None:
             self.session = await self.obtain_session()
@@ -2368,8 +2354,6 @@ class ThHandler_Async(ThHandler):
         self.session = None
 
     async def post(self, *args, **kwargs):
-
-        global G_cached_resources
 
         log(None, 'Async', '*******************************')
 
@@ -2679,8 +2663,6 @@ class ThHandler_REST(ThHandler):
         self.session = None
 
     async def post(self, *args, **kwargs):
-        global G_cached_resources
-
         buf = ''
         bufbin = b''
 
@@ -3056,7 +3038,7 @@ class ThHandler_Stop(tornado.web.RequestHandler):
         buf = 'Hello World.  Status is OK.'
         self.write('<html><body>{}</body></html>'.format('Stopping Theas!'))
 
-        self.finish()
+        await self.finish()
 
         thbase.theas_server().stop()
 
@@ -3074,11 +3056,9 @@ class ThHandler_Stat(tornado.web.RequestHandler):
         self.session = None
 
     async def get(self, *args, **kwargs):
-        global G_sessions
-
         if G_sessions is None:
             self.write('<html><body>Sessions: 0 (G_sessions not initialized)</body></html>')
-            self.finish()
+            await self.finish()
             return
 
         sessions = G_sessions.snapshot(include_details=True)
@@ -3107,7 +3087,7 @@ class ThHandler_Stat(tornado.web.RequestHandler):
             '<html><body><p>Sessions: {}</p>{}</body></html>'.format(len(sessions), table)
         )
 
-        self.finish()
+        await self.finish()
 
     def data_received(self, chunk):
         pass
@@ -3146,23 +3126,8 @@ class ThHandler_Back(ThHandler):
             # self.session.log('Response', 'Sending response for back request')
 
             await self.session.finished()
-        else:
-            if self.cookies_changed:
-                # must perform a client-side redirect in order to set cookies
-                await self.session.finished()
-                # Could redirect if desired.  But instead, we'll send an error message and let the browser handle it
-                # self.redirect('/')
-            else:
-                # can send a normal redirect, since no cookies need to be written
-                # Could redirect if desired.  But instead, we'll send an error message and let the browser handle it
-                # self.write(self.session.clientside_redir('/'))
-                await self.session.finished()
+            self.session = None
 
-
-        if self.session and self.session.locked:
-            await self.session.finished()
-
-        self.session = None
         await self.finish()
 
     def data_received(self, chunk):
@@ -3182,8 +3147,6 @@ class ThHandler_PurgeCache(ThHandler):
         self.session = None
 
     async def get(self, *args, **kwargs):
-        global G_cached_resources
-
         message = 'No resource code specified.  Nothing to do.'
 
         if len(self.get_arguments('rc')) > 0:
@@ -3246,9 +3209,6 @@ class ThWSHandler_Test(tornado.websocket.WebSocketHandler):
 
 def get_program_settings():
     global G_program_options
-    global G_cached_resources
-    global G_sessions
-    global G_break_handler
 
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
@@ -3641,11 +3601,6 @@ async def get_ready(run_as_svc=False):
         print("Note: Logging is disabled")
 
 def all_done():
-    global G_sessions
-    global G_cached_resources
-    global G_conns
-    global G_break_handler
-
     msg = 'TheasServer.py all_done() called'
     log(None, 'Shutdown', msg)
     write_winlog(msg)
@@ -3704,11 +3659,9 @@ async def each_period():
             thbase.G_service_poll()
         # Note: to stop the service, we can do: thbase.G_service_send_stop()
 
-        global G_sessions
         if G_sessions is not None:
             await G_sessions.remove_expired()
 
-        global G_conns
         if G_conns is not None and len(G_conns.conns_torelease) > 0:
             await G_conns.process_release_conns()
 
@@ -3720,14 +3673,12 @@ async def each_period():
             log_memory(obj=G_cached_resources)
 
         # we can do other things here if we want
-        global G_periodic_proc
         if G_periodic_proc is not None:
             try:
                 G_periodic_proc()
             except Exception as e:
                 log(None, 'each_period', 'Problem while calling G_periodic_proc()', str(e))
 
-        global G_periodic_wait
         if (thbase.theas_server().is_running or thbase.theas_server().is_starting) and not thbase.theas_server().is_stopping:
             await asyncio.sleep(G_periodic_wait)
             theas_server().loop.create_task(each_period())
@@ -3737,7 +3688,6 @@ async def each_period():
 
 async def periodic():
     # run every 5 seconds (or G_periodic_wait seconds)
-    global G_periodic_wait
     while thbase.theas_server().is_running:
         theas_server().loop.create_task(each_period())
         await asyncio.sleep(G_periodic_wait)
@@ -3809,15 +3759,13 @@ def run(run_as_svc=False):
 
     theas_server().loop.call_soon_threadsafe(loop.stop)
 
-    global G_service_poll
 
-    theas_server().write_winlog('thbase.shutdown() calling G_service_poll()')
+    theas_server().write_winlog('TheasServer run() calling thbase.G_service_poll()')
 
-    if G_service_poll is not None:
-        G_service_poll()
+    if thbase.G_service_poll is not None:
+        thbase.G_service_poll()
 
-    theas_server().write_winlog('Done with thbase.shutdown()')
-
+    theas_server().write_winlog('Done with TheasServer run()')
 
     theas_server().write_winlog('Theas has been shut down cleanly.')
     log(None, 'Shutdown', 'Theas has been shut down cleanly.')
