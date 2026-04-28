@@ -12,7 +12,6 @@ from thcore import Theas
 from thsql import call_auth_storedproc, call_logout_storedproc
 
 #module-level constants, set by config_thsession()
-_LOGGING_LEVEL = 1
 _REMEMBER_USER_TOKEN = True
 _SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
 _SQL_TIMEOUT = 120
@@ -38,7 +37,6 @@ def config_thsession(
         login_resource_code=_LOGIN_RESOURCE_CODE,
         server_prefix = _SERVER_PREFIX,
         login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
-        logging_level=_LOGGING_LEVEL,
         remove_expired_thread_sleep=_REMOVE_EXPIRED_THREAD_SLEEP,
         use_multi_tabs=_USE_MUTLI_TABS,
         multi_tab_prefix=_MULTI_TAB_PREFIX
@@ -52,9 +50,6 @@ def config_thsession(
 
     global G_cached_resources
     G_cached_resources = gresources
-
-    global _LOGGING_LEVEL
-    _LOGGING_LEVEL = logging_level
 
     global _REMEMBER_USER_TOKEN
     _REMEMBER_USER_TOKEN = remember_user_token
@@ -592,16 +587,8 @@ class ThSession:
         return this_sess, failed_to_lock
 
     def log(self, category, *args, severity=10000):
-        if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
-            if self.log_current_request:
-                # print(datetime.datetime.now(), 'ThSession [{}:{}] ({}) - {} ({})'.format(
-                print(datetime.datetime.now(), 'ThSession [{}:{}] - {} ({})'.format(
-                    self.session_key,
-                    self.request_count,
-                    # self.__locked_by,
-                    category,
-                    self.comments if self.comments is not None else '',
-                ), *args)
+        # Delegate to thbase.log() so all formatting and writing happens in one place.
+        log(self, category, *args, severity=severity)
 
     async def init_session(self, force_init=False):
 

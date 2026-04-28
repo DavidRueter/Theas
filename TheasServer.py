@@ -20,6 +20,7 @@ from pymssql import _mssql
 
 
 import thbase
+from thbase import log
 import thcore
 from thsession import *
 from thsql import *
@@ -3063,28 +3064,100 @@ class ThHandler_Stat(tornado.web.RequestHandler):
 
         sessions = G_sessions.snapshot(include_details=True)
 
-        columns = [
+        sess_columns = [
             'session_key', 'this_resource_code', 'logged_in', 'username', 'date_started', 'date_expire',
             'date_request_start', 'date_request_done',
             'locked', 'lockedby', 'request_count',
         ]
 
-        rows = []
+        sess_rows = []
         for s in sessions:
             cells = ''.join(
                 '<td>{}</td>'.format(tornado.escape.xhtml_escape(str(s.get(c, ''))))
-                for c in columns
+                for c in sess_columns
             )
-            rows.append('<tr>{}</tr>'.format(cells))
+            sess_rows.append('<tr>{}</tr>'.format(cells))
 
-        header = ''.join('<th>{}</th>'.format(c) for c in columns)
-        table = (
+        sess_header = ''.join('<th>{}</th>'.format(c) for c in sess_columns)
+        sess_table = (
             '<table border="1" cellpadding="4" cellspacing="0">'
             '<thead><tr>{}</tr></thead><tbody>{}</tbody></table>'
-        ).format(header, ''.join(rows))
+        ).format(sess_header, ''.join(sess_rows))
+
+        # Connection-pool snapshot
+        if G_conns is None:
+            pool_html = '<p>ConnectionPool: not initialized</p>'
+        else:
+            pool = G_conns.snapshot(include_details=True)
+            conn_columns = [
+                'id', 'name', 'status', 'connected',
+                'is_user_authed', 'is_public_authed', 'last_error',
+            ]
+            conn_rows = []
+            for status_list in ('conns_inuse', 'conns_torelease', 'conns'):
+                for c in pool[status_list]:
+                    cells = ''.join(
+                        '<td>{}</td>'.format(tornado.escape.xhtml_escape(str(c.get(col, ''))))
+                        for col in conn_columns
+                    )
+                    conn_rows.append('<tr>{}</tr>'.format(cells))
+            conn_header = ''.join('<th>{}</th>'.format(c) for c in conn_columns)
+            conn_table = (
+                '<table border="1" cellpadding="4" cellspacing="0">'
+                '<thead><tr>{}</tr></thead><tbody>{}</tbody></table>'
+            ).format(conn_header, ''.join(conn_rows))
+            pool_html = (
+                '<p>ConnectionPool: in-use={}, queued-for-release={}, available={}</p>{}'
+            ).format(
+                len(pool['conns_inuse']),
+                len(pool['conns_torelease']),
+                len(pool['conns']),
+                conn_table,
+            )
+
+        # Cached-resources snapshot
+        if G_cached_resources is None:
+            cache_html = '<p>ThCachedResources: not initialized</p>'
+        else:
+            cache = G_cached_resources.snapshot(include_details=True)
+            res_columns = [
+                'resource_code', 'kind', 'filename', 'filetype', 'data_size',
+                'is_public', 'is_static', 'requires_authentication',
+                'render_jinja_template', 'exists', 'date_updated',
+            ]
+            res_rows = []
+            for r in cache.get('resources_detail', []) + cache.get('static_blocks_detail', []):
+                cells = ''.join(
+                    '<td>{}</td>'.format(tornado.escape.xhtml_escape(str(r.get(col, ''))))
+                    for col in res_columns
+                )
+                res_rows.append('<tr>{}</tr>'.format(cells))
+            res_header = ''.join('<th>{}</th>'.format(c) for c in res_columns)
+            res_table = (
+                '<table border="1" cellpadding="4" cellspacing="0">'
+                '<thead><tr>{}</tr></thead><tbody>{}</tbody></table>'
+            ).format(res_header, ''.join(res_rows))
+            cache_html = (
+                '<p>ThCachedResources: resources={}, static_blocks={}, resource_versions={}; '
+                'cache_bytes_used={} / max_cache_size={} (max_item={}); '
+                'static_file_version_no={}</p>{}'
+            ).format(
+                cache['resources'],
+                cache['static_blocks'],
+                cache['resource_versions'],
+                cache['cache_bytes_used'],
+                cache['max_cache_size'],
+                cache['max_cache_item_size'],
+                cache['static_file_version_no'],
+                res_table,
+            )
 
         self.write(
-            '<html><body><p>Sessions: {}</p>{}</body></html>'.format(len(sessions), table)
+            '<html><body>'
+            '<h2>Sessions</h2><p>Total: {}</p>{}'
+            '<h2>Connection Pool</h2>{}'
+            '<h2>Cached Resources</h2>{}'
+            '</body></html>'.format(len(sessions), sess_table, pool_html, cache_html)
         )
 
         await self.finish()
@@ -3568,7 +3641,6 @@ async def get_ready(run_as_svc=False):
         login_resource_code=LOGIN_RESOURCE_CODE,
         server_prefix=SERVER_PREFIX,
         login_auto_user_token=LOGIN_AUTO_USER_TOKEN,
-        logging_level=LOGGING_LEVEL,
         use_multi_tabs=USE_MULTI_TABS,
         multi_tab_prefix=MULTI_TAB_PREFIX
     )
@@ -3722,6 +3794,8 @@ async def main(run_as_svc=False):
 
 
 def run(run_as_svc=False):
+    thbase.setup_logging()
+
     gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
 
     loop = theas_server().loop

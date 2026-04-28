@@ -144,6 +144,56 @@ class ThCachedResources:
         with self.lock:
             return self.__resources.get(resource_code)
 
+    def snapshot(self, include_details=True):
+        # Snapshot the cache dicts under the lock, then release before reading
+        # per-resource fields so we don't block other cache operations.
+        with self.lock:
+            resources_pairs = list(self.__resources.items())
+            static_blocks_pairs = list(self.__static_blocks_dict.items())
+            version_count = len(self.__resource_versions_dict)
+            cache_bytes_used = self.cache_bytes_used
+            max_cache_size = self.max_cache_size
+            max_cache_item_size = self.max_cache_item_size
+            static_file_version_no = self.static_file_version_no
+
+        summary = {
+            'resources': len(resources_pairs),
+            'static_blocks': len(static_blocks_pairs),
+            'resource_versions': version_count,
+            'cache_bytes_used': cache_bytes_used,
+            'max_cache_size': max_cache_size,
+            'max_cache_item_size': max_cache_item_size,
+            'static_file_version_no': static_file_version_no,
+        }
+
+        if not include_details:
+            return summary
+
+        def detail(resource_code, res, kind):
+            if res is None:
+                return {'resource_code': resource_code, 'kind': kind, 'status': 'None'}
+            try:
+                data_size = len(res.data) if res.data is not None else 0
+                return {
+                    'resource_code': resource_code,
+                    'kind': kind,
+                    'filename': res.filename,
+                    'filetype': res.filetype,
+                    'date_updated': res.date_updated,
+                    'data_size': data_size,
+                    'is_public': res.is_public,
+                    'is_static': res.is_static,
+                    'requires_authentication': res.requires_authentication,
+                    'render_jinja_template': res.render_jinja_template,
+                    'exists': res.exists,
+                }
+            except Exception as e:
+                return {'resource_code': resource_code, 'kind': kind, 'error': str(e)}
+
+        summary['resources_detail'] = [detail(rc, r, 'resource') for rc, r in resources_pairs]
+        summary['static_blocks_detail'] = [detail(rc, r, 'static_block') for rc, r in static_blocks_pairs]
+        return summary
+
     def add_resource(self, resource_code, resource_dict):
 
         if resource_dict.data is None or\

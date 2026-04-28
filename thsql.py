@@ -46,7 +46,6 @@ and process the resultset data after the connection lock has been released.
 
 '''
 
-_LOGGING_LEVEL = 1
 _LOGIN_AUTO_USER_TOKEN= None
 
 class SQLSettings:
@@ -54,7 +53,6 @@ class SQLSettings:
                  database='somedatabase', appname='someapp', max_conns=10, sql_timeout=120,
                  full_ok_checks=True, http_server_prefix='https://someserver.com',
                  login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
-                 logging_level=_LOGGING_LEVEL,
                  default_schema = 'theas'
                 ):
         self.server = server
@@ -68,7 +66,6 @@ class SQLSettings:
         self.full_ok_checks = full_ok_checks
         self.http_server_prefix = http_server_prefix
         self.login_auto_user_token = login_auto_user_token
-        self.logging_level = logging_level
         self.default_schema = default_schema
 
         _mssql.set_max_connections(max_conns)
@@ -79,7 +76,7 @@ def sql_msg_handler(msgstate: int, severity: int, srvname: str,
     log(None, 'SQL', '***Message from server: {}'.format(msgtext))
 
 class Conn():
-    def __init__(self, sql_conn, sql_settings):
+    def __init__(self, sql_conn, sql_settings, pool=None):
         self.sql_conn = sql_conn #pymssql._mssql.MSSQLConnection
         self.name = "new"
         self.id = str(uuid.uuid4())
@@ -87,6 +84,7 @@ class Conn():
         self.is_user_authed = False
         self.last_error = None
         self.sql_settings = sql_settings
+        self.pool = pool  # back-reference to the ConnectionPool that owns this Conn
 
 
     def __del___(self):
@@ -124,7 +122,7 @@ class ConnectionPool:
     def __init__(self, sql_settings=SQLSettings()):
         self.lock = RLock()
         self.sql_settings = sql_settings
-        self.conns = []
+        self.conns= []  # available connections
         self.conns_inuse = []
         self.conns_torelease = []
 
@@ -135,11 +133,9 @@ class ConnectionPool:
     def __del__(self):
         with self.lock:
 
-            for conn in self.conns:
-                self.conns = None
-
-            for conn in self.conns_inuse:
-                self.conns = None
+            self.conns_torelease.clear()
+            self.conns_inuse.clear()
+            self.conns.clear()
 
 
 
@@ -149,6 +145,44 @@ class ConnectionPool:
         if executor is not None:
             with self.lock:
                 executor.shutdown(wait=False, cancel_futures=True)
+
+
+    def snapshot(self, include_details=True):
+        # Snapshot the pool's three lists under the lock, then release before
+        # reading per-conn fields so we don't block other pool operations.
+        with self.lock:
+            conns_avail = list(self.conns)
+            conns_inuse = list(self.conns_inuse)
+            conns_torelease = list(self.conns_torelease)
+
+        if not include_details:
+            return {
+                'conns': len(conns_avail),
+                'conns_inuse': len(conns_inuse),
+                'conns_torelease': len(conns_torelease),
+            }
+
+        def detail(conn, status):
+            if conn is None:
+                return {'id': None, 'status': status}
+            try:
+                return {
+                    'id': conn.id,
+                    'name': conn.name,
+                    'status': status,
+                    'connected': conn.connected,
+                    'is_user_authed': conn.is_user_authed,
+                    'is_public_authed': conn.is_public_authed,
+                    'last_error': conn.last_error,
+                }
+            except Exception as e:
+                return {'id': getattr(conn, 'id', None), 'status': status, 'error': str(e)}
+
+        return {
+            'conns': [detail(c, 'available') for c in conns_avail],
+            'conns_inuse': [detail(c, 'inuse') for c in conns_inuse],
+            'conns_torelease': [detail(c, 'torelease') for c in conns_torelease],
+        }
 
 
     # NOTE: These methods operate on connections, but they exist in support of pool operations.
@@ -237,7 +271,8 @@ class ConnectionPool:
 
             conn = Conn(
                 this_sql_conn,
-                sql_settings=self.sql_settings
+                sql_settings=self.sql_settings,
+                pool=self
             )
             conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
 
@@ -276,11 +311,14 @@ class ConnectionPool:
 
         if conn is not None:
             conn.name = conn_name
-
             with self.lock:
-                self.conns.append(conn)
+                log(None, 'SQL',
+                    'New connection added to the pool. len(conns)={}; len(conns_inuse={}; len(conns_torelease={})'.format(
+                        len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
                 if use_now:
                     self.conns_inuse.append(conn)
+                else:
+                    self.conns.append(conn)
 
         return conn
 
@@ -291,52 +329,82 @@ class ConnectionPool:
             if len(self.conns) > 0 and not force_new:
                 conn = self.conns.pop()
                 self.conns_inuse.append(conn)
-                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, conn.id,
-                    'from pool. Remaining in pool: ', len(self.conns))
                 conn.name = conn_name
+                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, conn.id,
+                    'len(conns)={}; len(conns_inuse={}; len(conns_torelease={})'.format(
+                    len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
         if conn is None:
-            #conn = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
 
-            conn = await self.add_conn(skip_init=skip_init, conn_name=conn_name)
-            if conn is not None:
-                log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
-                    '. Remaining in pool: ', len(self.conns))
+            if len(self.conns) + len(self.conns_inuse) >= self.sql_settings.max_conns:
+                log(None, 'SQLConn', 'TOO MANY SQL CONNECTIONS per configured sql_max_connections ({})'.format(self.sql_settings.max_conns))
+
+            else:
+                #conn = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
+
+                conn = await self.add_conn(skip_init=skip_init, conn_name=conn_name)
+                if conn is not None:
+                    log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
+                        '. Remaining in pool: ', len(self.conns))
 
         return conn
 
+    async def release_conn(self, conn):
+        # Fast bookkeeping: move conn from conns_inuse to conns_torelease.
+        # The actual SQL reset (theas.spactResetConnection) is deferred to
+        # process_release_conns(), which runs from the async event loop's
+        # periodic each_period() at a more convenient time.
+        # async signature retained for caller compatibility; the body is sync.
+        self.release_conn_sync(conn)
+
     def release_conn_sync(self, conn):
-        if conn is not None:
-            with self.lock:
-                self.conns_torelease.append(conn)
-                log(None, 'Conn', 'SQL connection is scheduled to be released. Name: {}'.format(conn.name))
+        # Sync variant of release_conn() with the same semantics.  Safe to
+        # call from destructors, finished_sync, and other non-async paths.
+        if conn is None:
+            return
+
+        with self.lock:
+            for i, this_conn in enumerate(self.conns_inuse):
+                if this_conn is conn:
+                    self.conns_inuse.pop(i)
+                    self.conns_torelease.append(conn)
+                    log(None, 'SQL', 'release_conn: queued for deferred reset:', conn.id,
+                        'len(conns)={}; len(conns_inuse)={}; len(conns_torelease)={}'.format(
+                            len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
+                    return
+            log(None, 'SQL', 'release_conn: conn not found in conns_inuse:', conn.id)
 
     async def process_release_conns(self):
-        with self.lock:
-            log(None, 'Conn', 'process_release_conns() about to process', len(self.conns_torelease), 'connections')
+        # Drain conns_torelease.  For each conn, attempt reset_conn() and
+        # re-pool on success.  Pop one at a time under the lock; release the
+        # lock for the await on reset_conn so other pool operations can proceed
+        # during the SQL round-trip.
+        while True:
+            with self.lock:
+                if not self.conns_torelease:
+                    return
+                conn = self.conns_torelease.pop(0)
+                log(None, 'Conn', 'process_release_conns: processing conn:', conn.id,
+                    'remaining in queue:', len(self.conns_torelease))
 
-            this_conn = None
-            for i, this_conn in enumerate(self.conns_torelease):
-                self.conns_torelease.pop(i)
+            if conn is None:
+                continue
 
-                if this_conn is not None:
-                    await self.release_conn(this_conn)
+            if await self.reset_conn(conn):
+                with self.lock:
+                    self.conns.append(conn)
+                    log(None, 'SQL', 'process_release_conns: re-pooled conn:', conn.id)
+            else:
+                log(None, 'SQL', 'process_release_conns: dropped conn (reset failed):', conn.id)
+                # reset_conn() invoked kill_conn() on failure paths, but kill_conn
+                # only acts on conns_inuse membership.  At this point the conn was
+                # already popped from conns_torelease, so close the underlying SQL
+                # connection here to be sure.
+                try:
+                    if conn.sql_conn is not None and conn.sql_conn.connected:
+                        conn.sql_conn.close()
+                except Exception as e:
+                    log(None, 'SQL', 'process_release_conns: error closing dead conn:', conn.id, repr(e))
 
-    async def release_conn(self, conn):
-        with self.lock:
-            log(None, 'SQL', 'release_conn() called for conn name:', conn.name, 'id:', conn.id)
-
-            for i, this_conn in enumerate(self.conns_inuse):
-                if this_conn == conn:
-                    self.conns_inuse.pop(i)
-
-                    if await self.reset_conn(this_conn):
-                        self.conns.append(conn)
-                        log(None, 'SQL', 'Returned conn to pool:', conn.id)
-                    else:
-                        log(None, 'SQL', 'Conn not re-pooled (reset failed or conn dead):', conn.id)
-                    break
-
-            log(None, 'SQL', 'Avail connection count:', len(self.conns))
     def kill_conn(self, conn):
         if conn is None:
             return
@@ -572,7 +640,16 @@ class ThStoredProc:
 
         if not result and self.have_session:
             self.th_session.logged_in = False
+            bad_conn = self.th_session.conn
             self.th_session.conn = None
+            self.conn = None
+            # Release the bad conn back to the pool.  release_conn() routes via
+            # reset_conn(), which detects a dead conn and routes to kill_conn();
+            # a still-live conn that simply failed the SELECT 1 check gets a
+            # reset attempt and may be re-pooled.  Either way, the conn does
+            # not leak in conns_inuse.
+            if bad_conn is not None and bad_conn.pool is not None:
+                await bad_conn.pool.release_conn(bad_conn)
 
         if result:
             await self.refresh_parameter_list()
@@ -764,8 +841,7 @@ class ThStoredProc:
             log(self.th_session, 'Sessions', '***Canceled executor #3...probably shutting down ', e)
 
         except Exception as e:
-            if _LOGGING_LEVEL:
-                print(e)
+            log(self.th_session, 'SQL', 'Exception:', repr(e))
             raise e
 
         if self.have_session:

@@ -1,4 +1,4 @@
-import datetime
+import logging
 import sys
 import os
 import ctypes
@@ -8,7 +8,29 @@ import functools
 
 from pympler import asizeof, muppy, summary as mem_summary
 
-_LOGGING_LEVEL = 1
+_logger = logging.getLogger('theas')
+
+# Local threshold for thbase.log() gating.  Semantics:
+#   1  -> log everything (the default)
+#   0  -> log nothing
+#  <0  -> only log records whose severity is in [_LOG_THRESHOLD, -1]
+#         (Theas convention: lower severity = more important)
+_LOG_THRESHOLD = 1
+
+
+def setup_logging():
+    # Idempotently configure the 'theas' logger so log() can route through stdlib
+    # logging instead of print().  The local _LOG_THRESHOLD gates output inside
+    # log(); this opens the door to adding file/queue handlers later.
+    # Call once at application startup (e.g., from TheasServer.run()).  To capture
+    # Tornado's own logs through the same handlers, attach handlers to the root
+    # logger instead and drop propagate=False.
+    if not _logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+        _logger.addHandler(handler)
+        _logger.setLevel(logging.DEBUG)
+        _logger.propagate = False
 
 def get_program_directory():
     program_cmd = sys.argv[0]
@@ -112,12 +134,28 @@ def format_error(e):
     return err_msg
 
 def log(th_session, category, *args, severity=10000):
+    # Single entry point for all Theas logging.  When a session is provided, its
+    # context (session_key, request_count, comments) is included in the message.
+    # ThSession.log() is a thin pass-through that calls back here, so the actual
+    # formatting and writing happens in one place.
+    if not (_LOG_THRESHOLD == 1 or 0 > severity >= _LOG_THRESHOLD):
+        return
+
+    msg_args = ' '.join(str(a) for a in args)
+
     if th_session is not None:
-        th_session.log(category, *args, severity=severity)
+        if not getattr(th_session, 'log_current_request', True):
+            return
+        _logger.info(
+            'ThSession [%s:%s] - %s (%s) %s',
+            th_session.session_key,
+            th_session.request_count,
+            category,
+            th_session.comments if th_session.comments is not None else '',
+            msg_args,
+        )
     else:
-        #ThSession.cls_log(category, *args, severity=severity)
-        if _LOGGING_LEVEL == 1 or 0 > severity >= _LOGGING_LEVEL:
-            print(datetime.datetime.now(), 'ThSessions [{}]'.format(category), *args)
+        _logger.info('ThSessions [%s] %s', category, msg_args)
 
 class TheasServerError(BaseException):
     def __init__(self, value):
