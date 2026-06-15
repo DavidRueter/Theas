@@ -623,7 +623,7 @@ class ThSession:
                 if self.conn is not None:
                     # Note:  we have created a new user session, but the user still needs to be authenticated
                     # make sure session has been initialized (to handle uploaded files, etc.)
-                    '''
+
                     if _LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in:
                         self.log('Auth', 'Authenticating as AUTO user (i.e. public)')
                         try:
@@ -636,7 +636,7 @@ class ThSession:
                             self.log('Auth',
                                      'Error: Authentication as AUTO user (i.e. public) FAILED.  Is your config file wrong?')
                             self.log('Auth', 'Bad AUTO user token: {}'.format(_LOGIN_AUTO_USER_TOKEN))
-                    '''
+
 
                     self.initialized = True
 

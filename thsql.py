@@ -87,7 +87,7 @@ class Conn():
         self.pool = pool  # back-reference to the ConnectionPool that owns this Conn
 
 
-    def __del___(self):
+    def __del__(self):
         if self.sql_conn is not None and self.sql_conn.connected:
             self.sql_conn.cancel()
             self.sql_conn.close()
@@ -526,8 +526,8 @@ async def call_logout_storedproc(th_session=None, conn=None):
                 proc.bind(th_session.session_token, _mssql.SQLVARCHAR, '@SessionToken')
                 await proc.execute()
 
-            if this_conn is not None:
-                this_conn.init_conn()
+            if this_conn is not None and this_conn.pool is not None:
+                await this_conn.pool.init_conn(this_conn)
 
 
     except Exception as e:
@@ -802,7 +802,7 @@ class ThStoredProc:
                         this_params_str += item['literal_prefix'] + thsqlhelp.quotestr(this_value)
                         
                     elif item['datatype'] in ['date', 'time', 'datetime2','datetime', 'smalldatetime']:
-                        this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_literal(this_value, item.datatype))
+                        this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_literal(this_value, item['datatype']))
                                                                     
                     elif item['datatype'] == 'datetimeoffset':
                         this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_datetimeoffset_literal(this_value))

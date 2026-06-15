@@ -1804,6 +1804,7 @@ MIME_TYPE_EXTENSIONS = {
     '.xlsm': 'application/vnd.ms-excel.sheet.macroenabled.12',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     '.xml': 'application/xml',
+    #'.xml': 'text/xml',
     '.xps': 'application/vnd.ms-xpsdocument',
     '.zip': 'application/zip',
 
