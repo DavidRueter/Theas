@@ -111,6 +111,7 @@ import types
 #import string
 from collections import OrderedDict
 import ast
+import traceback
 import uuid
 import urllib.parse as urlparse
 import html
@@ -1555,7 +1556,34 @@ class Theas():
 
             buf = this_template.render(data=data)
         except Exception as ex:
-            buf = 'Error when rendering Jinja template #2: ' + str(ex)
+            # str(ex) alone is misleading for many Jinja errors -- e.g. a
+            # TemplateNotFound stringifies to just the missing template name
+            # ("test/opsMacros") with no hint of WHY it failed.  Rather than
+            # enumerate Jinja's exception hierarchy, name the exception type and
+            # opportunistically pull any location attributes it happens to
+            # expose (duck-typed, no isinstance ladder): all jinja2.TemplateError
+            # subclasses carry .message; syntax/assertion errors also carry
+            # .name/.filename and .lineno.
+            err_type = type(ex).__name__
+            err_detail = getattr(ex, 'message', None) or str(ex) or repr(ex)
+
+            location = []
+            where = getattr(ex, 'name', None) or getattr(ex, 'filename', None)
+            if where and str(where) != err_detail:
+                # (skip when it just repeats the detail, e.g. TemplateNotFound)
+                location.append(str(where))
+            lineno = getattr(ex, 'lineno', None)
+            if lineno:
+                location.append('line {}'.format(lineno))
+            location_str = ' ({})'.format(', '.join(location)) if location else ''
+
+            buf = 'Error rendering template: {}{}: {}'.format(err_type, location_str, err_detail)
+
+            # Log the full traceback so the real cause is always recoverable;
+            # the page/user receives the concise, type-aware summary above.
+            if self.th_session is not None:
+                self.th_session.log('Render', buf)
+                self.th_session.log('Render', traceback.format_exc())
 
         # Call doOnAfterRender function(s) if provided
         if len(self.doOnAfterRender):

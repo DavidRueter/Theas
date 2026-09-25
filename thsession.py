@@ -6,7 +6,7 @@ import asyncio
 from nanoid import generate
 
 
-from thbase import log, theas_server
+from thbase import log, trace, theas_server, TheasServerSQLError
 
 from thcore import Theas
 from thsql import call_auth_storedproc, call_logout_storedproc
@@ -245,6 +245,7 @@ class ThSessions:
             else:
                 this_sess_key = session_token
 
+        was_new = False
         with self.lock:
             if this_sess_key and (this_sess_key in self.__sessions):
                 # have existing session
@@ -255,8 +256,12 @@ class ThSessions:
                 # create a new session
                 this_sess = ThSession(handler=handler, tab_id=tab_id)
                 self.__sessions[this_sess.session_key] = this_sess
+                was_new = True
                 log(this_sess, 'Sessions', 'retrieve_session() creating new session', this_sess.session_key, comments)
 
+        # Trace outside the lock: is this the SAME session across requests, or a new one?
+        trace('session.new' if was_new else 'session.reuse', trace_group='sql_connection_persist',
+              th_session=this_sess, requested_token=session_token)
         return this_sess
 
     def _poll_remove_expired(self):
@@ -394,6 +399,7 @@ class ThSession:
             this_conn = self.conn
             self.conn = None
 
+            trace('del.release', trace_group='sql_connection_persist', th_session=self, conn=this_conn)
             G_conns.release_conn_sync(this_conn)
 
     @property
@@ -612,9 +618,18 @@ class ThSession:
                 try:
                     self.conn = await G_conns.get_conn()
                 except Exception as e:
-                    log(None, 'Session', 'Error creating SQL connection on call to G_conns.get_conn in init_session:', repr(e))
+                    self.conn = None
+                    raise TheasServerSQLError(
+                        'init_session: could not obtain a SQL connection: {}'.format(repr(e))) from e
+
+                if self.conn is None:
+                    # get_conn() returns None when the pool is exhausted or a new
+                    # connection could not be reset/authenticated.
+                    raise TheasServerSQLError(
+                        'init_session: could not obtain a SQL connection (pool exhausted or unavailable)')
 
                 log(None, 'Session', 'init_session obtained connection name:', self.conn.name, 'id:', self.conn.id)
+
                 self.conn.name = 'initializing'
                 log(None, 'Session', 'init_session set connection name to:', self.conn.name, 'id:', self.conn.id)
 
@@ -624,6 +639,10 @@ class ThSession:
                     # Note:  we have created a new user session, but the user still needs to be authenticated
                     # make sure session has been initialized (to handle uploaded files, etc.)
 
+                    # Disabled under the new connection lifecycle: theas.spactResetConnection now
+                    # authenticates the pooled connection as the Public Web user (and sets CONTEXT_INFO),
+                    # so the Python layer no longer needs to auto-authenticate the public/AUTO user here.
+                    '''
                     if _LOGIN_AUTO_USER_TOKEN and not self.logged_in and not self.autologged_in:
                         self.log('Auth', 'Authenticating as AUTO user (i.e. public)')
                         try:
@@ -636,6 +655,7 @@ class ThSession:
                             self.log('Auth',
                                      'Error: Authentication as AUTO user (i.e. public) FAILED.  Is your config file wrong?')
                             self.log('Auth', 'Bad AUTO user token: {}'.format(_LOGIN_AUTO_USER_TOKEN))
+                    '''
 
 
                     self.initialized = True
@@ -680,6 +700,7 @@ class ThSession:
                 this_conn = self.conn
                 self.conn = None
 
+                trace('finished_sync.release', trace_group='sql_connection_persist', th_session=self, conn=this_conn)
                 G_conns.release_conn_sync(this_conn)
 
             self.release_lock(handler=self.current_handler)
@@ -723,6 +744,7 @@ class ThSession:
                 this_conn = self.conn
                 self.conn = None
 
+                trace('finished.release', trace_group='sql_connection_persist', th_session=self, conn=this_conn)
                 await G_conns.release_conn(this_conn)
 
         finally:
@@ -856,6 +878,8 @@ class ThSession:
             # always write the cookie...even if authentication failed (in which case we need to clear it)
         self.current_handler.write_cookies()
 
+        trace('authenticate.result', trace_group='sql_connection_persist', th_session=self,
+              username=username, via_token=user_token is not None)
         return self.logged_in, self.error_message
 
     async def logout(self):

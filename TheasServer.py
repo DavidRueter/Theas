@@ -20,7 +20,7 @@ from pymssql import _mssql
 
 
 import thbase
-from thbase import log
+from thbase import log, trace
 import thcore
 from thsession import *
 from thsql import *
@@ -268,7 +268,7 @@ class ThHandler(tornado.web.RequestHandler):
         self.deferred_xsrf = False
         self.set_header('Server', 'Theas/{}'.format(THEAS_VERSION))
         self.filename = None
-        self.request_path = None # will contain a copy of self.request.path
+        self.request_path: str | None = None # will contain a copy of self.request.path
 
         self.__cookies_changed = False
         self.received_tabid_url = False
@@ -1794,6 +1794,14 @@ class ThHandler(tornado.web.RequestHandler):
 
 
             log(None, 'GET', f'**Starting get for {resource_code} (Handler:{self.handler_guid})')
+
+            # Request-chain anchor: resource_code + handler_guid tie together every
+            # trace line emitted while processing this GET.  (self.session may still
+            # be None here -- it is assigned by obtain_session() just below.)
+            trace('get.start', trace_group='request', th_session=self.session,
+                  resource_code=resource_code, handler=self.handler_guid)
+
+
             # note: self.session is probably not yet assigned
 
             if self.session is None:
@@ -2974,7 +2982,7 @@ class ThHandler_REST(ThHandler):
                         # Ensure the client decodes the response as UTF-8. Without an
                         # explicit charset, browsers may sniff or default to
                         # ISO-8859-1, displaying multi-byte UTF-8 sequences as mojibake.
-                        existing_ct = self.get_status() and self._headers.get('Content-Type', '')
+                        existing_ct = self._headers.get('Content-Type', '')
                         if not existing_ct:
                             self.set_header('Content-Type', 'text/html; charset=utf-8')
                         elif 'charset=' not in existing_ct.lower():

@@ -1,5 +1,6 @@
 import thsqlhelp
 from thbase import *
+from thdb import _Conn, _ConnectionPool
 from threading import RLock
 from pymssql import _mssql
 import asyncio
@@ -75,28 +76,22 @@ def sql_msg_handler(msgstate: int, severity: int, srvname: str,
                     procname: str, line: int, msgtext: str):
     log(None, 'SQL', '***Message from server: {}'.format(msgtext))
 
-class Conn():
-    def __init__(self, sql_conn, sql_settings, pool=None):
-        self.sql_conn = sql_conn #pymssql._mssql.MSSQLConnection
-        self.name = "new"
-        self.id = str(uuid.uuid4())
-        self.is_public_authed = False
-        self.is_user_authed = False
-        self.last_error = None
-        self.sql_settings = sql_settings
-        self.pool = pool  # back-reference to the ConnectionPool that owns this Conn
-
-
-    def __del__(self):
-        if self.sql_conn is not None and self.sql_conn.connected:
-            self.sql_conn.cancel()
-            self.sql_conn.close()
-            self.sql_conn=None
-            del self.sql_conn
+class Conn(_Conn):
+    # MSSQL / pymssql implementation of the driver-specific primitives declared
+    # on _Conn.  The agnostic bookkeeping state (name, id, auth flags, etc.)
+    # lives in the base __init__.
 
     @property
     def connected(self):
         return self.sql_conn is not None and self.sql_conn.connected
+
+    def cancel(self):
+        if self.sql_conn is not None:
+            self.sql_conn.cancel()
+
+    def close(self):
+        if self.sql_conn is not None:
+            self.sql_conn.close()
 
 G_thsql_executor = None
 
@@ -117,83 +112,28 @@ def thsql_executor():
 
 
 
-class ConnectionPool:
+class ConnectionPool(_ConnectionPool):
 
     def __init__(self, sql_settings=SQLSettings()):
-        self.lock = RLock()
-        self.sql_settings = sql_settings
-        self.conns= []  # available connections
-        self.conns_inuse = []
-        self.conns_torelease = []
+        super().__init__(sql_settings)
 
         global _LOGIN_AUTO_USER_TOKEN
         _LOGIN_AUTO_USER_TOKEN = sql_settings.login_auto_user_token
 
+    # --- driver-specific overrides (MSSQL / pymssql) ---
+    # The pool bookkeeping (get_conn / release_conn / process_release_conns /
+    # snapshot / add_conn / kill_conn / kill_threads) is inherited from
+    # _ConnectionPool in thdb.py.  Only the driver primitives live here.
 
-    def __del__(self):
-        with self.lock:
+    def _executor(self):
+        return thsql_executor()
 
-            self.conns_torelease.clear()
-            self.conns_inuse.clear()
-            self.conns.clear()
-
-
-
-    def kill_threads(self, reason=''):
-        log(None, 'SQL', 'thsql.py Killing all executor threads in kill_threads() {}'.format(reason))
-        executor = thsql_executor()
-        if executor is not None:
-            with self.lock:
-                executor.shutdown(wait=False, cancel_futures=True)
-
-
-    def snapshot(self, include_details=True):
-        # Snapshot the pool's three lists under the lock, then release before
-        # reading per-conn fields so we don't block other pool operations.
-        with self.lock:
-            conns_avail = list(self.conns)
-            conns_inuse = list(self.conns_inuse)
-            conns_torelease = list(self.conns_torelease)
-
-        if not include_details:
-            return {
-                'conns': len(conns_avail),
-                'conns_inuse': len(conns_inuse),
-                'conns_torelease': len(conns_torelease),
-            }
-
-        def detail(conn, status):
-            if conn is None:
-                return {'id': None, 'status': status}
-            try:
-                return {
-                    'id': conn.id,
-                    'name': conn.name,
-                    'status': status,
-                    'connected': conn.connected,
-                    'is_user_authed': conn.is_user_authed,
-                    'is_public_authed': conn.is_public_authed,
-                    'last_error': conn.last_error,
-                }
-            except Exception as e:
-                return {'id': getattr(conn, 'id', None), 'status': status, 'error': str(e)}
-
-        return {
-            'conns': [detail(c, 'available') for c in conns_avail],
-            'conns_inuse': [detail(c, 'inuse') for c in conns_inuse],
-            'conns_torelease': [detail(c, 'torelease') for c in conns_torelease],
-        }
-
-
-    # NOTE: These methods operate on connections, but they exist in support of pool operations.
-    # Some of them need to access resources in the pool connection list.
-    # For these reasons they are methods of ConnectionPool instead of methods of Conn
     async def reset_conn(self, conn):
         if conn is None:
             log(None, 'SQL', 'reset_conn: conn is None, nothing to do.')
             return False
 
-        if conn.sql_conn is None or not conn.sql_conn.connected:
+        if not conn.connected:
             log(None, 'SQL', 'reset_conn: conn not connected, removing from pool.', conn.id)
             self.kill_conn(conn)
             return False
@@ -202,7 +142,7 @@ class ConnectionPool:
             # Drain any pending resultsets left behind by a prior failed execute,
             # otherwise spactResetConnection can fail with "Results pending".
             try:
-                conn.sql_conn.cancel()
+                conn.cancel()
             except Exception:
                 pass
 
@@ -217,7 +157,9 @@ class ConnectionPool:
 
             conn.name = "idle"
             conn.is_user_authed = False
-            conn.is_public_authed = False
+            conn.is_public_authed = True  #
+
+            # note that theas.spactResetConnection will authenticate in as the public web user
 
             log(None, 'SQL', 'Connection reset.', conn.id)
             return True
@@ -243,7 +185,8 @@ class ConnectionPool:
                     sql_str = row['SQLToExecute']
                     conn.sql_conn.execute_non_query(sql_str)
 
-                await call_auth_storedproc(conn=conn)
+                # no longer needed, because the connection will already be authenticated by spActResetConnection
+                # await call_auth_storedproc(conn=conn)
 
                 #log(None, 'SQL', 'Connection initialized.  FreeTDS version: ' + str(conn.sql_conn.tds_version))
                 log(None, 'SQL', 'Connection initialized.', conn.id)
@@ -286,6 +229,19 @@ class ConnectionPool:
             if not skip_init:
                 await self.init_conn(conn)
 
+            if not await self.reset_conn(conn):
+                # reset_conn() failed.  It calls kill_conn() internally, but kill_conn()
+                # only closes conns already tracked in conns_inuse -- and this brand-new
+                # conn has not been added to any pool list yet.  Close the underlying SQL
+                # connection here and return None, rather than letting add_conn() pool an
+                # un-reset (unauthenticated) connection.
+                try:
+                    if conn.sql_conn is not None and conn.sql_conn.connected:
+                        conn.sql_conn.close()
+                except Exception as e:
+                    log(None, 'SQL', 'new_conn: error closing conn after failed reset:', conn.id, repr(e))
+                conn = None
+
         except Exception as e:
             if conn is not None:
                 conn.last_error = repr(e)
@@ -295,130 +251,6 @@ class ConnectionPool:
             #        e) + '|Sorry, the server is not available right now|1|Cannot Continue'
 
         return conn
-
-    async def add_conn(self, conn=None, use_now=True, skip_init=False, conn_name=''):
-        if conn is None:
-            # Note: new_conn() does create a new SQL connection, and will block the main async IO loop
-            # unless the caller uses an executor thread.  However we expect connections to be fast
-            # to create, and generally there are a modest number of connections...so at this time
-            # we are willing to accept blocking.  The caller can use an executor thread if needed.
-
-            # We want to avoid working with the connection (_mssql object) across threads, and
-            # we want to store the connection in the list...which requires a lock.  And we also
-            # prefer not to have threads locking the global list.
-
-            conn = await self.new_conn(skip_init=skip_init, conn_name=conn_name)
-
-        if conn is not None:
-            conn.name = conn_name
-            with self.lock:
-                log(None, 'SQL',
-                    'New connection added to the pool. len(conns)={}; len(conns_inuse={}; len(conns_torelease={})'.format(
-                        len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
-                if use_now:
-                    self.conns_inuse.append(conn)
-                else:
-                    self.conns.append(conn)
-
-        return conn
-
-    async def get_conn(self, force_new=False, skip_init=False, conn_name='no name'):
-        conn = None
-
-        with self.lock:
-            if len(self.conns) > 0 and not force_new:
-                conn = self.conns.pop()
-                self.conns_inuse.append(conn)
-                conn.name = conn_name
-                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, conn.id,
-                    'len(conns)={}; len(conns_inuse={}; len(conns_torelease={})'.format(
-                    len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
-        if conn is None:
-
-            if len(self.conns) + len(self.conns_inuse) >= self.sql_settings.max_conns:
-                log(None, 'SQLConn', 'TOO MANY SQL CONNECTIONS per configured sql_max_connections ({})'.format(self.sql_settings.max_conns))
-
-            else:
-                #conn = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.add_conn, skip_init=skip_init, conn_name=conn_name))
-
-                conn = await self.add_conn(skip_init=skip_init, conn_name=conn_name)
-                if conn is not None:
-                    log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
-                        '. Remaining in pool: ', len(self.conns))
-
-        return conn
-
-    async def release_conn(self, conn):
-        # Fast bookkeeping: move conn from conns_inuse to conns_torelease.
-        # The actual SQL reset (theas.spactResetConnection) is deferred to
-        # process_release_conns(), which runs from the async event loop's
-        # periodic each_period() at a more convenient time.
-        # async signature retained for caller compatibility; the body is sync.
-        self.release_conn_sync(conn)
-
-    def release_conn_sync(self, conn):
-        # Sync variant of release_conn() with the same semantics.  Safe to
-        # call from destructors, finished_sync, and other non-async paths.
-        if conn is None:
-            return
-
-        with self.lock:
-            for i, this_conn in enumerate(self.conns_inuse):
-                if this_conn is conn:
-                    self.conns_inuse.pop(i)
-                    self.conns_torelease.append(conn)
-                    log(None, 'SQL', 'release_conn: queued for deferred reset:', conn.id,
-                        'len(conns)={}; len(conns_inuse)={}; len(conns_torelease)={}'.format(
-                            len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
-                    return
-            log(None, 'SQL', 'release_conn: conn not found in conns_inuse:', conn.id)
-
-    async def process_release_conns(self):
-        # Drain conns_torelease.  For each conn, attempt reset_conn() and
-        # re-pool on success.  Pop one at a time under the lock; release the
-        # lock for the await on reset_conn so other pool operations can proceed
-        # during the SQL round-trip.
-        while True:
-            with self.lock:
-                if not self.conns_torelease:
-                    return
-                conn = self.conns_torelease.pop(0)
-                log(None, 'Conn', 'process_release_conns: processing conn:', conn.id,
-                    'remaining in queue:', len(self.conns_torelease))
-
-            if conn is None:
-                continue
-
-            if await self.reset_conn(conn):
-                with self.lock:
-                    self.conns.append(conn)
-                    log(None, 'SQL', 'process_release_conns: re-pooled conn:', conn.id)
-            else:
-                log(None, 'SQL', 'process_release_conns: dropped conn (reset failed):', conn.id)
-                # reset_conn() invoked kill_conn() on failure paths, but kill_conn
-                # only acts on conns_inuse membership.  At this point the conn was
-                # already popped from conns_torelease, so close the underlying SQL
-                # connection here to be sure.
-                try:
-                    if conn.sql_conn is not None and conn.sql_conn.connected:
-                        conn.sql_conn.close()
-                except Exception as e:
-                    log(None, 'SQL', 'process_release_conns: error closing dead conn:', conn.id, repr(e))
-
-    def kill_conn(self, conn):
-        if conn is None:
-            return
-
-        with self.lock:
-            for i, this_conn in enumerate(self.conns_inuse):
-                if this_conn == conn:
-                    self.conns_inuse.pop(i)
-                    if this_conn.sql_conn is not None and this_conn.sql_conn.connected:
-                        this_conn.sql_conn.close()
-
-                    del this_conn
-
-                    break
 
 # for convenience: a wrapper function to call the authentication stored proc
 async def call_auth_storedproc(th_session=None, conn=None, username=None, password=None, user_token=None,
@@ -470,13 +302,6 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
 
                 err_msg = this_conn.last_error
 
-                if 1 == 0:
-                    # We failed ot log in with the provided credentials.  We would like this connection to fall back
-                    # to being logged in as the public web user.
-                    if this_conn is not None and not is_recurse:
-                        log(th_session, 'Session', 'Recursively calling call_auth_storedproc() with _LOGIN_AUTO_USER_TOKEN')
-                        await call_auth_storedproc(is_recurse=True, user_token=_LOGIN_AUTO_USER_TOKEN, conn=this_conn)
-
                 if th_session is not None:
                     th_session.error_message = err_msg
 
@@ -494,6 +319,9 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
                 if th_session is not None:
                     th_session.logged_in = this_conn.is_user_authed
                     th_session.conn.name = username if username else user_token[:5] + '...' #for logging / debugging
+
+                trace('auth_sp.result', trace_group='sql_connection_persist', th_session=th_session,
+                      conn=this_conn, username=username, via_token=user_token is not None)
 
         else:
             log(th_session, 'Session', 'Authentication stored proc not is_ok in call_auth_storedproc()')
@@ -609,6 +437,7 @@ class ThStoredProc:
                 self.th_session.conn is None or not self.th_session.conn.connected
         ):
             log(self.th_session, 'StoredProc', 'Calling init_session', self.stored_proc_name)
+
             await self.th_session.init_session()
             self.conn = self.th_session.conn
 
@@ -639,6 +468,8 @@ class ThStoredProc:
                 result = False
 
         if not result and self.have_session:
+            trace('isok.release', trace_group='sql_connection_persist', th_session=self.th_session,
+                  conn=self.th_session.conn, stored_proc=self.stored_proc_name)
             self.th_session.logged_in = False
             bad_conn = self.th_session.conn
             self.th_session.conn = None

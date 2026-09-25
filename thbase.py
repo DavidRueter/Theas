@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 import os
 import ctypes
@@ -9,6 +10,56 @@ import functools
 from pympler import asizeof, muppy, summary as mem_summary
 
 _logger = logging.getLogger('theas')
+
+# Dedicated logger for the compact connection/auth lifecycle "trace slice".
+# Its records go to logs/theas_trace.log only (propagate=False); trace() also
+# mirrors each marker into _logger so it appears inline in the console/full log.
+_trace_logger = logging.getLogger('theas.trace')
+
+# Explicit, unambiguous timestamp so a reader can filter by a time window
+# (e.g. "the last 120 seconds") without guessing the format.
+_LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+
+# --- trace() gating -------------------------------------------------------
+# Layer 1: master switch.  Set False for production builds to disable ALL
+# trace() output globally.  Checked first in trace(), so it short-circuits
+# everything else.
+DEBUG_TRACE_ENABLED = False
+
+# Layer 2: flat named groups.  Each trace() call may name one or more groups
+# via trace_group='a;b' (';'-delimited).  Untagged calls belong to 'ungrouped'.
+#   TRACE_ONLY_GROUPS -- focus mode: if non-empty, ONLY these groups emit
+#                        (overrides the mute list).
+#   TRACE_MUTE_GROUPS -- otherwise: every group emits EXCEPT these.
+# Edit these two sets to centrally enable/disable trace points by group.
+TRACE_ONLY_GROUPS = set()
+TRACE_MUTE_GROUPS = set()
+
+
+def _parse_trace_groups(trace_group):
+    # Split ';'-delimited groups into a set; untagged -> the 'ungrouped' group
+    # so the normal muting/focus controls still apply to it.
+    groups = {g.strip() for g in trace_group.split(';') if g.strip()} if trace_group else set()
+    return groups or {'ungrouped'}
+
+
+def _trace_enabled(trace_group):
+    groups = _parse_trace_groups(trace_group)
+    if TRACE_ONLY_GROUPS:
+        return bool(groups & TRACE_ONLY_GROUPS)   # focus overrides mute when set
+    return not (groups & TRACE_MUTE_GROUPS)
+
+
+def _log_dir():
+    prog_dir, _ = get_program_directory()
+    log_dir = os.path.join(prog_dir, 'logs')
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception:
+        # If logs/ can't be created, fall back to the program directory so we
+        # still get a file rather than crashing startup over logging.
+        log_dir = prog_dir
+    return log_dir
 
 # Local threshold for thbase.log() gating.  Semantics:
 #   1  -> log everything (the default)
@@ -26,11 +77,100 @@ def setup_logging():
     # Tornado's own logs through the same handlers, attach handlers to the root
     # logger instead and drop propagate=False.
     if not _logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
-        _logger.addHandler(handler)
+        fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
+
+        # Console (unchanged: this is what you watch in the PyCharm debugger).
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        _logger.addHandler(console)
+
+        # Full debug log: mirrors everything that goes to the console to a
+        # rotating file so it can be tailed / reviewed after the fact.
+        full_h = RotatingFileHandler(
+            os.path.join(_log_dir(), 'theas_debug.log'),
+            maxBytes=20_000_000, backupCount=5, encoding='utf-8')
+        full_h.setFormatter(fmt)
+        _logger.addHandler(full_h)
+
         _logger.setLevel(logging.DEBUG)
         _logger.propagate = False
+
+    if not _trace_logger.handlers:
+        # Compact lifecycle trace slice: only the events emitted via trace().
+        trace_fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
+        trace_h = RotatingFileHandler(
+            os.path.join(_log_dir(), 'theas_trace.log'),
+            maxBytes=10_000_000, backupCount=5, encoding='utf-8')
+        trace_h.setFormatter(trace_fmt)
+        _trace_logger.addHandler(trace_h)
+        _trace_logger.setLevel(logging.DEBUG)
+        _trace_logger.propagate = False
+
+
+def _obj_ref(obj):
+    # Short identity that is stable within a single run -- lets us tell whether
+    # two requests are touching the SAME ThSession object or different ones.
+    return hex(id(obj))[2:] if obj is not None else '-'
+
+
+def trace(event, th_session=None, conn=None, trace_group=None, **fields):
+    """OPTIONAL developer trace — safe to remove; has NO effect on behavior.
+
+    trace() is pure observability: it writes a diagnostic marker to the trace
+    log and does nothing else.  Any individual trace() call may be deleted or
+    commented out, and ALL tracing can be turned off for production by setting
+    thbase.DEBUG_TRACE_ENABLED = False -- none of this changes how Theas runs.
+
+    It writes to logs/theas_trace.log (the clean lifecycle slice) and mirrors
+    the marker inline into the main log/console for context.
+
+    Parameters (only `event` is required):
+        event       -- short label for this trace point (e.g. 'get.start').
+        th_session  -- ThSession whose session/conn context to include.
+        conn        -- explicit Conn; pass at release sites where self.conn was
+                       already set to None, so the conn id is still captured.
+        trace_group -- ';'-delimited group name(s) for central enable/disable
+                       via TRACE_ONLY_GROUPS / TRACE_MUTE_GROUPS.  Untagged
+                       calls belong to the 'ungrouped' group.
+        **fields    -- extra key=value pairs appended to the marker.
+    """
+    if not DEBUG_TRACE_ENABLED:
+        return
+    if not _trace_enabled(trace_group):
+        return
+
+    parts = ['evt=' + str(event)]
+    if trace_group:
+        parts.append('grp=' + str(trace_group))
+
+    if th_session is not None:
+        parts.append('sess=' + str(getattr(th_session, 'session_token', None)))
+        parts.append('id_sess=' + _obj_ref(th_session))
+        parts.append('logged_in=' + str(getattr(th_session, 'logged_in', None)))
+        parts.append('req=' + str(getattr(th_session, 'request_count', None)))
+
+    this_conn = conn
+    if this_conn is None and th_session is not None:
+        this_conn = getattr(th_session, 'conn', None)
+    if this_conn is not None:
+        parts.append('conn=' + str(getattr(this_conn, 'id', None)))
+        parts.append('is_user_authed=' + str(getattr(this_conn, 'is_user_authed', None)))
+        parts.append('is_public_authed=' + str(getattr(this_conn, 'is_public_authed', None)))
+
+    for k, v in fields.items():
+        parts.append('{}={}'.format(k, v))
+
+    msg = 'TRACE ' + ' '.join(parts)
+    try:
+        _trace_logger.info(msg)
+    except Exception:
+        pass
+    try:
+        # Mirror into the main log so the marker is visible inline in the
+        # console and full debug log alongside surrounding activity.
+        _logger.info(msg)
+    except Exception:
+        pass
 
 def get_program_directory():
     program_cmd = sys.argv[0]
