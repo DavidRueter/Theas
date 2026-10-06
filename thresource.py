@@ -11,10 +11,8 @@ import string
 G_cached_resources = None
 G_branch_code = None
 
-def config_thresource(
-        gresources=None,
-        branch_code=None
-    ):
+
+def config_thresource(gresources=None, branch_code=None):
     global G_cached_resources
     if gresources is not None:
         G_cached_resources = gresources
@@ -42,7 +40,7 @@ class ThResource:
 
     def __init__(self):
         self.resource_code = ''
-        self.is_simple = True,
+        self.is_simple = (True,)
         self.filename = ''
         self.filetype = ''
         self.date_updated = ''
@@ -59,11 +57,12 @@ class ThResource:
         self.exists = True
         self.on_before = None
         self.on_after = None
-        self.revision = None,
+        self.revision = (None,)
         self.redir_url = None
 
     def __del__(self):
         self.data = None
+
 
 class ThCachedResources:
     """Class ThCachedResources is to manage a thread-safe global dictionary for storage of cached web resources
@@ -73,12 +72,15 @@ class ThCachedResources:
     loading resources, retrieving resources, and deleting resources (i.e. purging cached resources).
     """
 
-    def __init__(self, default_path='somepath', static_file_version_no=1,
-                 max_cache_item_size = 1024 * 1024 * 100,  # Only cache SysWebResources that are less than 100 Meg in size
-                 max_cache_size = 1024 * 1024 * 1024 * 2,   # Use a maximum of 2 GB of cache)
-                 conn_pool=None,
-                 login_resource_code='login'
-                 ):
+    def __init__(
+        self,
+        default_path='somepath',
+        static_file_version_no=1,
+        max_cache_item_size=1024 * 1024 * 100,  # Only cache SysWebResources that are less than 100 Meg in size
+        max_cache_size=1024 * 1024 * 1024 * 2,  # Use a maximum of 2 GB of cache)
+        conn_pool=None,
+        login_resource_code='login',
+    ):
         self.lock = RLock()
         self.__resources = {}
         self.__static_blocks_dict = {}
@@ -88,13 +90,12 @@ class ThCachedResources:
         self.static_file_version_no = static_file_version_no
         self.max_cache_item_size = max_cache_item_size
         self.max_cache_size = max_cache_size
-        self.conn_pool=conn_pool # Reference to global connection poool
+        self.conn_pool = conn_pool  # Reference to global connection poool
         self.login_resource_code = login_resource_code
 
     def __del__(self):
         with self.lock:
             for resource_code in self.__resources:
-
                 this_resource = self.__resources[resource_code]
                 if this_resource.data is not None:
                     self.cache_bytes_used = self.cache_bytes_used - len(this_resource.data)
@@ -118,7 +119,6 @@ class ThCachedResources:
 
             self.__resource_versions_dict = None
             del self.__resource_versions_dict
-
 
     @property
     def static_blocks_dict(self):
@@ -197,8 +197,9 @@ class ThCachedResources:
 
     def add_resource(self, resource_code, resource_dict):
 
-        if resource_dict.data is None or\
-                (len(resource_dict.data) < self.max_cache_item_size and self.cache_bytes_used < self.max_cache_size):
+        if resource_dict.data is None or (
+            len(resource_dict.data) < self.max_cache_item_size and self.cache_bytes_used < self.max_cache_size
+        ):
             with self.lock:
                 self.__resources[resource_code] = resource_dict
                 if resource_dict.data is not None:
@@ -206,15 +207,21 @@ class ThCachedResources:
 
                 log_memory(obj=self.__resources, label='ThCachedResources.add_resource {}'.format(resource_code))
 
-    async def load_resource(self, resource_code, all_static_blocks=False,
-                      from_filename=None, is_public=False, is_static=False, get_default_resource=False,
-                      conn=None):
+    async def load_resource(
+        self,
+        resource_code,
+        all_static_blocks=False,
+        from_filename=None,
+        is_public=False,
+        is_static=False,
+        get_default_resource=False,
+        conn=None,
+    ):
         this_resource = None
 
         if not theas_server().is_running and from_filename is None and not all_static_blocks:
             return None
         else:
-
             if from_filename:
                 # load resource from file
 
@@ -224,7 +231,9 @@ class ThCachedResources:
                             buf = f.read()
                             f.close()
                     except Exception:
-                        raise TheasServerError('Error while starting the Theas Server:  File Theas.js could not be read.')
+                        raise TheasServerError(
+                            'Error while starting the Theas Server:  File Theas.js could not be read.'
+                        )
 
                     this_resource = ThResource()
                     this_resource.resource_code = resource_code
@@ -238,15 +247,16 @@ class ThCachedResources:
                     this_resource.is_public = is_public
                     this_resource.is_static = is_static
                     this_resource.requires_authentication = False
-                    this_resource.revision = self.static_file_version_no # use Theas version
+                    this_resource.revision = self.static_file_version_no  # use Theas version
                     this_resource.redir_url = None
 
                     self.add_resource(resource_code, this_resource)
 
                 else:
                     raise TheasServerError(
-                        'Error due to request of file {} from the file system.  Server is configured to server resources only from the database.'.format(
-                            from_filename))
+                        'Error due to request of file {} from the file system.  Server is configured to server '
+                        'resources only from the database.'.format(from_filename)
+                    )
             else:
                 # load resource from database
 
@@ -254,12 +264,15 @@ class ThCachedResources:
                     log(None, 'Resource', 'Will load all static resources from the database.')
                 else:
                     if resource_code == '~':
-                        log(None, 'Resource',
-                                       'Requesting ~.  Will load default resource for this session.')
+                        log(None, 'Resource', 'Requesting ~.  Will load default resource for this session.')
                         get_default_resource = True
                     else:
-                        log(None, 'Resource', 'ThCachedResources.load_resource fetching from database',
-                                       resource_code if resource_code is not None else 'None')
+                        log(
+                            None,
+                            'Resource',
+                            'ThCachedResources.load_resource fetching from database',
+                            resource_code if resource_code is not None else 'None',
+                        )
 
                 proc = None
 
@@ -269,10 +282,8 @@ class ThCachedResources:
 
                 branch_code = G_branch_code
 
-
                 is_ok = await proc.is_ok()
                 if is_ok:
-
                     # Note:  we could check for existence of @GetDefaultResource down below to help with backwards
                     # compatibility ... but that would mean having to call refresh_parameter_list, which is
                     # unnecessary overhead.
@@ -280,13 +291,11 @@ class ThCachedResources:
                     proc.bind(resource_code, _mssql.SQLCHAR, '@ResourceCode', null=(resource_code is None))
                     proc.bind(str(int(all_static_blocks)), _mssql.SQLCHAR, '@AllStaticBlocks')
 
-
-                    #if '@Language' in proc.parameter_list:
+                    # if '@Language' in proc.parameter_list:
                     #    proc.bind(language, _mssql.SQLINT4, '@Language', null=(language is None)) #int
 
-
                     if '@BranchCode' in proc.parameter_list:
-                        proc.bind(branch_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None)) #varchar(40)
+                        proc.bind(branch_code, _mssql.SQLCHAR, '@BranchCode', null=(branch_code is None))  # varchar(40)
 
                     # if '@GetDefaultResource' in proc.parameter_list:
                     proc.bind(1 if (get_default_resource) else 0, _mssql.SQLCHAR, '@GetDefaultResource')
@@ -311,14 +320,20 @@ class ThCachedResources:
                                 elif not all_static_blocks and buf and '$thInclude_' in buf:
                                     # Perform replacement of includes.  Template may include string like:
                                     # $thInclude_MyResourceCode
-                                    # Note that if the ResourceCode contains a / it MUST be replaced by ___ (triple underscore)
-                                    # dut to requirements of safe_substitute()
-                                    # This will be replaced with the static block resource having a ResourceCode=MyResourceCode
+                                    # Note that if the ResourceCode contains a / it MUST be replaced by ___
+                                    # (triple underscore) dut to requirements of safe_substitute()
+                                    # This will be replaced with the static block resource having a
+                                    # ResourceCode=MyResourceCode
                                     try:
                                         tmp = string.Template(buf)
                                         buf = tmp.safe_substitute(G_cached_resources.static_blocks_dict)
                                     except Exception as e:
-                                        log(None, 'Resource', 'Error in load_resource() when processing $thInclude_xxx', e)
+                                        log(
+                                            None,
+                                            'Resource',
+                                            'Error in load_resource() when processing $thInclude_xxx',
+                                            e,
+                                        )
 
                                 this_resource = ThResource()
 
@@ -332,9 +347,13 @@ class ThCachedResources:
 
                                 if row['APIStoredProc']:
                                     this_resource.api_stored_proc = row['APIStoredProc'].split(' ')[0]
-                                    this_resource.api_stored_proc_paramstr = row['APIStoredProc'][len(this_resource.api_stored_proc):]
+                                    this_resource.api_stored_proc_paramstr = row['APIStoredProc'][
+                                        len(this_resource.api_stored_proc) :
+                                    ]
                                     if this_resource.api_stored_proc_paramstr:
-                                        this_resource.api_stored_proc_paramstr  = this_resource.api_stored_proc_paramstr.strip()
+                                        this_resource.api_stored_proc_paramstr = (
+                                            this_resource.api_stored_proc_paramstr.strip()
+                                        )
 
                                 this_resource.api_async_stored_proc = row['APIAsyncStoredProc']
                                 this_resource.api_stored_proc_resultset_str = row['ResourceResultsets']
@@ -357,25 +376,26 @@ class ThCachedResources:
                                     this_resource.redir_url = row['RedirURL']
 
                                 if (
-                                    this_resource.render_jinja_template or
-                                    this_resource.api_async_stored_proc or
-                                    this_resource.api_async_stored_proc or
-                                    this_resource.requires_authentication
+                                    this_resource.render_jinja_template
+                                    or this_resource.api_async_stored_proc
+                                    or this_resource.api_async_stored_proc
+                                    or this_resource.requires_authentication
                                 ):
                                     this_resource.is_simple = False
 
-
-                                if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
+                                if this_resource.resource_code and not this_resource.resource_code in ('~', '/', ''):
                                     # added 2/11/2019:  don't want to cache default resource
                                     self.add_resource(row['ResourceCode'], this_resource)
 
                                 if all_static_blocks:
-                                    #this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
-                                    this_static_blocks_dict['thInclude_' + row['ResourceCode'].replace('/', '___')] = buf
+                                    # this_static_blocks_dict['//thInclude_' + row['ResourceCode']] = buf
+                                    this_static_blocks_dict['thInclude_' + row['ResourceCode'].replace('/', '___')] = (
+                                        buf
+                                    )
                                     # note: the dict will be used in safe_substitute, so key must not include '/'
                                     # so we replace '/' with '___'
 
-                    if 1 == 0 and resource_code and not resource_code  in ('~', '/', '')  and row_count == 0:
+                    if 1 == 0 and resource_code and not resource_code in ('~', '/', '') and row_count == 0:
                         # do negative cache
                         # Negative caching disabled 5/23/2022 due to causing some problems related to:
                         #  UseSysWebResource, timing and PurgeCache, etc.
@@ -394,7 +414,8 @@ class ThCachedResources:
 
                                 new_dict = {v["ResourceCode"]: v for v in json.loads(buf) if "ResourceCode" in v}
 
-                                # NOTE: this is not thread-safe. We assume that all_static_blocks will be true only when it is safe
+                                # NOTE: this is not thread-safe. We assume that all_static_blocks will be true only
+                                # when it is safe
                                 ThCachedResources.resource_versions_dict = new_dict
                     proc = None
                     del proc
@@ -419,12 +440,19 @@ class ThCachedResources:
 
         return result
 
+    async def get_resource(
+        self,
+        resource_code,
+        th_session,
+        all_static_blocks=False,
+        from_filename=None,
+        is_public=False,
+        is_static=False,
+        get_default_resource=False,
+        conn=None,
+    ):
 
-    async def get_resource(self, resource_code, th_session, all_static_blocks=False, from_filename=None,
-                           is_public=False, is_static=False, get_default_resource=False,
-                           conn=None):
-
-        #global DEFAULT_RESOURCE_CODE
+        # global DEFAULT_RESOURCE_CODE
 
         this_resource = None
 
@@ -437,8 +465,8 @@ class ThCachedResources:
         if resource_code == '':
             resource_code = None
         elif resource_code in ('~', '__th', '/'):
-                resource_code = '~'
-                get_default_resource = True
+            resource_code = '~'
+            get_default_resource = True
 
         if resource_code is not None and resource_code in self.__resources:
             # Cached resource
@@ -449,7 +477,6 @@ class ThCachedResources:
             # Load resource
 
             created_conn = False
-
 
             if th_session and th_session.conn and get_default_resource:
                 # MUST use the session's connection if it exists in order to get the
@@ -467,27 +494,31 @@ class ThCachedResources:
 
             this_resource = None
             try:
-                this_resource = await self.load_resource(resource_code,
-                                                   all_static_blocks=all_static_blocks,
-                                                   get_default_resource=get_default_resource,
-                                                   from_filename=from_filename,
-                                                   conn=conn)
+                this_resource = await self.load_resource(
+                    resource_code,
+                    all_static_blocks=all_static_blocks,
+                    get_default_resource=get_default_resource,
+                    from_filename=from_filename,
+                    conn=conn,
+                )
             except Exception as e:
                 log(None, 'Resource', 'Exception when calling load_resource(): ', str(e))
                 this_resource = None
 
-
             if created_conn and conn:
-                #conn.close()
+                # conn.close()
                 await self.conn_pool.release_conn(conn)
                 conn = None
 
-
         # Careful:  we could be getting a cached resource in which case there may not yet be a session, in which
         # case we can't update current_resource here!  It is up to the caller to update current_resource
-        if th_session is not None and this_resource is not None and this_resource.exists and \
-                this_resource.resource_code != self.login_resource_code and \
-                this_resource.render_jinja_template:
+        if (
+            th_session is not None
+            and this_resource is not None
+            and this_resource.exists
+            and this_resource.resource_code != self.login_resource_code
+            and this_resource.render_jinja_template
+        ):
             # we are assuming that only a jinja template page will have a stored procedure / can servethis
             # as the current resource for a session.  (We don't want javascript files and the like
             # to be recorded as the current resource.)
@@ -500,11 +531,10 @@ class ThCachedResources:
         if conn is None:
             conn = await self.conn_pool.get_conn(conn_name='load_global_resources()')
 
-        #await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
+        # await self.get_resource('Theas.js', None, from_filename=self.default_path + 'Theas.js', is_public=True)
         await self.get_resource(None, None, all_static_blocks=True, conn=conn)
 
         if conn is not None:
             await self.conn_pool.release_conn(conn)
-
 
         pass

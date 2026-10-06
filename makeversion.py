@@ -13,6 +13,7 @@ import datetime
 import getpass
 import socket
 
+
 def inc_build():
     theas_version = ''
 
@@ -36,12 +37,34 @@ def inc_build():
 
     try:
         with open('version_history.txt', 'a') as f:
-            f.write('\t'.join(list([datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S:%f'), 'ver. ' + theas_version, getpass.getuser(), socket.gethostname() + '\n'])))
+            f.write(
+                '\t'.join(
+                    list(
+                        [
+                            datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S:%f'),
+                            'ver. ' + theas_version,
+                            getpass.getuser(),
+                            socket.gethostname() + '\n',
+                        ]
+                    )
+                )
+            )
             f.close()
     except Exception as e:
         try:
             with open('version_history.txt', 'w') as f2:
-                f2.write('\t'.join(list([datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S:%f'), 'ver. ' + theas_version, getpass.getuser(), socket.gethostname() + '\n'])))
+                f2.write(
+                    '\t'.join(
+                        list(
+                            [
+                                datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S:%f'),
+                                'ver. ' + theas_version,
+                                getpass.getuser(),
+                                socket.gethostname() + '\n',
+                            ]
+                        )
+                    )
+                )
                 f2.close()
         except:
             print('WARNING:  Could not write new build version number out to version_history.txt')
@@ -87,4 +110,3 @@ VarFileInfo([VarStruct('Translation', [1033, 1200])])
 out_file = open('versioninfo.cfg', 'w')
 out_file.write(template_str)
 out_file.close()
-

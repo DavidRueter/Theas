@@ -46,7 +46,7 @@ def _parse_trace_groups(trace_group):
 def _trace_enabled(trace_group):
     groups = _parse_trace_groups(trace_group)
     if TRACE_ONLY_GROUPS:
-        return bool(groups & TRACE_ONLY_GROUPS)   # focus overrides mute when set
+        return bool(groups & TRACE_ONLY_GROUPS)  # focus overrides mute when set
     return not (groups & TRACE_MUTE_GROUPS)
 
 
@@ -63,6 +63,7 @@ def _log_dir(log_path=None):
     log_dir = os.path.normpath(log_dir)
     os.makedirs(log_dir, exist_ok=True)
     return log_dir
+
 
 # Local threshold for thbase.log() gating.  Semantics:
 #   1  -> log everything (the default)
@@ -124,8 +125,8 @@ def setup_log_files(log_path=None):
             # rotating file so it can be tailed / reviewed after the fact.
             fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
             full_h = RotatingFileHandler(
-                os.path.join(log_dir, 'theas_debug.log'),
-                maxBytes=20_000_000, backupCount=5, encoding='utf-8')
+                os.path.join(log_dir, 'theas_debug.log'), maxBytes=20_000_000, backupCount=5, encoding='utf-8'
+            )
             full_h.setFormatter(fmt)
             _logger.addHandler(full_h)
 
@@ -133,8 +134,8 @@ def setup_log_files(log_path=None):
             # Compact lifecycle trace slice: only the events emitted via trace().
             trace_fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
             trace_h = RotatingFileHandler(
-                os.path.join(log_dir, 'theas_trace.log'),
-                maxBytes=10_000_000, backupCount=5, encoding='utf-8')
+                os.path.join(log_dir, 'theas_trace.log'), maxBytes=10_000_000, backupCount=5, encoding='utf-8'
+            )
             trace_h.setFormatter(trace_fmt)
             _trace_logger.addHandler(trace_h)
             _trace_logger.setLevel(logging.DEBUG)
@@ -213,6 +214,7 @@ def trace(event, th_session=None, conn=None, trace_group=None, **fields):
     except Exception:
         pass
 
+
 def get_program_directory():
     program_cmd = sys.argv[0]
     program_directory = ''
@@ -238,7 +240,6 @@ def get_program_directory():
                 # we are stuck.
                 program_directory = ''
 
-
     program_directory = os.path.normpath(program_directory)
 
     if not program_directory.endswith(os.sep):
@@ -246,12 +247,12 @@ def get_program_directory():
 
     return program_directory, program_filename
 
+
 def format_error(e):
     err_msg = ''
     err_msg_dblib = ''
     err_msg_friendly = ''
     err_msg_template = ''
-
 
     if isinstance(e, str):
         err_msg = e
@@ -299,11 +300,17 @@ def format_error(e):
     if hasattr(e, 'procname'):
         err_msg_storedproc = e.procname.decode('ascii')
 
-        err_msg_tech += \
-            ('Exception type ' + type(e).__name__ + '\n') if type(e).__name__ != 'str' else '' + \
-             'Stored procedure ' + err_msg_storedproc if err_msg_storedproc is not None else '' + \
-             (' error ' + e.number) if hasattr(e, 'number') else '' + \
-             (' at line ' + e.line) if hasattr(e, 'line') else ''
+        err_msg_tech += (
+            ('Exception type ' + type(e).__name__ + '\n')
+            if type(e).__name__ != 'str'
+            else '' + 'Stored procedure ' + err_msg_storedproc
+            if err_msg_storedproc is not None
+            else '' + (' error ' + e.number)
+            if hasattr(e, 'number')
+            else '' + (' at line ' + e.line)
+            if hasattr(e, 'line')
+            else ''
+        )
 
     include_dblib_error = False
 
@@ -314,12 +321,13 @@ def format_error(e):
 
     return err_msg
 
+
 def log(th_session, category, *args, severity=10000):
     # Single entry point for all Theas logging.  When a session is provided, its
     # context (session_key, request_count, comments) is included in the message.
     # ThSession.log() is a thin pass-through that calls back here, so the actual
     # formatting and writing happens in one place.
-    if (_LOG_THRESHOLD  <= 0 or severity < _LOG_THRESHOLD):
+    if _LOG_THRESHOLD <= 0 or severity < _LOG_THRESHOLD:
         return
 
     msg_args = ' '.join(str(a) for a in args)
@@ -338,17 +346,22 @@ def log(th_session, category, *args, severity=10000):
     else:
         _logger.info('ThSessions [%s] %s', category, msg_args)
 
+
 class TheasServerError(BaseException):
     def __init__(self, value):
         self.value = value
 
     def __str__(self):
         return repr(self.value)
+
+
 class TheasServerSQLError(TheasServerError):
     def __init__(self, value):
         self.value = value
+
     def __str__(self):
         return repr(self.value)
+
 
 G_service_poll = None
 G_service_send_stop = None
@@ -359,15 +372,18 @@ def set_service_poll(service_poll):
     global G_service_poll
     G_service_poll = service_poll
 
+
 def set_service_send_stop(service_send_stop):
     global G_service_send_stop
     G_service_send_stop = service_send_stop
+
 
 def set_all_done(all_done):
     global G_all_done
     G_all_done = all_done
 
-class TheasServerRunner():
+
+class TheasServerRunner:
     def __init__(self, shutdown_event=None):
         self.__is_running = False
         self.__is_starting = True
@@ -379,7 +395,7 @@ class TheasServerRunner():
         self.loop = asyncio.new_event_loop()
 
     def __del__(self):
-        self.__is_running= False
+        self.__is_running = False
 
     @property
     def is_running(self):
@@ -406,8 +422,7 @@ class TheasServerRunner():
 
             elif self.__is_running:
                 self.__is_running = False
-                #self.__stop_server()
-
+                # self.__stop_server()
 
         except Exception as e:
             log(None, 'TheasServerRunner', 'Exception in TheasServerRunner.is_running setter', e)
@@ -418,7 +433,6 @@ class TheasServerRunner():
         else:
             log(None, 'TheasServerRunner', 'Server is stopped in TheasServerRunner.is_running setter')
 
-
     def stop(self, service=None, reason='', skip_service_stop=False):
         log(None, 'Shutdown', '***Stop() called because: {}'.format(reason))
         self.write_winlog('Shutting Down: In thbase TheasServerRunner because {}'.format(reason))
@@ -426,18 +440,15 @@ class TheasServerRunner():
         if not self.__is_stopping:
             self.__is_stopping = True
 
-
             loop = self.loop
 
             if loop is None or not loop.is_running():
                 log(None, 'Shutdown', 'PROBLEM: loop is not running in TheasServerRunner.stop()')
                 self.write_winlog('Shutting Down: PROBLEM loop is not running in TheasServerRunner.stop()')
 
-
             if loop and loop.is_running():
                 loop.create_task(shutdown())
                 log(None, 'Shutdown', '***create_task(shutdown()')
-
 
             if self.http_server is not None:
                 self.http_server.stop()
@@ -449,7 +460,6 @@ class TheasServerRunner():
             if self.shutdown_event is not None:
                 self.shutdown_event.set()
 
-
             if service is not None:
                 global G_service
                 G_service = None
@@ -460,19 +470,15 @@ class TheasServerRunner():
                 if G_service_send_stop is not None and not skip_service_stop:
                     G_service_send_stop()
 
-
-
             global G_all_done
             if G_all_done is not None:
-                #callback to shut down theas
+                # callback to shut down theas
                 G_all_done()
                 log(None, 'Shutdown', 'G_all_done() completed')
                 G_all_done = None
 
         log(None, 'Shutdown', '***stop() done')
         self.write_winlog('Shutting Down: Done with thbase TheasServerRunner.stop()')
-
-
 
     def start(self, shutdown_event=None, http_server=None, loop=None, reason=''):
         if shutdown_event is not None:
@@ -489,11 +495,12 @@ class TheasServerRunner():
         self.is_running = True
         self.state = 'running'
 
-
     def write_winlog(self, *args, is_error=False):
         write_winlog(*args, is_error=is_error)
 
+
 G_server = None
+
 
 def theas_server():
     global G_server
@@ -511,26 +518,29 @@ def write_winlog(*args, is_error=False):
     if service_name:
         try:
             import servicemanager
+
             fnc = servicemanager.LogErrorMsg if is_error else servicemanager.LogInfoMsg
             fnc('{}: {}'.format(service_name, msg))
             return
         except Exception:
             pass
 
-#https://www.pythontutorial.net/advanced-python/python-references/
-#def ref_count(address):
-    #return ctypes.c_long.from_address(address).value
 
-#https://stackify.com/python-garbage-collection/
-3#sys.getrefcount(a)
+# https://www.pythontutorial.net/advanced-python/python-references/
+# def ref_count(address):
+# return ctypes.c_long.from_address(address).value
+
+# https://stackify.com/python-garbage-collection/
+3  # sys.getrefcount(a)
 
 
 def collect_garbage():
-    #https://www.geeksforgeeks.org/garbage-collection-python/
+    # https://www.geeksforgeeks.org/garbage-collection-python/
     # Returns the number of objects it has collected and deallocated
     # lists are cleared whenever a full collection or collection of the highest generation (2) is run
-    gc.set_debug(gc.DEBUG_UNCOLLECTABLE |  gc.DEBUG_SAVEALL)
+    gc.set_debug(gc.DEBUG_UNCOLLECTABLE | gc.DEBUG_SAVEALL)
     return gc.collect()
+
 
 def memory_report():
     all_objects = muppy.get_objects()
@@ -539,7 +549,7 @@ def memory_report():
 
     sum1 = mem_summary.summarize(all_objects)
 
-    #mem_summary.print_(sum1)
+    # mem_summary.print_(sum1)
 
     lines = []
 
@@ -553,22 +563,25 @@ def memory_report():
     collect_garbage()
     return buf
 
+
 def log_memory(obj=None, label="", print_details=False):
     # see https://pythonhosted.org/Pympler/muppy.html and https://pythonhosted.org/Pympler/muppy.html#the-tracker-module
 
-        if obj is None:
-            all_objects = muppy.get_objects()
-            log(None, 'Memory', 'Total memory used', '({})'.format(label) , len(all_objects))
+    if obj is None:
+        all_objects = muppy.get_objects()
+        log(None, 'Memory', 'Total memory used', '({})'.format(label), len(all_objects))
 
-            if print_details:
-                sum1 = mem_summary.summarize(all_objects)
-                mem_summary.print_(sum1)
-        else:
-            log(None, 'Memory', 'Memory used', '({})'.format(label) , asizeof.asizeof(obj))
+        if print_details:
+            sum1 = mem_summary.summarize(all_objects)
+            mem_summary.print_(sum1)
+    else:
+        log(None, 'Memory', 'Memory used', '({})'.format(label), asizeof.asizeof(obj))
+
 
 async def stop_loop():
     loop = theas_server().loop
     loop.call_soon_threadsafe(loop.stop)
+
 
 async def shutdown():
     log(None, 'TheasServerRunner', '***shutdown() called')
@@ -579,24 +592,15 @@ async def shutdown():
         log(None, 'TheasServerRunner', 'PROBLEM in thbase.shutdown(): loop is not running')
 
     if loop is not None and loop.is_running():
-        #await asyncio.sleep(1)
+        # await asyncio.sleep(1)
 
-        tasks = [
-            t
-            for t
-            in asyncio.all_tasks()
-            if (
-                t is not asyncio.current_task()
-                and t._coro.__name__ != 'main'
-            )
-        ]
+        tasks = [t for t in asyncio.all_tasks() if (t is not asyncio.current_task() and t._coro.__name__ != 'main')]
 
         theas_server().loop.call_soon_threadsafe(loop.stop)
 
         [task.cancel() for task in tasks]
 
         await asyncio.gather(*tasks)
-
 
         log(None, 'Shutdown', '***shutdown() is done with await asyncio.gather(*tasks)')
         theas_server().write_winlog('Near end of thbase.shutdown()')
@@ -605,8 +609,7 @@ async def shutdown():
         # the running asyncio.run(parallel(run_as_svc=run_as_svc)) in TheasServer.run(run_as_svc=False)
         # will be complete and execution will continue there.
 
-
-        #if shutdown_event is not None:
+        # if shutdown_event is not None:
         #   await shutdown_event.wait()
 
         # server is done running
@@ -614,7 +617,6 @@ async def shutdown():
             theas_server().stop(reason='TheasServer.main() exiting')
 
         theas_server().loop.call_soon_threadsafe(loop.stop)
-
 
         if G_service_poll is not None:
             log(None, 'Shutdown', 'thbase.shutdown() calling G_service_poll()')
@@ -625,7 +627,6 @@ async def shutdown():
         log(None, 'Shutdown', '*Done with thbase.shutdown()')
         theas_server().write_winlog('Done with thbase.shutdown()')
 
+
 def set_service_name(service_name: str):
     theas_server().service_name = service_name
-
-

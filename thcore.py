@@ -108,7 +108,8 @@ HTTP POST of the actual Theas form.
 Theas is set to support both server-side rendering, and client-side rendering.  Which you use is up to you.
 '''
 import types
-#import string
+
+# import string
 from collections import OrderedDict
 import ast
 import traceback
@@ -121,12 +122,17 @@ import base64
 from collections.abc import Coroutine
 
 
-#from time import struct_time, strptime, strftime
+# from time import struct_time, strptime, strftime
 from time import strptime, strftime
 import datetime
 
-#from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
-from jinja2 import BaseLoader, TemplateNotFound, Undefined, pass_environment #environmentfilter  # , Markup, escape, Template,
+# from jinja2 import Template, Undefined, environmentfilter  # , Markup, escape
+from jinja2 import (
+    BaseLoader,
+    TemplateNotFound,
+    Undefined,
+    pass_environment,
+)  # environmentfilter  # , Markup, escape, Template,
 from jinja2.environment import Environment
 
 from thresource import G_cached_resources
@@ -248,11 +254,10 @@ class TheasControlNV:
         if self.control_type in ('radio', 'checkbox', 'select'):
             for temp_ctrlvalue, temp_ctrl in self.controls.items():
                 if temp_ctrl is not None:
-                    temp_ctrl.checked = (str(self.__datavalue) == str(temp_ctrl.value)) or \
-                                        (
-                                            (self.__datavalue is None or str(self.__datavalue) == '') and
-                                            str(self.__default_value) == str(temp_ctrl.value)
-                                        )
+                    temp_ctrl.checked = (str(self.__datavalue) == str(temp_ctrl.value)) or (
+                        (self.__datavalue is None or str(self.__datavalue) == '')
+                        and str(self.__default_value) == str(temp_ctrl.value)
+                    )
 
                     if temp_ctrl.checked:
                         self.value = temp_ctrl.value
@@ -262,7 +267,7 @@ class TheasControlNV:
             self.value = self.datavalue
 
 
-class Theas():
+class Theas:
     def __init__(self, theas_session=None, jinja_environment=None):
 
         self.th_session = theas_session
@@ -346,11 +351,12 @@ class Theas():
             # reuses existing jinja environment
             self.jinja_env = jinja_environment
 
-
         self.set_value('th:ST', str(self.th_session.session_token), include_in_json=False)
         self.set_value('th:ErrorMessage', '')
-        self.set_value('th:CurrentPage',
-                       self.th_session.current_resource.resource_code if self.th_session.current_resource is not None else '')
+        self.set_value(
+            'th:CurrentPage',
+            self.th_session.current_resource.resource_code if self.th_session.current_resource is not None else '',
+        )
         self.set_value('th:PerformUpdate', '0')
 
         self.functions = {}
@@ -550,8 +556,9 @@ class Theas():
                     control_type = 'hidden'
 
                 if auto_create:
-                    this_ctrl_nv = TheasControlNV(name=ctrl_name, control_type=control_type,
-                                                  default_value=default_value_param)
+                    this_ctrl_nv = TheasControlNV(
+                        name=ctrl_name, control_type=control_type, default_value=default_value_param
+                    )
                     is_new_control = True
                     if save_param:
                         self.control_names[ctrl_name] = this_ctrl_nv
@@ -575,8 +582,10 @@ class Theas():
                         this_ctrl = this_ctrl_nv.controls[value_param]
                 else:
                     raise Exception(
-                        'Error in jinja_theas.py Theas.get_control:  Did you mean datavalue=xxx? You may not pass in parameter value=xxx unless the control type is a radio or a checkbox.  (control_type={})'.format(
-                            this_ctrl_nv.control_type))
+                        'Error in jinja_theas.py Theas.get_control:  Did you mean datavalue=xxx? You may not pass in '
+                        'parameter value=xxx unless the control type is a radio or a checkbox.  '
+                        '(control_type={})'.format(this_ctrl_nv.control_type)
+                    )
 
             have_datavalue_param = False
             datavalue_param = ''
@@ -595,14 +604,17 @@ class Theas():
                 if isinstance(datavalue_param, (str, bytes, bytearray)):
                     urlparse.quote(datavalue_param)
 
-                #if ctrl_name == 'th:ErrorMessage':
+                # if ctrl_name == 'th:ErrorMessage':
                 #    self.th_session.log('Theas', 'th:ErrorMessage value set={}'.format(datavalue_param))
 
             if this_ctrl_nv is not None:
                 this_ctrl = this_ctrl_nv.control
 
-                if this_ctrl is None and this_ctrl_nv.control_type not in ('radio', 'select') and len(
-                        this_ctrl_nv.controls) == 1:
+                if (
+                    this_ctrl is None
+                    and this_ctrl_nv.control_type not in ('radio', 'select')
+                    and len(this_ctrl_nv.controls) == 1
+                ):
                     this_ctrl = this_ctrl_nv.controls[list(this_ctrl_nv.controls.keys())[0]]
                     if this_ctrl is not None and value_param != this_ctrl.value:
                         this_ctrl = None
@@ -633,12 +645,19 @@ class Theas():
                 this_attribs = {}
 
                 for this_key, this_paramvalue in kwargs.items():
-
                     if this_key == 'options_dict':
                         this_options_dict = kwargs[this_key]
 
-                    elif this_key in ('name', 'value', 'datavalue', 'source_list', 'source_value', 'source_label',
-                                      'escaping', 'persist'):
+                    elif this_key in (
+                        'name',
+                        'value',
+                        'datavalue',
+                        'source_list',
+                        'source_value',
+                        'source_label',
+                        'escaping',
+                        'persist',
+                    ):
                         # this kwarg does not apply or has already been handled
                         pass
 
@@ -705,7 +724,6 @@ class Theas():
                         # auto-created control.
                         this_ctrl_nv.datavalue = default_value_param
 
-
                 if this_ctrl is None:
                     this_ctrl = noneTheasControl
                     # else:
@@ -716,8 +734,11 @@ class Theas():
                     if id:
                         this_ctrl.id = id
 
-                if control_type is not None and control_type != this_ctrl_nv.control_type and (
-                    not this_ctrl_nv.control_type or this_ctrl_nv.control_type == 'hidden'):
+                if (
+                    control_type is not None
+                    and control_type != this_ctrl_nv.control_type
+                    and (not this_ctrl_nv.control_type or this_ctrl_nv.control_type == 'hidden')
+                ):
                     # Even on an existing control we want to update control_type if it is provided, because
                     # the control could have been created from TheasParams from a stored procedure and defaulted
                     # to hidden...but now a filter or something else is specifying the "real" type.
@@ -749,7 +770,9 @@ class Theas():
         return this_result
 
     def set_value(self, ctrl_name, new_value, include_in_json=True):
-        this_ctrl_nv, this_ctrl, value_changed = self.get_control(ctrl_name, datavalue=new_value, include_in_json=include_in_json)
+        this_ctrl_nv, this_ctrl, value_changed = self.get_control(
+            ctrl_name, datavalue=new_value, include_in_json=include_in_json
+        )
 
         this_result = None
         if this_ctrl_nv is not None:
@@ -757,8 +780,16 @@ class Theas():
 
         return this_result, value_changed
 
-    def process_client_request(self, request_handler=None, accept_any=False, buf=None, escaping='default',
-                               from_stored_proc=False, *args, **kwargs):
+    def process_client_request(
+        self,
+        request_handler=None,
+        accept_any=False,
+        buf=None,
+        escaping='default',
+        from_stored_proc=False,
+        *args,
+        **kwargs,
+    ):
         # handle updating theas_page controls
         # ('Theas: process_client_request starting')
 
@@ -795,9 +826,9 @@ class Theas():
                         theas_name = theas_name[6:]
 
                     if theas_name != 'th:LoggedIn' or from_stored_proc:
-                        this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
-                                                                                  datavalue=v,
-                                                                                  auto_create=True)
+                        this_ctrl_nv, this_ctrl, value_changed = self.get_control(
+                            theas_name, datavalue=v, auto_create=True
+                        )
                         if value_changed:
                             changed_controls.append(this_ctrl_nv)
 
@@ -820,9 +851,9 @@ class Theas():
                             elif escaping == 'htmlentities':
                                 this_value_str = html.unescape(this_value_str)
 
-                        this_ctrl_nv, this_ctrl, value_changed = self.get_control(theas_name,
-                                                                                  datavalue=this_value_str,
-                                                                                  auto_create=True)
+                        this_ctrl_nv, this_ctrl, value_changed = self.get_control(
+                            theas_name, datavalue=this_value_str, auto_create=True
+                        )
 
                         if value_changed:
                             changed_controls.append(this_ctrl_nv)
@@ -840,7 +871,6 @@ class Theas():
             self.th_session.log('Theas', 'No TheasParams were updated')
 
         return changed_controls
-
 
         # @environmentfilter
         # @pass_environment
@@ -868,7 +898,7 @@ class Theas():
 
         #   return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_values_json(self, this_env, this_value, as_string=False, *args, **kwargs):
         this_th = self.get_controls(include_in_json_only=True)
@@ -883,15 +913,15 @@ class Theas():
                 result = ''
         return result
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_base64(self, this_env, this_value, *args, **kwargs):
-        buf = base64.b64encode(this_value.encode(encoding='utf-8', errors='strict')).decode(encoding='ascii',
-                                                                                            errors='strict')
+        buf = base64.b64encode(this_value.encode(encoding='utf-8', errors='strict')).decode(
+            encoding='ascii', errors='strict'
+        )
         return "'{}'".format(buf)
 
-
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_resource(self, this_env, this_value, quotes=False, *args, **kwargs):
 
@@ -915,7 +945,6 @@ class Theas():
 
         busted_filename = this_value
 
-
         # The idea is that this_value contains a resource code that may have been cached by the browser.
         # If the resource has subsequently been updated on the server, we want the browser to request the
         # resource...even though the old version is in cache.
@@ -935,18 +964,14 @@ class Theas():
         # Can pass in an optional parameter quotes=True which will cause leading and trailing double
         # quotes to be added to the result.  (The default is no quotes will be added to the result.
 
-
         # If this_value is for a resource on this server, it may be either absolute or relative.
         # In either case, we want to make sure that we output a tab id if needed and possible.
         # If this_value starts with 'http:// or https:// we will assume it refers to
         # a remote (non-Theas) server, and should NOT get a tab id prepended.
 
-
-
         need_tabid = False
         if not is_remote and self.th_session and self.th_session.use_multi_tabs and self.th_session.tab_id:
             need_tabid = True
-
 
         if need_tabid:
             if busted_filename.startswith('/' + self.th_session.multi_tab_prefix):
@@ -963,9 +988,8 @@ class Theas():
         this_path = ''
 
         if need_tabid:
-            #prepend tab_id if the session uses multi_tabs
+            # prepend tab_id if the session uses multi_tabs
             this_path = '/' + self.th_session.multi_tab_prefix + self.th_session.tab_id + '/'
-
 
         if relative and this_env and this_env.current_request:
             # Note: even if this_path started out as relative, it will now be rewritten as absolute
@@ -994,8 +1018,7 @@ class Theas():
 
             this_path = this_path + req_path + '/'
 
-
-        busted_filename = this_path +  busted_filename
+        busted_filename = this_path + busted_filename
 
         result = json.dumps(busted_filename)
 
@@ -1004,7 +1027,7 @@ class Theas():
 
         return result
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_include(self, this_env, this_value, output=False, delims=('[[', ']]'), *args, **kwargs):
         this_control_nv = self.get_control(this_value)[0]
@@ -1013,15 +1036,11 @@ class Theas():
         buf = ''
 
         if output:
-            buf = '{}{}{}'.format(
-                delims[0],
-                this_control_nv.name.replace(':', '$'),
-                delims[1]
-            )
+            buf = '{}{}{}'.format(delims[0], this_control_nv.name.replace(':', '$'), delims[1])
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_xsrf(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
@@ -1035,7 +1054,7 @@ class Theas():
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_sessiontoken(self, this_env, this_value, vuejs=False, *args, **kwargs):
         # This filter is called like:
@@ -1048,33 +1067,35 @@ class Theas():
             buf = '<input name="{}" type="hidden" {}value="{}"/>'.format(
                 'theas:th:ST',
                 ':' if vuejs else '',  # bound attribute in vuejs
-                'theasParams.th$ST' if vuejs else str(this_env.theas_page.th_session.session_token)
+                'theasParams.th$ST' if vuejs else str(this_env.theas_page.th_session.session_token),
             )
 
         # sneak in hidden field to pass ErrorMessage
         buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
             'theas:th:ErrorMessage',
             ':' if vuejs else '',  # bound attribute in vuejs
-            'theasParams.th$ErrorMessage' if vuejs else self.get_value('theas:th:ErrorMessage')  # bind to json in vuejs
+            'theasParams.th$ErrorMessage'
+            if vuejs
+            else self.get_value('theas:th:ErrorMessage'),  # bind to json in vuejs
         )
 
         # sneak in hidden field to pass CurrentPage
         buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
             'theas:th:CurrentPage',
             ':' if vuejs else '',  # bound attribute in vuejs
-            'theasParams.th$CurrentPage' if vuejs else self.get_value('theas:th:CurrentPage')  # bind to json in vuejs
+            'theasParams.th$CurrentPage' if vuejs else self.get_value('theas:th:CurrentPage'),  # bind to json in vuejs
         )
 
         # sneak in hidden field to pass PerformUpdate
         buf += '<input name="{}" type="hidden" {}value="{}"/>'.format(
             'theas:th:PerformUpdate',
             ':' if vuejs else '',  # bound attribute in vuejs
-            'theasParams.th$PerformUpdate' if vuejs else '0'  # bind to json in vuejs
+            'theasParams.th$PerformUpdate' if vuejs else '0',  # bind to json in vuejs
         )
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_hidden(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
         # This filter is called like:
@@ -1103,9 +1124,9 @@ class Theas():
         if isinstance(this_value, str) and this_value.lower() != '__th':
             this_overwrite = False
 
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, default=this_value,
-                                                                       overwrite=this_overwrite,
-                                                                       control_type='hidden', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
+            ctrl_name, default=this_value, overwrite=this_overwrite, control_type='hidden', **kwargs
+        )
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
             if escaping == 'urlencode':
@@ -1118,14 +1139,14 @@ class Theas():
         buf = '<input name="{}" type="hidden" {}value="{}"/>'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             ':' if vuejs else '',
-            (this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$') if vuejs else value_str
+            (this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$') if vuejs else value_str,
         )
 
         this_ctrl_nv.include_in_json = True
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_input(self, this_env, this_value, escaping="urlencode", vuejs=False, *args, **kwargs):
         # This filter is called like:
@@ -1150,8 +1171,9 @@ class Theas():
             ctrl_name = ctrl_name[6:]
 
         # id not used for looking up (but might be provided and might need to be rendered)
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
-                                                                       control_type=type, **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
+            ctrl_name, datavalue=this_value, control_type=type, **kwargs
+        )
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
             if k.lower() != 'type':
@@ -1161,7 +1183,7 @@ class Theas():
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_ctrl_nv.control_type,
-            this_attribs_str
+            this_attribs_str,
         )
 
         # include value="" attribute, but only if we have a value
@@ -1178,7 +1200,7 @@ class Theas():
         if this_ctrl_nv.value:
             buf += ' {}value="{}">'.format(
                 ':' if vuejs else '',
-                (this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$') if vuejs else value_str
+                (this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$') if vuejs else value_str,
             )
         else:
             buf += '>'
@@ -1187,7 +1209,7 @@ class Theas():
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_radio(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
@@ -1205,8 +1227,9 @@ class Theas():
 
         # id should be specified for clarity.  If id is not provided, will try to find the correct control
         # based on name + value
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
-                                                                       control_type='radio', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
+            ctrl_name, datavalue=this_value, control_type='radio', **kwargs
+        )
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1219,14 +1242,14 @@ class Theas():
             this_ctrl_nv.control_type,
             this_attribs_str,
             this_ctrl.value,
-            ' checked="checked"' if this_ctrl.checked else ''
+            ' checked="checked"' if this_ctrl.checked else '',
         )
 
         this_ctrl_nv.include_in_json = True
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_select(self, this_env, this_options, this_value, *args, **kwargs):
         '''theas_select() : Jinja filter for rendering an HTML select, with options
@@ -1274,27 +1297,26 @@ class Theas():
             for this_row in kwargs['source_list']:
                 this_options_dict[this_row[kwargs['source_value']]] = this_row[kwargs['source_label']]
 
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
-                                                                       control_type='select',
-                                                                       options_dict=this_options_dict, **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
+            ctrl_name, datavalue=this_value, control_type='select', options_dict=this_options_dict, **kwargs
+        )
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
             if k.lower() != 'type':
                 this_attribs_str += ' {}="{}"'.format(k, v)
 
         buf = '<select name="{}"{}{} >'.format(
-            this_ctrl_nv.name_prefix + this_ctrl_nv.name,
-            format_str_if(this_ctrl.id, ' id="{}"'),
-            this_attribs_str
+            this_ctrl_nv.name_prefix + this_ctrl_nv.name, format_str_if(this_ctrl.id, ' id="{}"'), this_attribs_str
         )
 
         for temp_optval, temp_optctrl in this_ctrl_nv.controls.items():
             buf = buf + '\n<option value="{}"{}{}>{}</option>'.format(
                 temp_optval,
-                ' selected="selected"' if (
-                (temp_optctrl.checked) or (not this_ctrl_nv.value and not temp_optval)) else '',
+                ' selected="selected"'
+                if ((temp_optctrl.checked) or (not this_ctrl_nv.value and not temp_optval))
+                else '',
                 ' disabled="disabled"' if not temp_optval else '',
-                temp_optctrl.caption
+                temp_optctrl.caption,
             )
         buf = buf + '\n</select>'
 
@@ -1302,7 +1324,7 @@ class Theas():
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_textarea(self, this_env, this_value, escaping='urlencode', vuejs=False, *args, **kwargs):
         # This filter is called like:
@@ -1319,8 +1341,9 @@ class Theas():
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
-                                                                       control_type='textarea', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
+            ctrl_name, datavalue=this_value, control_type='textarea', **kwargs
+        )
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1341,14 +1364,14 @@ class Theas():
             format_str_if(this_ctrl.id, ' id="{}"'),
             'v-model={}'.format((this_ctrl_nv.name_prefix + this_ctrl_nv.name).replace(':', '$')) if vuejs else '',
             this_attribs_str,
-            value_str
+            value_str,
         )
 
         this_ctrl_nv.include_in_json = True
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_checkbox(self, this_env, this_value, *args, **kwargs):
         # This filter is called like:
@@ -1364,8 +1387,9 @@ class Theas():
         if ctrl_name.startswith('theas:'):
             ctrl_name = ctrl_name[6:]
 
-        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(ctrl_name, datavalue=this_value,
-                                                                       control_type='checkbox', **kwargs)
+        this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
+            ctrl_name, datavalue=this_value, control_type='checkbox', **kwargs
+        )
 
         this_attribs_str = ''
         for k, v in this_ctrl.attribs.items():
@@ -1378,14 +1402,14 @@ class Theas():
             this_ctrl_nv.control_type,
             this_attribs_str,
             this_ctrl.value,
-            ' checked="checked"' if this_ctrl.checked else ''
+            ' checked="checked"' if this_ctrl.checked else '',
         )
 
         this_ctrl_nv.include_in_json = True
 
         return buf
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_if_none(self, this_env, this_value, *args, **kwargs):
         result = this_value
@@ -1410,7 +1434,7 @@ class Theas():
 
         return result
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_define_functions(self, ctrl_name, this_env, *args, **kwargs):
 
@@ -1421,7 +1445,7 @@ class Theas():
 
         return ''
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_define_filter(self, ctrl_name, this_env, *args, **kwargs):
 
@@ -1433,7 +1457,7 @@ class Theas():
 
         return ''
 
-    #@environmentfilter
+    # @environmentfilter
     @pass_environment
     def theas_echo(self, this_env, this_value, *args, **kwargs):
         '''
@@ -1541,7 +1565,7 @@ class Theas():
         this_request = None
 
         if 'request' in kwargs:
-            this_request= kwargs['request']
+            this_request = kwargs['request']
 
         self.jinja_env.current_request = this_request
 
@@ -1588,8 +1612,9 @@ class Theas():
         # Call doOnAfterRender function(s) if provided
         if len(self.doOnAfterRender):
             for this_func in self.doOnAfterRender:
-                result_template_str, result_data, result_buf = this_func(self, buf=buf, template_str=template_str,
-                                                                         date=data)
+                result_template_str, result_data, result_buf = this_func(
+                    self, buf=buf, template_str=template_str, date=data
+                )
                 if result_template_str:
                     template_str = result_template_str
                 if result_data:
@@ -1614,22 +1639,23 @@ class Theas():
         return this_result
 
     def create_functions(self, python_source):
-        """  This method allows the caller to create a new Theas method from Python source code
-             :param python_source: source code that declares the new method
-             :return: None
+        """This method allows the caller to create a new Theas method from Python source code
+        :param python_source: source code that declares the new method
+        :return: None
 
-             To use, you must set ALLOW_UNSAFE_FUNCTIONS = True
+        To use, you must set ALLOW_UNSAFE_FUNCTIONS = True
 
-             IMPORTANT:  the source code passed into python_source must be trusted.  If this string comes
-             from an untrusted source, the code could contain malicious code that would compromise the server.
+        IMPORTANT:  the source code passed into python_source must be trusted.  If this string comes
+        from an untrusted source, the code could contain malicious code that would compromise the server.
 
-             This method does need to execute the code in the globals() context to create the function(s)
-             defined in python_source, but the method does first rename all functions to a GUID-based name
-             to avoid name collisions.
+        This method does need to execute the code in the globals() context to create the function(s)
+        defined in python_source, but the method does first rename all functions to a GUID-based name
+        to avoid name collisions.
         """
         if not ALLOW_UNSAFE_FUNCTIONS:
             raise Exception(
-                'Error in Theas.create_functions:  ALLOW_UNSAFE_FUCTIONS = False, so this method may not be called.')
+                'Error in Theas.create_functions:  ALLOW_UNSAFE_FUCTIONS = False, so this method may not be called.'
+            )
 
         new_functions = {}
 
@@ -1835,7 +1861,5 @@ MIME_TYPE_EXTENSIONS = {
     #'.xml': 'text/xml',
     '.xps': 'application/vnd.ms-xpsdocument',
     '.zip': 'application/zip',
-
-    '.csv': 'text/csv'
-
+    '.csv': 'text/csv',
 }

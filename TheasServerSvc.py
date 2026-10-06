@@ -7,14 +7,14 @@ import win32serviceutil
 
 # Needed for some services that require overlapped io.  see:
 # https://learning.oreilly.com/library/view/python-programming-on/1565926218/ch18s06.html
-#import pywintypes
+# import pywintypes
 
 import win32evtlogutil
 import os
 import traceback
 
 # Needed if RegisterEventLogMessage is used
-#import winreg
+# import winreg
 
 import thbase
 import TheasServer
@@ -88,7 +88,6 @@ For example, if the .exe is named MyApp.exe, the service would be Theas_MyApp
 '''
 
 
-
 MESSAGE_FILE_DLL = 'TheasMessages.dll'
 """The .dll that Windows will use for Windows Event Manager messages
 
@@ -103,13 +102,14 @@ G_service_name = SERVICE_NAME_PREFIX + '_' + G_program_name
 
 G_message_file = os.path.join(G_program_directory, MESSAGE_FILE_DLL)
 
-G_current_service = None # set by TheasServerSvc.__init__
+G_current_service = None  # set by TheasServerSvc.__init__
 
 thbase.set_service_name(G_service_name)
 
 # Writes Windows Event Log messages (prefixed with G_service_name, set just above).
 # Single implementation lives in thbase so TheasServer.py can use it without importing this module.
 from thbase import write_winlog
+
 
 def _main():
     '''
@@ -129,7 +129,7 @@ def _main():
 
     Note:  we assume that the global code in this module will populate the global variables
     (G_program_filename, etc.) Those must be populated before anything else happens (i.e. we
-    can't change these values in initialize, or after initialization, etc.)    
+    can't change these values in initialize, or after initialization, etc.)
     '''
 
     import servicemanager
@@ -156,19 +156,18 @@ def _main():
         write_winlog('Running as service in _main()')
 
         try:
-
             import win32traceutil
-                # to help with error handling.
-                # See: http://python.6.x6.nabble.com/Running-a-Windows-Python-service-without-pythonservice-exe-tp1956976p1956982.html
+            # to help with error handling.
+            # See: http://python.6.x6.nabble.com/Running-a-Windows-Python-service-without-pythonservice-exe-tp1956976p1956982.html
 
             servicemanager.Initialize(G_service_name, G_message_file)
-                # note:  explicitly provide G_service_name so that the service is named according to the
-                # current .exe filename (even if it is renamed) instead of the class name.
+            # note:  explicitly provide G_service_name so that the service is named according to the
+            # current .exe filename (even if it is renamed) instead of the class name.
 
             servicemanager.PrepareToHostSingle(TSS)
-                # note:  "single" means that this .exe will host a single service.
-                # The TheasServerSvc class we declared above will be what the Windows Service Manager
-                # uses to control the service.
+            # note:  "single" means that this .exe will host a single service.
+            # The TheasServerSvc class we declared above will be what the Windows Service Manager
+            # uses to control the service.
 
             servicemanager.StartServiceCtrlDispatcher()
 
@@ -202,19 +201,19 @@ def _main():
 
         # do additional work needed after installation (i.e. register event message file)
         if len(sys.argv) > 1 and sys.argv[1] in ("install", "update"):
-
             try:
                 servicemanager.SetEventSourceName(G_service_name, True)
             except Exception as e:
-                write_winlog('Error while processing install or update from command line in _main() {}'.format(e), is_error=True)
+                write_winlog(
+                    'Error while processing install or update from command line in _main() {}'.format(e), is_error=True
+                )
                 sys.exit(1)
 
             try:
                 # Same source name that write_winlog() logs under (via Initialize / SetEventSourceName).
-                win32evtlogutil.AddSourceToRegistry(G_service_name,
-                                                    msgDLL=G_message_file,
-                                                    eventLogType="Application",
-                                                    eventLogFlags=None)
+                win32evtlogutil.AddSourceToRegistry(
+                    G_service_name, msgDLL=G_message_file, eventLogType="Application", eventLogFlags=None
+                )
 
                 # note:  At one time I was having problems with win32evtlogutil.AddSourceToRegistry and so
                 # I wrote my own function RegisterEventLogMessage which is preserved below in a doc string
@@ -223,7 +222,14 @@ def _main():
 
             except Exception as e:
                 msg = 'Failed to RegisterEventLogMessage: {}'.format(e)
-                write_winlog('Error calling AddSourceToRegistry to add event source in _main() {} but continuing to run.  {}'.format(e, msg), is_error=True)
+                write_winlog(
+                    (
+                        'Error calling AddSourceToRegistry to add event source in _main() {} but continuing to run.  '
+                        '{}'.format(e, msg)
+                    ),
+                    is_error=True,
+                )
+
 
 '''
 # Works, but no longer needed now that I am able to make use of win32evtlogutil.AddSourceToRegistry
@@ -263,6 +269,7 @@ def RegisterEventLogMessage(program_name='', program_directory='', message_file=
             pass
 '''
 
+
 class TheasServerSvc(win32serviceutil.ServiceFramework):
     """
     Class to be controlled by the Windows service manager.
@@ -287,7 +294,7 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
     # If you want command line parameters that are specified when the service is installed to be included here,
     # you must process the parameters yourself and set _exe_args_ before HandleCommandLine (or equivalent
     # code) is called.  (HandleCommandLine will ignore or raise an error on additional parameters.)
-    _exe_args_ = None   # 'service param1 param2 param3'
+    _exe_args_ = None  # 'service param1 param2 param3'
 
     # note:  we save the service name in a global to facilitate using this name when logging
 
@@ -299,11 +306,9 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         # The "service stop" request will set this event.
         self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
 
-
         # Save this service object to G_current_service for convenience
         global G_current_service
         G_current_service = self
-
 
     def GetAcceptedControls(self):
         result = win32serviceutil.ServiceFramework.GetAcceptedControls(self)
@@ -327,12 +332,13 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         try:
             TheasServer.run(run_as_svc=True)
         except SystemExit as e:
-            write_winlog('TheasServer.run() exited during startup (code {}). See preceding events.'.format(e.code), is_error=True)
+            write_winlog(
+                'TheasServer.run() exited during startup (code {}). See preceding events.'.format(e.code), is_error=True
+            )
             raise
         except Exception:
             write_winlog('Unhandled exception in TheasServer.run():\n' + traceback.format_exc(), is_error=True)
             raise
-
 
     def SvcOtherEx(self, control, event_type, data):
 
@@ -349,15 +355,15 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
             write_winlog('Service received a pre-shutdown notification in SvcOtherEx')
 
             # Tell the TheasServer event loop to stop
-            #thbase.theas_server().stop(service=self, reason='Service SvcStop()')
+            # thbase.theas_server().stop(service=self, reason='Service SvcStop()')
 
-            #self.SvcStop()
+            # self.SvcStop()
         else:
-
             write_winlog('Starting SvcOtherEx()')
 
-            write_winlog('Service received an event in SvcOtherEx: code={}, type={}, data={}'.
-                         format(control, event_type, data))
+            write_winlog(
+                'Service received an event in SvcOtherEx: code={}, type={}, data={}'.format(control, event_type, data)
+            )
             pass
 
     def onServicePoll(self):
@@ -389,9 +395,11 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
         # Tell the TheasServer event loop to stop
         thbase.G_server.stop(service=self, reason='Service SvcStop()')
 
+
 def service_poll():
     if G_current_service is not None:
         G_current_service.onServicePoll()
+
 
 def service_send_stop():
     if G_current_service is None or G_current_service.hWaitStop is None:

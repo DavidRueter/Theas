@@ -50,16 +50,26 @@ _RE_STRIP_QUOTED_IDENTIFIERS = re.compile(r'\[[^\]]*\]|"[^"]*"')
 # or more robust version that handles embeedded closing brackets:
 # _RE_STRIP_QUOTED_IDENTIFIERS = re.compile(r'\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"')
 
-_LOGIN_AUTO_USER_TOKEN= None
+_LOGIN_AUTO_USER_TOKEN = None
 _SQL_DEFAULT_SCHEMA = 'theas'
 
+
 class SQLSettings:
-    def __init__(self, server='someserver', port=1433, user='someuser', password='somepassword',
-                 database='somedatabase', appname='someapp', max_conns=10, sql_timeout=120,
-                 full_ok_checks=True, http_server_prefix='https://someserver.com',
-                 login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
-                 sql_default_schema = _SQL_DEFAULT_SCHEMA,
-                ):
+    def __init__(
+        self,
+        server='someserver',
+        port=1433,
+        user='someuser',
+        password='somepassword',
+        database='somedatabase',
+        appname='someapp',
+        max_conns=10,
+        sql_timeout=120,
+        full_ok_checks=True,
+        http_server_prefix='https://someserver.com',
+        login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
+        sql_default_schema=_SQL_DEFAULT_SCHEMA,
+    ):
         self.server = server
         self.port = port
         self.user = user
@@ -76,9 +86,9 @@ class SQLSettings:
         _mssql.set_max_connections(max_conns)
 
 
-def sql_msg_handler(msgstate: int, severity: int, srvname: str,
-                    procname: str, line: int, msgtext: str):
+def sql_msg_handler(msgstate: int, severity: int, srvname: str, procname: str, line: int, msgtext: str):
     log(None, 'SQL', '***Message from server: {}'.format(msgtext))
+
 
 class Conn(_Conn):
     # MSSQL / pymssql implementation of the driver-specific primitives declared
@@ -97,7 +107,9 @@ class Conn(_Conn):
         if self.sql_conn is not None:
             self.sql_conn.close()
 
+
 G_thsql_executor = None
+
 
 def set_executor(executor=None, max_workers=100):
     global G_thsql_executor
@@ -106,7 +118,10 @@ def set_executor(executor=None, max_workers=100):
         if executor is not None:
             G_thsql_executor = executor
         else:
-            G_thsql_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='thsql')
+            G_thsql_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix='thsql'
+            )
+
 
 def thsql_executor():
     if G_thsql_executor is None:
@@ -115,9 +130,7 @@ def thsql_executor():
     return G_thsql_executor
 
 
-
 class ConnectionPool(_ConnectionPool):
-
     def __init__(self, sql_settings=SQLSettings()):
         super().__init__(sql_settings)
 
@@ -157,8 +170,7 @@ class ConnectionPool(_ConnectionPool):
             exec_ok = await proc.execute()
 
             if not exec_ok:
-                log(None, 'SQL', 'reset_conn: spactResetConnection failed, killing conn.',
-                    conn.id, conn.last_error)
+                log(None, 'SQL', 'reset_conn: spactResetConnection failed, killing conn.', conn.id, conn.last_error)
                 self.kill_conn(conn)
                 return False
 
@@ -172,8 +184,7 @@ class ConnectionPool(_ConnectionPool):
             return True
 
         except Exception as e:
-            log(None, 'SQL', 'reset_conn: exception, killing conn.',
-                getattr(conn, 'id', None), repr(e))
+            log(None, 'SQL', 'reset_conn: exception, killing conn.', getattr(conn, 'id', None), repr(e))
             self.kill_conn(conn)
             return False
 
@@ -195,14 +206,16 @@ class ConnectionPool(_ConnectionPool):
                 # no longer needed, because the connection will already be authenticated by spActResetConnection
                 # await call_auth_storedproc(conn=conn)
 
-                #log(None, 'SQL', 'Connection initialized.  FreeTDS version: ' + str(conn.sql_conn.tds_version))
+                # log(None, 'SQL', 'Connection initialized.  FreeTDS version: ' + str(conn.sql_conn.tds_version))
                 log(None, 'SQL', 'Connection initialized.', conn.id)
             else:
-                log(None, 'SQL',
+                log(
+                    None,
+                    'SQL',
                     'Connection initialization failed.',
                     conn.id,
-                    'Error calling theas.spgetInitSession: {}'.
-                    format(conn.last_error))
+                    'Error calling theas.spgetInitSession: {}'.format(conn.last_error),
+                )
 
     async def new_conn(self, skip_init=False, conn_name=""):
         if self.sql_settings is None:
@@ -211,23 +224,19 @@ class ConnectionPool(_ConnectionPool):
         conn = None
         try:
             this_sql_conn = sql_conn = _mssql.connect(
-                    server=self.sql_settings.server,
-                    port=str(self.sql_settings.port),
-                    user=self.sql_settings.user,
-                    password=self.sql_settings.password,
-                    database=self.sql_settings.database,
-                    appname=self.sql_settings.appname
-                )
-
-            conn = Conn(
-                this_sql_conn,
-                sql_settings=self.sql_settings,
-                pool=self
+                server=self.sql_settings.server,
+                port=str(self.sql_settings.port),
+                user=self.sql_settings.user,
+                password=self.sql_settings.password,
+                database=self.sql_settings.database,
+                appname=self.sql_settings.appname,
             )
+
+            conn = Conn(this_sql_conn, sql_settings=self.sql_settings, pool=self)
             conn.sql_conn.query_timeout = self.sql_settings.sql_timeout
 
             if conn_name:
-                conn.name = conn_name   # note:  conn.name may not work as expected
+                conn.name = conn_name  # note:  conn.name may not work as expected
 
             conn.sql_conn.set_msghandler(sql_msg_handler)
 
@@ -254,14 +263,16 @@ class ConnectionPool(_ConnectionPool):
                 conn.last_error = repr(e)
             log(None, 'Session', 'Could not connect to the SQL database: ', str(e))
 
-            #msg = th_session.error_message = 'Could not access SQL database server. ' + str(
+            # msg = th_session.error_message = 'Could not access SQL database server. ' + str(
             #        e) + '|Sorry, the server is not available right now|1|Cannot Continue'
 
         return conn
 
+
 # for convenience: a wrapper function to call the authentication stored proc
-async def call_auth_storedproc(th_session=None, conn=None, username=None, password=None, user_token=None,
-                               retrieve_existing=False, is_recurse=False):
+async def call_auth_storedproc(
+    th_session=None, conn=None, username=None, password=None, user_token=None, retrieve_existing=False, is_recurse=False
+):
     # authenticate user into database app
     # returns None if authentication failed, else a resultset with details of the user and session
 
@@ -284,7 +295,6 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
         th_session.logged_in = False
 
     try:
-
         proc = ThStoredProc('theas.spdoAuthenticateUser', th_session, conn=conn)
         if await proc.is_ok(skip_init=True):
             await proc.refresh_parameter_list()
@@ -313,7 +323,6 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
                     th_session.error_message = err_msg
 
             else:
-
                 result = proc.resultset
 
                 # we set conn information, but not session information
@@ -322,36 +331,49 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
 
                 if len(proc.resultset) > 0:
                     if 'UserToken' in proc.resultset[0]:
-                        user_token =  proc.resultset[0]['UserToken']
+                        user_token = proc.resultset[0]['UserToken']
 
                     if 'UserName' in proc.resultset[0]:
                         username = proc.resultset[0]['UserName']
 
                 if user_token == _LOGIN_AUTO_USER_TOKEN:
                     this_conn.is_public_authed = True
-                if (user_token and user_token != _LOGIN_AUTO_USER_TOKEN):
+                if user_token and user_token != _LOGIN_AUTO_USER_TOKEN:
                     this_conn.is_user_authed = True
 
                 if username:
                     th_session.conn_name = username
                 elif user_token:
-                        th_session.conn.name = user_token[:5] + '...'
+                    th_session.conn.name = user_token[:5] + '...'
 
-                trace('auth_sp.result', trace_group='sql_connection_persist', th_session=th_session,
-                      conn=this_conn, username=username, via_token=user_token is not None)
+                trace(
+                    'auth_sp.result',
+                    trace_group='sql_connection_persist',
+                    th_session=th_session,
+                    conn=this_conn,
+                    username=username,
+                    via_token=user_token is not None,
+                )
 
         else:
             log(th_session, 'Session', 'Authentication stored proc not is_ok in call_auth_storedproc()')
             if th_session is not None:
-                th_session.error_message = 'Could not access SQL database server|Sorry, the server is not available right now|1|Cannot Log In'
+                th_session.error_message = (
+                    'Could not access SQL database server|Sorry, the server is not available right now|1|Cannot Log In'
+                )
 
     except Exception as e:
         this_conn.last_error = repr(e)
         log(th_session, 'Session', 'Unexpected exception in call_auth_storedproc(). ', str(e))
         if th_session is not None:
-            th_session.error_message = 'Could not access SQL database server. ' + str(e) + '|Sorry, the server is not available right now|1|Cannot Log In'
+            th_session.error_message = (
+                'Could not access SQL database server. '
+                + str(e)
+                + '|Sorry, the server is not available right now|1|Cannot Log In'
+            )
 
     return result
+
 
 async def call_logout_storedproc(th_session=None, conn=None):
     this_conn = conn
@@ -374,9 +396,12 @@ async def call_logout_storedproc(th_session=None, conn=None):
             if this_conn is not None and this_conn.pool is not None:
                 await this_conn.pool.init_conn(this_conn)
 
-
     except Exception as e:
-        log(th_session, 'SQL', 'In ThSession.logout, exception calling theas.spdoLogout (call_logout_storedproc). {}'.format(e))
+        log(
+            th_session,
+            'SQL',
+            'In ThSession.logout, exception calling theas.spdoLogout (call_logout_storedproc). {}'.format(e),
+        )
 
 
 class ThStoredProc:
@@ -430,9 +455,9 @@ class ThStoredProc:
             # treat a leading literal theas. (bare or bracketed) as a placeholder
             lowered = name.lower()
             if lowered.startswith('theas.'):
-                name = f'{sql_default_schema}.{name[len("theas."):]}'
+                name = f'{sql_default_schema}.{name[len("theas.") :]}'
             elif lowered.startswith('[theas].'):
-                name = f'[{sql_default_schema}].{name[len("[theas]."):]}'
+                name = f'[{sql_default_schema}].{name[len("[theas].") :]}'
 
         self.stored_proc_name = name
 
@@ -458,9 +483,7 @@ class ThStoredProc:
 
         # By default, this function will initialize the connection (i.e. authenticate, create temporary
         # tables, etc.) if needed
-        if not skip_init and self.have_session and (
-                self.th_session.conn is None or not self.th_session.conn.connected
-        ):
+        if not skip_init and self.have_session and (self.th_session.conn is None or not self.th_session.conn.connected):
             log(self.th_session, 'StoredProc', 'Calling init_session', self.stored_proc_name)
 
             await self.th_session.init_session()
@@ -473,17 +496,25 @@ class ThStoredProc:
             if self.th_session.conn is None:
                 log(self.th_session, 'StoredProc', 'Session has no connection')
             else:
-                log(self.th_session, 'StoredProc', 'Session conn name:', self.th_session.conn.name,
-                    'id:', self.th_session.conn.id)
+                log(
+                    self.th_session,
+                    'StoredProc',
+                    'Session conn name:',
+                    self.th_session.conn.name,
+                    'id:',
+                    self.th_session.conn.id,
+                )
 
-        result = (self.conn is not None and self.conn.connected)
+        result = self.conn is not None and self.conn.connected
 
         if result and self.full_ok_checks:
             try:
                 sql_str = 'SELECT 1 AS IsOK'
                 # executor #1: check connection health
                 if not theas_server().is_stopping and (theas_server().is_running or theas_server().is_starting):
-                    await theas_server().loop.run_in_executor(thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str)
+                    await theas_server().loop.run_in_executor(
+                        thsql_executor(), self.conn.sql_conn.execute_non_query, sql_str
+                    )
                 pass
             except asyncio.exceptions.CancelledError as e:
                 log(self.th_session, 'Sessions', '***Canceled executor #1...probably shutting down ', e)
@@ -493,8 +524,13 @@ class ThStoredProc:
                 result = False
 
         if not result and self.have_session:
-            trace('isok.release', trace_group='sql_connection_persist', th_session=self.th_session,
-                  conn=self.th_session.conn, stored_proc=self.stored_proc_name)
+            trace(
+                'isok.release',
+                trace_group='sql_connection_persist',
+                th_session=self.th_session,
+                conn=self.th_session.conn,
+                stored_proc=self.stored_proc_name,
+            )
             self.th_session.logged_in = False
             bad_conn = self.th_session.conn
             self.th_session.conn = None
@@ -523,7 +559,9 @@ class ThStoredProc:
 
                 # executor #2: refresh parameter list
                 if not theas_server().is_stopping and (theas_server().is_running or theas_server().is_starting):
-                    await theas_server().loop.run_in_executor(thsql_executor(), self.conn.sql_conn.execute_query, sql_str)
+                    await theas_server().loop.run_in_executor(
+                        thsql_executor(), self.conn.sql_conn.execute_query, sql_str
+                    )
 
                 pass
 
@@ -548,7 +586,6 @@ class ThStoredProc:
                     self.parameter_list = None
                 raise
 
-
     def do_exec(self, sql_str):
         result = False
         self.conn.last_error = None
@@ -571,11 +608,9 @@ class ThStoredProc:
             result = True
 
         except Exception as e:
-            self.conn.last_error =repr(e)
+            self.conn.last_error = repr(e)
 
         return result
-
-
 
     async def execute(self):
         result = False
@@ -617,12 +652,11 @@ class ThStoredProc:
             this_params_str = ''
 
             for name, item in self.parameter_list.items():
-
                 if name.startswith('@'):
                     # Strip out single quotes from parameter name.  (Shouldn't be any, but we don't
                     # want someone to try to use this as a SQL injection vector.)
                     this_params_str += ' ' + name.replace('\'', '') + '='
-                    
+
                     this_value = item['value']
 
                     if this_value is None:
@@ -646,7 +680,6 @@ class ThStoredProc:
                         else:
                             # this_value is bytes/bytearray — emit raw hex
                             this_params_str += '0x' + bytes(this_value).hex().upper()
-                                
 
                     elif item['datatype'] in ['char', 'nchar', 'varchar', 'nvarchar', 'sysname', 'text', 'ntext']:
                         if isinstance(this_value, bytes):
@@ -656,13 +689,13 @@ class ThStoredProc:
 
                         # remove embedded quotes and then enclose the value in quotes
                         this_params_str += item['literal_prefix'] + thsqlhelp.quotestr(this_value)
-                        
-                    elif item['datatype'] in ['date', 'time', 'datetime2','datetime', 'smalldatetime']:
+
+                    elif item['datatype'] in ['date', 'time', 'datetime2', 'datetime', 'smalldatetime']:
                         this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_literal(this_value, item['datatype']))
-                                                                    
+
                     elif item['datatype'] == 'datetimeoffset':
                         this_params_str += thsqlhelp.quotestr(thsqlhelp.to_mssql_datetimeoffset_literal(this_value))
-                        
+
                     else:
                         # this is a simplistic fallback that assumes that Python's stringify will
                         # output a string that is t
@@ -705,10 +738,10 @@ class ThStoredProc:
 
         return result
 
-
     # def bind(self, *args, **kwargs):
     def bind(self, value, dbtype, param_name, output=False, null=False, max_length=-1):
-        # def bind(self, object value, int dbtype, str param_name=None, int output=False, int null=False, int max_length=-1):
+        # def bind(self, object value, int dbtype, str param_name=None, int output=False, int null=False,
+        #          int max_length=-1):
         this_result = None
 
         if value is None:
@@ -726,15 +759,15 @@ class ThStoredProc:
             # to UTF-16LE to pass to a SQL nvarchar(MAX) when body contains
             # textual data.
 
-            #value = value
+            # value = value
             pass
 
             # note: we will store whatever we are given, and handle appropriately
             # on execute
 
-            #if isinstance(value, str):
+            # if isinstance(value, str):
             #    pass
-            #else:
+            # else:
             #    value = bytes(value, 'utf-8')
 
         elif dbtype in (_mssql.SQLCHAR, _mssql.SQLVARCHAR, _mssql.SQLUUID):
@@ -746,26 +779,29 @@ class ThStoredProc:
             this_param['is_null'] = null
 
             if self._storedproc is not None:
-                this_result = self._storedproc.bind(value, dbtype, param_name=param_name, output=output, null=null,
-                                                    max_length=max_length)
+                this_result = self._storedproc.bind(
+                    value, dbtype, param_name=param_name, output=output, null=null, max_length=max_length
+                )
         else:
             raise TheasServerError(
-                'Error binding stored procedure param:  {} has no parameter named {}'.format(self.stored_proc_name,
-                                                                                             param_name))
+                'Error binding stored procedure param:  {} has no parameter named {}'.format(
+                    self.stored_proc_name, param_name
+                )
+            )
 
         return this_result
 
     @property
     def sql_conn(self):
-        #return self._storedproc.connection
+        # return self._storedproc.connection
         return self.sql_conn
 
     @property
     def name(self):
-        #return self._storedproc.name
+        # return self._storedproc.name
         return self.stored_proc_name
 
     @property
     def parameters(self):
-        #return self._storedproc.parameters
+        # return self._storedproc.parameters
         return self.parameter_list

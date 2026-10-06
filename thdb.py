@@ -83,7 +83,7 @@ class _ConnectionPool:
     def __init__(self, sql_settings):
         self.lock = RLock()
         self.sql_settings = sql_settings
-        self.conns = []           # available connections
+        self.conns = []  # available connections
         self.conns_inuse = []
         self.conns_torelease = []
 
@@ -171,9 +171,16 @@ class _ConnectionPool:
         if conn is not None:
             conn.name = conn_name
             with self.lock:
-                log(None, 'SQL',
-                    'New connection added to the pool. len(conns)={}; len(conns_inuse={}; len(conns_torelease={})'.format(
-                        len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
+                log(
+                    None,
+                    'SQL',
+                    (
+                        'New connection added to the pool. len(conns)={}; len(conns_inuse={}; '
+                        'len(conns_torelease={})'.format(
+                            len(self.conns), len(self.conns_inuse), len(self.conns_torelease)
+                        )
+                    ),
+                )
                 if use_now:
                     self.conns_inuse.append(conn)
                 else:
@@ -189,19 +196,38 @@ class _ConnectionPool:
                 conn = self.conns.pop()
                 self.conns_inuse.append(conn)
                 conn.name = conn_name
-                log(None, 'SQLConn', 'get_conn() is returning connection', conn_name, conn.id,
+                log(
+                    None,
+                    'SQLConn',
+                    'get_conn() is returning connection',
+                    conn_name,
+                    conn.id,
                     'len(conns)={}; len(conns_inuse={}; len(conns_torelease={})'.format(
-                    len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
+                        len(self.conns), len(self.conns_inuse), len(self.conns_torelease)
+                    ),
+                )
         if conn is None:
-
             if len(self.conns) + len(self.conns_inuse) >= self.sql_settings.max_conns:
-                log(None, 'SQLConn', 'TOO MANY SQL CONNECTIONS per configured sql_max_connections ({})'.format(self.sql_settings.max_conns))
+                log(
+                    None,
+                    'SQLConn',
+                    'TOO MANY SQL CONNECTIONS per configured sql_max_connections ({})'.format(
+                        self.sql_settings.max_conns
+                    ),
+                )
 
             else:
                 conn = await self.add_conn(skip_init=skip_init, conn_name=conn_name)
                 if conn is not None:
-                    log(None, 'SqlConn', 'get_conn() is returning new SQL connection', conn_name, conn.id,
-                        '. Remaining in pool: ', len(self.conns))
+                    log(
+                        None,
+                        'SqlConn',
+                        'get_conn() is returning new SQL connection',
+                        conn_name,
+                        conn.id,
+                        '. Remaining in pool: ',
+                        len(self.conns),
+                    )
 
         return conn
 
@@ -224,9 +250,15 @@ class _ConnectionPool:
                 if this_conn is conn:
                     self.conns_inuse.pop(i)
                     self.conns_torelease.append(conn)
-                    log(None, 'SQL', 'release_conn: queued for deferred reset:', conn.id,
+                    log(
+                        None,
+                        'SQL',
+                        'release_conn: queued for deferred reset:',
+                        conn.id,
                         'len(conns)={}; len(conns_inuse)={}; len(conns_torelease)={}'.format(
-                            len(self.conns), len(self.conns_inuse), len(self.conns_torelease)))
+                            len(self.conns), len(self.conns_inuse), len(self.conns_torelease)
+                        ),
+                    )
                     return
             log(None, 'SQL', 'release_conn: conn not found in conns_inuse:', conn.id)
 
@@ -240,8 +272,14 @@ class _ConnectionPool:
                 if not self.conns_torelease:
                     return
                 conn = self.conns_torelease.pop(0)
-                log(None, 'Conn', 'process_release_conns: processing conn:', conn.id,
-                    'remaining in queue:', len(self.conns_torelease))
+                log(
+                    None,
+                    'Conn',
+                    'process_release_conns: processing conn:',
+                    conn.id,
+                    'remaining in queue:',
+                    len(self.conns_torelease),
+                )
 
             if conn is None:
                 continue

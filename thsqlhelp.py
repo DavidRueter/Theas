@@ -56,14 +56,12 @@ __all__ = [
     "body_to_sql_hex",
     "BodyMeta",
     "to_utf16le_bytes",
-
     "is_numeric",
     "is_char",
     "is_date",
     "is_binary",
     "to_mssql_literal",
-
-    "quotestr"
+    "quotestr",
 ]
 
 import base64
@@ -193,17 +191,15 @@ _BINARY_EXACT = {
 }
 
 # XML declaration encoding sniff
-_XML_DECL_RE = re.compile(
-    rb'^\s*<\?xml[^>]*encoding=["\']([A-Za-z0-9._-]+)["\']', re.IGNORECASE
-)
+_XML_DECL_RE = re.compile(rb'^\s*<\?xml[^>]*encoding=["\']([A-Za-z0-9._-]+)["\']', re.IGNORECASE)
 
 # Known BOMs for quick sniffing (maps to Python codec names)
 _BOMS: List[Tuple[bytes, str]] = [
-    (b"\xEF\xBB\xBF", "utf-8-sig"),
-    (b"\xFF\xFE\x00\x00", "utf-32-le"),
-    (b"\x00\x00\xFE\xFF", "utf-32-be"),
-    (b"\xFF\xFE", "utf-16-le"),
-    (b"\xFE\xFF", "utf-16-be"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
 ]
 
 # SQL Server varbinary(MAX) / nvarchar(MAX) maximum length:
@@ -214,6 +210,7 @@ _SQLSERVER_MAX_BYTES = 2_147_483_647
 # -------------------------
 # TypedDict for meta
 # -------------------------
+
 
 class BodyMeta(TypedDict):
     content_type_raw: str
@@ -233,21 +230,21 @@ class BodyMeta(TypedDict):
 
 
 def _build_meta(
-        *,
-        content_type_raw: str = "",
-        content_encoding_raw: str = "",
-        media_type: str = "",
-        charset_header: Optional[str] = None,
-        charset_used: Optional[str] = None,
-        content_encodings: Optional[List[str]] = None,
-        removed_encodings: Optional[List[str]] = None,
-        used_bom: Optional[str] = None,
-        used_xml_decl: bool = False,
-        normalized: bool = False,
-        decompressed: bool = False,
-        body_len_input: int = 0,
-        body_len_final: int = 0,
-        body_type: str = "",
+    *,
+    content_type_raw: str = "",
+    content_encoding_raw: str = "",
+    media_type: str = "",
+    charset_header: Optional[str] = None,
+    charset_used: Optional[str] = None,
+    content_encodings: Optional[List[str]] = None,
+    removed_encodings: Optional[List[str]] = None,
+    used_bom: Optional[str] = None,
+    used_xml_decl: bool = False,
+    normalized: bool = False,
+    decompressed: bool = False,
+    body_len_input: int = 0,
+    body_len_final: int = 0,
+    body_type: str = "",
 ) -> BodyMeta:
     """Single factory to ensure meta always contains the full, consistent shape."""
     return BodyMeta(
@@ -271,6 +268,7 @@ def _build_meta(
 # -------------------------
 # Header helpers
 # -------------------------
+
 
 def _normalize_headers(headers: Union[Mapping, object]) -> Dict[str, str]:
     """Build a case-insensitive dict of headers for easy access."""
@@ -335,6 +333,7 @@ def _get_content_encodings(hdrs: Mapping[str, str]) -> Tuple[List[str], str]:
 # Classification & defaults
 # -------------------------
 
+
 def _is_textual(media_type: str) -> bool:
     if not media_type:
         return False
@@ -387,6 +386,7 @@ def _sniff_bom_charset(body: bytes) -> Optional[str]:
 # Content-Encoding handling
 # -------------------------
 
+
 def _decompress_content(body: bytes, encodings: List[str], limit: int) -> Tuple[bytes, List[str]]:
     """
     Decompress body according to Content-Encoding list (applied in order).
@@ -429,6 +429,7 @@ def _decompress_content(body: bytes, encodings: List[str], limit: int) -> Tuple[
 # ASCII detection
 # -------------------------
 
+
 def _is_pure_ascii(data: bytes) -> bool:
     try:
         data.decode("ascii")
@@ -438,13 +439,13 @@ def _is_pure_ascii(data: bytes) -> bool:
 
 
 def body_to_sql_hex(
-        body: Union[bytes, bytearray, None],
-        headers: Union[Mapping, object],
-        *,
-        empty_as_null: bool = True,
-        strict: bool = False,
-        max_body_bytes: Optional[int] = None,
-        decompress_limit_bytes: Optional[int] = 8 * 1024 * 1024,
+    body: Union[bytes, bytearray, None],
+    headers: Union[Mapping, object],
+    *,
+    empty_as_null: bool = True,
+    strict: bool = False,
+    max_body_bytes: Optional[int] = None,
+    decompress_limit_bytes: Optional[int] = 8 * 1024 * 1024,
 ) -> Tuple[str, str, BodyMeta]:
     """
     Convert an HTTP request body to a SQL Server–safe literal and a body_type tag.
@@ -556,7 +557,7 @@ def body_to_sql_hex(
                 used_bom = sniff
 
         if not charset_used and (
-                media_type == "application/xml" or media_type.endswith("+xml") or media_type == "text/xml"
+            media_type == "application/xml" or media_type.endswith("+xml") or media_type == "text/xml"
         ):
             m = _XML_DECL_RE.match(body_bytes)
             if m:
@@ -756,8 +757,16 @@ def to_utf16le_bytes(obj, *, bom: bool = False, default=None, **json_kwargs) -> 
 def is_numeric(sql_type: str) -> bool:
     # Removed non-existent 'bigmoney'
     return sql_type in [
-        'tinyint', 'smallint', 'int', 'bigint',
-        'decimal', 'numeric', 'money', 'smallmoney', 'float', 'real'
+        'tinyint',
+        'smallint',
+        'int',
+        'bigint',
+        'decimal',
+        'numeric',
+        'money',
+        'smallmoney',
+        'float',
+        'real',
     ]
 
 
@@ -800,10 +809,7 @@ def _round_datetime_to_datetime_increment(val: dt.datetime) -> dt.datetime:
 
     midnight = val.replace(hour=0, minute=0, second=0, microsecond=0)
     us_since_midnight = (
-            (val.hour * 3_600_000_000)
-            + (val.minute * 60_000_000)
-            + (val.second * 1_000_000)
-            + val.microsecond
+        (val.hour * 3_600_000_000) + (val.minute * 60_000_000) + (val.second * 1_000_000) + val.microsecond
     )
     total_seconds = Decimal(us_since_midnight) / Decimal(1_000_000)
     ticks = (total_seconds * Decimal(300)).to_integral_value(rounding=ROUND_HALF_UP)
@@ -891,7 +897,8 @@ def to_mssql_literal(val, sql_type: str) -> str:
             # Unknown/non-supported type for binary literal → explicit failure
             raise TypeError(
                 f"Unsupported value type for {sql_type}: {type(val).__name__}. "
-                "Pass bytes/bytearray/memoryview for raw bytes, a '0x..' hex string, or a text string to be UTF-16LE-encoded."
+                "Pass bytes/bytearray/memoryview for raw bytes, a '0x..' hex string, or a text string to be "
+                "UTF-16LE-encoded."
             )
 
     elif base_sql_type == 'datetimeoffset':
@@ -900,7 +907,6 @@ def to_mssql_literal(val, sql_type: str) -> str:
         return _to_mssql_datetimeoffset_literal(val)
 
     elif is_date(base_sql_type):
-
         if isinstance(val, dt.date) and not isinstance(val, dt.datetime):
             # Only a date
             if base_sql_type == "date":
