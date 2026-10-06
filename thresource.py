@@ -42,6 +42,7 @@ class ThResource:
 
     def __init__(self):
         self.resource_code = ''
+        self.is_simple = True,
         self.filename = ''
         self.filetype = ''
         self.date_updated = ''
@@ -203,7 +204,7 @@ class ThCachedResources:
                 if resource_dict.data is not None:
                     self.cache_bytes_used = self.cache_bytes_used + len(resource_dict.data)
 
-                log_memory(obj=self.__resources, label='ThCachedResources.add_resource')
+                log_memory(obj=self.__resources, label='ThCachedResources.add_resource {}'.format(resource_code))
 
     async def load_resource(self, resource_code, all_static_blocks=False,
                       from_filename=None, is_public=False, is_static=False, get_default_resource=False,
@@ -355,6 +356,15 @@ class ThCachedResources:
                                 if 'RedirURL' in row:
                                     this_resource.redir_url = row['RedirURL']
 
+                                if (
+                                    this_resource.render_jinja_template or
+                                    this_resource.api_async_stored_proc or
+                                    this_resource.api_async_stored_proc or
+                                    this_resource.requires_authentication
+                                ):
+                                    this_resource.is_simple = False
+
+
                                 if this_resource.resource_code and not this_resource.resource_code in('~', '/', ''):
                                     # added 2/11/2019:  don't want to cache default resource
                                     self.add_resource(row['ResourceCode'], this_resource)
@@ -440,10 +450,12 @@ class ThCachedResources:
 
             created_conn = False
 
-            # Comment out the following to obtain a SQL connection for fetching the resource
-            # ...even if the session already has a different connection.
-            # (This lets us fetch multiple resources concurrently.)
-            if th_session and th_session.conn:
+
+            if th_session and th_session.conn and get_default_resource:
+                # MUST use the session's connection if it exists in order to get the
+                # correct default resource.
+                # (If not getting the default resource, it is OK to use a pooled connection
+                # to facilitate fetching multiple resources concurrently)
                 conn = th_session.conn
 
             if not from_filename and conn is None:
@@ -465,7 +477,7 @@ class ThCachedResources:
                 this_resource = None
 
 
-            if created_conn and conn is not None and (not th_session or  not th_session.logged_in):
+            if created_conn and conn:
                 #conn.close()
                 await self.conn_pool.release_conn(conn)
                 conn = None

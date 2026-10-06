@@ -1,3 +1,7 @@
+_*/
+_ai_use/
+.claude/settings.local.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -11,6 +11,7 @@ import win32serviceutil
 
 import win32evtlogutil
 import os
+import traceback
 
 # Needed if RegisterEventLogMessage is used
 #import winreg
@@ -100,41 +101,15 @@ G_program_directory, G_program_filename = thbase.get_program_directory()
 G_program_name, G_extension = os.path.splitext(G_program_filename)
 G_service_name = SERVICE_NAME_PREFIX + '_' + G_program_name
 
-G_message_file = G_program_directory + '\\\\' + 'TheasMessages.dll'
+G_message_file = os.path.join(G_program_directory, MESSAGE_FILE_DLL)
 
 G_current_service = None # set by TheasServerSvc.__init__
 
 thbase.set_service_name(G_service_name)
 
-def write_winlog(*args, is_error: bool=False):
-    """
-    :param args:
-    :param is_error:
-    :return:
-
-     Utility function that Wraps servermanager.LogInfoMsg for convenience in writing Windows Event messages
-
-    """
-
-    import servicemanager # See note above
-
-    fnc = None
-    if is_error:
-        fnc = servicemanager.LogErrorMsg
-    else:
-        fnc = servicemanager.LogInfoMsg
-
-    if len(args) >= 2:
-        fnc(G_service_name + ': ' + args[1])
-    elif len(args) >=1:
-        fnc(G_service_name + ': ' + args[0])
-
-    #servicemanager.LogMsg(
-    #    servicemanager.EVENTLOG_INFORMATION_TYPE,
-    #    servicemanager.PYS_SERVICE_STARTED,
-    #    (G_service_name,
-    #     '')
-    #)
+# Writes Windows Event Log messages (prefixed with G_service_name, set just above).
+# Single implementation lives in thbase so TheasServer.py can use it without importing this module.
+from thbase import write_winlog
 
 def _main():
     '''
@@ -186,7 +161,7 @@ def _main():
                 # to help with error handling.
                 # See: http://python.6.x6.nabble.com/Running-a-Windows-Python-service-without-pythonservice-exe-tp1956976p1956982.html
 
-            servicemanager.Initialize(G_service_name, G_program_directory + MESSAGE_FILE_DLL)
+            servicemanager.Initialize(G_service_name, G_message_file)
                 # note:  explicitly provide G_service_name so that the service is named according to the
                 # current .exe filename (even if it is renamed) instead of the class name.
 
@@ -198,7 +173,7 @@ def _main():
             servicemanager.StartServiceCtrlDispatcher()
 
         except (SystemExit, KeyboardInterrupt) as e:
-            write_winlog('KeyboardInterrupt received when running as service in _main()', is_error=True)
+            write_winlog('{} received when running as service in _main()'.format(type(e).__name__), is_error=True)
             raise
         except Exception as e:
             msg = 'Error while trying to start service {} {}'.format(G_service_name, e)
@@ -235,8 +210,9 @@ def _main():
                 sys.exit(1)
 
             try:
-                win32evtlogutil.AddSourceToRegistry(SERVICE_NAME_PREFIX + G_program_name,
-                                                    msgDLL=G_program_directory + MESSAGE_FILE_DLL,
+                # Same source name that write_winlog() logs under (via Initialize / SetEventSourceName).
+                win32evtlogutil.AddSourceToRegistry(G_service_name,
+                                                    msgDLL=G_message_file,
                                                     eventLogType="Application",
                                                     eventLogFlags=None)
 
@@ -348,7 +324,14 @@ class TheasServerSvc(win32serviceutil.ServiceFramework):
 
         # In this way, the asyncio loop does the looping for the life of the service (instead of the
         # "while true" loop shown in most examples.
-        TheasServer.run(run_as_svc=True)
+        try:
+            TheasServer.run(run_as_svc=True)
+        except SystemExit as e:
+            write_winlog('TheasServer.run() exited during startup (code {}). See preceding events.'.format(e.code), is_error=True)
+            raise
+        except Exception:
+            write_winlog('Unhandled exception in TheasServer.run():\n' + traceback.format_exc(), is_error=True)
+            raise
 
 
     def SvcOtherEx(self, control, event_type, data):

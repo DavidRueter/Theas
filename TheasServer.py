@@ -20,7 +20,7 @@ from pymssql import _mssql
 
 
 import thbase
-from thbase import log, trace
+from thbase import log, trace, write_winlog
 import thcore
 from thsession import *
 from thsql import *
@@ -53,6 +53,8 @@ THEAS_VERSION = '0.90.1.255'  # from version.cfg
 THEAS_VERSION_INT = '255'
 
 SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
+
+LOG_PATH = '%TEMP%/Theas/Port{port}'  # {port} is replaced with SERVER_PORT
 LOGGING_LEVEL = 1  # Enable all logging.  0 to disable all, other value to specify threshold.
 LOGIN_RESOURCE_CODE = 'login'
 LOGIN_AUTO_USER_TOKEN = None
@@ -71,6 +73,30 @@ REMEMBER_USER_TOKEN = False
 FORCE_REDIR_AFTER_POST = True
 
 USE_SECURE_COOKIES = True
+# Controls SIGNING, not the browser's Secure attribute (the name predates Tornado 6.3's rename of
+# set_secure_cookie to set_signed_cookie). True: cookies are HMAC-signed with the Application's
+# cookie_secret, so the server rejects tampered or forged values. Signed values are still readable,
+# not encrypted. Readers must use get_signed_cookie(). Changing this invalidates existing cookies.
+
+COOKIE_SECURE = True
+  # Controls the browser's Secure attribute, not signing. True: the browser stores and sends the
+  # cookie only over HTTPS (or http://localhost, which browsers treat as secure). Keep True behind an
+  # HTTPS load balancer / reverse proxy, even though Theas itself speaks HTTP. Set False only for an
+  # instance browsed directly over plain HTTP from other machines (e.g. testing); otherwise the
+  # browser silently drops the session cookie and logins fail. Independent of USE_SECURE_COOKIES.
+
+COOKIE_SAMESITE = 'Lax'  # settings.cfg: cookie_samesite
+# Lax: sent on top-level GET navigations (including the 303 after login and external links).
+# Strict would stop the remember-me cookie on the first request arriving from another site.
+
+SESSION_COOKIE_DAYS = 1
+USER_COOKIE_DAYS = 30
+# Lifetime of the session cookie: used both as the browser expiry (write_cookies) and as the
+# server-side signature age limit (retrieve_cookies), so a client that ignores the expiry gains
+# nothing. write_cookies() re-issues the cookie on each call, so this acts as an idle timeout.
+
+
+
 USE_MULTI_TABS = False
 MULTI_TAB_PREFIX = '__tid'
 
@@ -100,22 +126,8 @@ G_periodic_wait = 5 # number of seconds to wait between execution of periodic fu
 G_periodic_proc = None  # optional function to call periodically on the async loop
 
 
-# We may be run directly, or we may be run via TheasServerSvc
-if __name__ == "__main__":
-    def write_winlog(*args):
-        if len(args) >= 2:
-            print(args[1])
-        else:
-            print(args[0])
-else:
-    if platform.system() == 'Windows':
-        from TheasServerSvc import write_winlog
-    else:
-        def write_winlog(*args):
-            if len(args) >= 2:
-                print(args[1])
-            else:
-                print(args[0])
+# We may be run directly, or we may be run via TheasServerSvc.  write_winlog (imported from thbase above)
+# writes to the Windows Event Log only when running under TheasServerSvc; otherwise it prints.
 
 class BreakHandler:
     """
@@ -268,33 +280,61 @@ class ThHandler(tornado.web.RequestHandler):
         self.deferred_xsrf = False
         self.set_header('Server', 'Theas/{}'.format(THEAS_VERSION))
         self.filename = None
-        self.request_path: str | None = None # will contain a copy of self.request.path
+        self.request_path: str = None # will contain a copy of self.request.path
+        self.resource_code: str = None # will contain the resoure code parsed from request_path
+        self.do_not_bookmark = False
 
-        self.__cookies_changed = False
+
         self.received_tabid_url = False
         self.received_tabid_header = False
 
-        self.__cookie_st = None
-        self.__cookie_usertoken = None
+        self.__cookie_st = None  #ORIGINAL session token at start
+        self.__cookie_usertoken = None #ORIGINAL user token at start
+        self.__cookie_usertoken_global = False # True if __cookie_usertoken came from the global (path /) cookie
+
+
         self.__tab_id = None
 
-        self.tab_id = None
 
-        self.tab_id = self.request.headers.get('X-Tid')
+        self.__tab_id = self.request.headers.get('X-Tid')
         if self.tab_id:
             self.received_tabid_header = True
 
         if self.request:
             self.request_path = self.request.path
 
-        global MULTI_TAB_PREFIX
+        # check the URL for an embedded tab id
         if self.request_path.split('/')[1].startswith(MULTI_TAB_PREFIX):
-            self.tab_id = self.request_path.split('/')[1][5:]
-            self.request_path = '/'.join(self.request_path.split('/')[2:])
             self.received_tabid_url = True
-        else:
-            if self.request_path.startswith('/'):
-                self.request_path = self.request_path[1:] #remove leading /
+
+            # tab_id must be in the first path segment
+            self.__tab_id = self.request_path.split('/')[1][len(MULTI_TAB_PREFIX):]
+
+
+            # Strip out ALL tab id segments
+            self.request_path = \
+                '/'.join(seg for seg in self.request_path.split('/') if not seg.startswith(MULTI_TAB_PREFIX))
+
+
+        self.resource_code = self.request_path.lstrip('/')
+        if '?' in self.resource_code:
+            self.resource_code = self.resource_code[:self.resource_code.find('?')]
+
+
+        if self.resource_code.split('/')[0] == 'r':
+            # Special case:  an "r" as the first segment of the path, such as:
+            # r/resourcecode/aaa/bbb
+            # indicates that the second segment is to be the resource code.
+            # This allows URLs such as /r/img/myimg.jpg to be handled dynamically:  the resource img is
+            # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
+            # img/myimg.jpg
+            self.resource_code = self.resource_code.split('/')[1]
+
+
+        if self.resource_code is not None and len(self.resource_code.strip()) == 0:
+            resource_code = None
+
+
 
         # Retrieve session and user token cookie values and save
         # them in the new session in __cookie_st and __cookie_usertoken
@@ -308,43 +348,13 @@ class ThHandler(tornado.web.RequestHandler):
     def cookie_st(self):
         return self.__cookie_st
 
-    @cookie_st.setter
-    def cookie_st(self, new_val):
-        #if new_val is not None and self.__cookie_st != new_val:
-        #Experimental change 11/27/2023 to allow cookie to be set to None
-        if self.__cookie_st != (None if new_val == '' else new_val):
-            self.__cookie_st = new_val
-            self.cookies_changed = True
-
     @property
     def tab_id(self):
         return self.__tab_id
 
-    @tab_id.setter
-    def tab_id(self, new_val):
-        if self.__tab_id != new_val:
-            self.__tab_id = new_val
-            self.cookies_changed = True
-
     @property
     def cookie_usertoken(self):
         return self.__cookie_usertoken
-
-    @cookie_usertoken.setter
-    def cookie_usertoken(self, new_val):
-        if self.__cookie_usertoken != (None if new_val == '' else new_val):
-            self.__cookie_usertoken = new_val
-            self.cookies_changed = True
-
-    @property
-    def cookies_changed(self):
-        return self.__cookies_changed
-
-    @cookies_changed.setter
-    def cookies_changed(self, new_val):
-        if self.__cookies_changed != new_val:
-            log(None, 'Cookies', 'Flag cookies_changed set to {}'.format(new_val))
-            self.__cookies_changed = new_val
 
 
     async def get_response_info(self, resource_code):
@@ -408,93 +418,209 @@ class ThHandler(tornado.web.RequestHandler):
 
         return result
 
+    @property
+    def user_cookie_name(self):
+        # Tab-specific user token cookie name. Without multi-tab (or without a tab id) this is the
+        # global USER_COOKIE_NAME.
+        result = USER_COOKIE_NAME
+
+        if USE_MULTI_TABS and self.tab_id:
+            result = result + ':' + self.tab_id
+
+        return result
+
+    @property
+    def tab_path(self):
+        # Cookie path for this tab: /__tid<tab_id>/ with multi-tab, otherwise /
+        if USE_MULTI_TABS and self.tab_id:
+            return '/' + MULTI_TAB_PREFIX + self.tab_id + '/'
+        return '/'
+
+    # Cookie handing
+    # Requires Tornado >= 6.3 (set_signed_cookie / get_signed_cookie) and Python >= 3.8 (SameSite support)
+
+    def _cookie_attrs(self, path: str) -> dict:
+        # Single source of truth so set and clear always use matching attributes
+        return {
+          'path': path,
+          'httponly': True,
+          'secure': COOKIE_SECURE,
+          'samesite': COOKIE_SAMESITE,
+        }
+
+
+    def _put_cookie(self, name: str, value: str, path: str, expires_days: float):
+        attrs = self._cookie_attrs(path)
+        if USE_SECURE_COOKIES:
+          self.set_signed_cookie(name, value, expires_days=expires_days, **attrs)
+        else:
+          self.set_cookie(name, value, expires_days=expires_days, **attrs)
+
+
+    def _drop_cookie(self, name: str, path: str):
+        self.clear_cookie(name, **self._cookie_attrs(path))
+
+
+    def _read_cookie(self, name: str, max_age_days: float):
+        if USE_SECURE_COOKIES:
+          # Only a correctly signed, unexpired value is accepted. A missing, unsigned, tampered
+          # or expired cookie reads as None -- deliberately no fallback to the raw cookie value.
+          value = self.get_signed_cookie(name, max_age_days=max_age_days)
+          if not value:
+            return None
+          try:
+            return value.decode('ascii')
+          except UnicodeDecodeError:
+            return None
+        else:
+          return self.get_cookie(name) or None
+
 
     def retrieve_cookies(self):
-        self.__cookie_st = None
+        self.__cookie_st = self._read_cookie(self.session_cookie_name, SESSION_COOKIE_DAYS)
+
+        # User token: trust this tab's cookie if present, else fall back to the global
+        # "remember me" cookie at path /. (Distinct names, because a request under the tab
+        # path carries both cookies and same-named cookies would overwrite each other.)
         self.__cookie_usertoken = None
+        self.__cookie_usertoken_global = False
 
+        if self.user_cookie_name != USER_COOKIE_NAME:
+          self.__cookie_usertoken = self._read_cookie(self.user_cookie_name, USER_COOKIE_DAYS)
 
-        orig_cookie = self.get_secure_cookie(self.session_cookie_name)
-        if orig_cookie is not None and orig_cookie != b'':
-            self.__cookie_st = orig_cookie.decode(encoding='ascii')
-        else:
-            self.__cookie_st = self.get_cookie(self.session_cookie_name)
-
-        orig_cookie = self.get_secure_cookie(USER_COOKIE_NAME)
-        if orig_cookie is not None and orig_cookie != b'':
-            self.__cookie_usertoken = orig_cookie.decode(encoding='ascii')
-        else:
-             self.__cookie_usertoken = self.get_cookie(USER_COOKIE_NAME)
+        if not self.__cookie_usertoken:
+          self.__cookie_usertoken = self._read_cookie(USER_COOKIE_NAME, USER_COOKIE_DAYS)
+          self.__cookie_usertoken_global = bool(self.__cookie_usertoken)
 
 
     def write_cookies(self, clear_user: bool = False):
-        path = '/'
+        if not self.session:
+            return
 
-        if self.session:
-            if USE_MULTI_TABS:
-                path = self.session.get_tab_url()
-                # note: we are being a bit redundant by including the tab id in both the cookie name
-                # and the cookie path.  Arguably we could/should use tab id in either the name or the
-                # path. But this redundancy should not cause any problems, and helps clarify when
-                # inspecting cookies in the browser's debugger.
+        # Cookies are headers: they must be queued before redirect() / finish() / flush().
+        # redirect() calls finish() immediately, so write_cookies() must run before it.
+        # (_headers_written is a Tornado private attribute; stable for many years but not public API.)
+        if self._headers_written:
+          self.session.log('Session', 'write_cookies() called after headers were written; cookies NOT sent')
+          return
 
-            if self.cookie_st is None or len(self.cookie_st) == 0:
-                self.clear_cookie(self.session_cookie_name, path=path)
+
+        path = self.tab_path
+          # note: with multi-tab, the tab id is in both the cookie name
+          # and the path. Redundant but harmless, and it makes cookies
+          # easier to identify in the browser's debugger.
+
+        if not USE_MULTI_TABS or self.tab_id:
+            # refuse to set cookie if we are to USE_MULTI_TABS but the
+            # session does not have a tab_id
+
+            # Session token cookie.
+            # Explicit expiry rather than a browser "session" cookie: browsers differ on whether
+            # session cookies survive browser close / restore, and we don't want multi-tab clutter.
+            # Each call re-issues the cookie, sliding the expiry forward.
+            if self.session and self.session.session_token:
+              self._put_cookie(self.session_cookie_name, self.session.session_token, path, expires_days=SESSION_COOKIE_DAYS)
             else:
-                if USE_SECURE_COOKIES:
-                    self.set_secure_cookie(self.session_cookie_name, self.cookie_st, path=path, httponly=True, expires_days=1, expires=None)
-                else:
-                    self.set_cookie(self.session_cookie_name, self.cookie_st, path=path, httponly=True, expires_days=1, expires=None)
+              self._drop_cookie(self.session_cookie_name, path)
 
-            # note: the browser's specific implementation of "session" cookies (i.e. no expiration date provided)
-            # varies by browser. Some browsers persist "session" cookies after browser close and/or system
-            # reboots without closing the browser. We don't want clutter (especially when using multi-tab).
-            # So we explicitly set the expiration to 1 day.  Calling write_cookies() will be called multiple
-            # times will have the effect of extending the timeout on each call.
+        # "Remember me on this device" user token cookie.
+        # With multi-tab it is written twice: on this tab's path (so this tab survives session expiry
+        # or a server restart as the same user) and globally on / (so a tab with no user of its own
+        # gets the most recently remembered user).
+        want_user_cookie = (
+          REMEMBER_USER_TOKEN and
+          not clear_user and
+          self.session.remember_user_token and
+          self.session.user_token is not None and
+          self.session.logged_in and
+          not self.session.autologged_in
+        )
 
-
-            # clear usertoken cookie (i.e. for "remember me on this device")
-            if clear_user or (
-                    self.cookie_usertoken is None or
-                    len(self.cookie_usertoken) == 0 or
-                    self.session is None or
-                    not REMEMBER_USER_TOKEN or
-                    not self.session.remember_user_token
-            ):
-                self.clear_cookie(USER_COOKIE_NAME, path=path)
-                    # note: we are not currently setting a tab-specific user cookie, but
-                    # there is no harm in clearing it here just in case we change our minds
-                    # in the future.
-
-                #if not USE_MULTI_TABS:
-                self.clear_cookie(USER_COOKIE_NAME, path='/')
-                    # note: currently any tab will clear the global user cookie.
-                    # See below for a related todo
+        if want_user_cookie:
+          if self.user_cookie_name != USER_COOKIE_NAME:
+            self._put_cookie(self.user_cookie_name, self.session.user_token, path, expires_days=USER_COOKIE_DAYS)
+          self._put_cookie(USER_COOKIE_NAME, self.session.user_token, '/', expires_days=USER_COOKIE_DAYS)
+        elif (clear_user or
+            not self.cookie_usertoken or
+            not REMEMBER_USER_TOKEN or
+            not self.session.remember_user_token):
+          self._drop_user_cookies()
+            # note: any tab clears the global user cookie (other tabs keep their own tab cookies)
 
 
-            if (REMEMBER_USER_TOKEN and not clear_user and
-                    self.session.remember_user_token and
-                    self.session.user_token is not None and
-                    self.session.logged_in and
-                    not self.session.autologged_in):
+    def _drop_user_cookies(self):
+        if self.user_cookie_name != USER_COOKIE_NAME:
+          self._drop_cookie(self.user_cookie_name, self.tab_path)
+        self._drop_cookie(USER_COOKIE_NAME, '/')
 
-                if USE_SECURE_COOKIES:
-                    #self.set_secure_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path=path, http_only=True, expires_days=30, expires=None)
-                    self.set_secure_cookie(USER_COOKIE_NAME, self.session.user_token, path='/', httponly=True, expires_days=30, expires=None)
-                else:
-                    #self.set_cookie(USER_COOKIE_NAME, self.cookie_usertoken, path=path, http_only=True, expires_days=30, expires=None)
-                    self.set_cookie(USER_COOKIE_NAME, self.session.user_token, path='/', httponly=True, expires_days=30, expires=None)
 
-            # todo: decide how user_token should be handled when multi-tab is in use:
-            # If one tab logs out, should that delete the browser-wide user_token cookie?
-            # Probably so...though that compromises tab isolation.
-            # Alternatively, perhaps USER_TOKEN should be scoped to a tab-id path. But
-            # how then would a user indicate they no longer want to be remembered on the
-            # device?
-            # At present user cookie is set only on the '/' path, not the tab-specific path.
-            # However the user cookie is cleared (when appropriate) from the '/' and also the
-            # tab-specific path (just to avoid security-related problems if code is changed in
-            # the future).
+    def clear_login_cookies(self):
+        # Logout / fresh login: forget this tab's session token and user token, and the global
+        # "remember me" user token, so the next request neither resumes the session nor silently
+        # re-authenticates. Other tabs keep their own tab-specific user token cookies.
+        # Must run before redirect() / finish().
+        if not USE_MULTI_TABS or self.tab_id:
+          self._drop_cookie(self.session_cookie_name, self.tab_path)
+        self._drop_user_cookies()
+
+        self.__cookie_st = None
+        self.__cookie_usertoken = None
+        self.__cookie_usertoken_global = False
+
+
+    def discard_user_cookie(self, include_global: bool = False):
+        # Authentication failed. include_global=True (failed username/password login): forget this tab's
+        # user token and the global "remember me" one. Other tabs' cookies are never touched. Otherwise (a user token could not be
+        # re-authenticated): drop only the cookie that token came from (this tab's, or the global
+        # one if we fell back to it).
+        if include_global:
+          self._drop_user_cookies()
+        elif self.__cookie_usertoken_global:
+          self._drop_cookie(USER_COOKIE_NAME, '/')
+        elif self.user_cookie_name != USER_COOKIE_NAME:
+          self._drop_cookie(self.user_cookie_name, self.tab_path)
+
+        self.__cookie_usertoken = None
+        self.__cookie_usertoken_global = False
+
+
+    def apply_proc_cookies(self, new_cookies_str: str, source: str = ''):
+        # Apply the Cookies column returned by a stored procedure ("name1=value1&name2=value2...").
+        # The proc only says WHICH cookies to set; Theas decides HOW (path, Secure, SameSite), so they
+        # match the cookies we set ourselves. With multi-tab they are scoped to this tab's path.
+        # Not HttpOnly, so page script may read them (only the session / user token cookies are
+        # credentials). Left unsigned so the proc can read its own values back from @Cookies on
+        # later requests. An empty value clears the cookie.
+        if not new_cookies_str:
+          return
+
+        for this_pair in new_cookies_str.split('&'):
+          if not this_pair:
+            continue  # tolerate leading / trailing / doubled '&'
+
+          this_name, _, this_value = this_pair.partition('=')
+          this_value = urlparse.unquote(this_value)
+
+          if this_name == self.session_cookie_name:
+            # proc is replacing the session token: update the session; write_cookies() sets the cookie
+            self.session.session_token = this_value
+          elif this_name in (USER_COOKIE_NAME, self.user_cookie_name):
+            self.session.user_token = this_value
+          elif (this_name.startswith(SESSION_COOKIE_NAME) or this_name.startswith(USER_COOKIE_NAME) or
+                this_name == '_xsrf'):
+            # Theas-owned cookie (e.g. another tab's cookie echoed back from @Cookies): never let
+            # the proc re-issue it, or it would be duplicated with the wrong path / attributes
+            self.session.log('Cookies', 'Ignoring Theas-owned cookie {} returned by stored procedure'.format(this_name))
+          else:
+            attrs = self._cookie_attrs(self.tab_path)
+            attrs['httponly'] = False
+            if this_value:
+              self.set_cookie(this_name, this_value, **attrs)
+            else:
+              self.clear_cookie(this_name, **attrs)
+
+        self.write_cookies()
+        self.session.log('Cookies', 'Updating cookies as per stored procedure {}'.format(source).rstrip())
 
 
     def check_xsrf_cookie(self):
@@ -518,11 +644,11 @@ class ThHandler(tornado.web.RequestHandler):
             self.deferred_xsrf = True
 
             # since we are skipping XSRF validation we can't trust the session cookie
-            self.cookie_st = None
-            self.cookie_usertoken = None
-            self.write_cookies()
-            log(None, 'Cookies',
-                              'Cleared cookies {} and theas:th:UsersToken due to skipXSRF'.format(self.session_cookie_name))
+            # self.cookie_st = None
+            # self.cookie_usertoken = None
+            # self.write_cookies()
+            # log(None, 'Cookies',
+            #                   'Cleared cookies {} and theas:th:UsersToken due to skipXSRF'.format(self.session_cookie_name))
 
             return True
         else:
@@ -581,8 +707,8 @@ class ThHandler(tornado.web.RequestHandler):
             if buf:
                 self.write(buf)
 
-            if self.session and self.session.locked:
-                self.session.finished_sync()
+            if self.session and self.session.have_lock(self):
+                self.session.finished_sync(self)
 
             if buf:
                 self.finish()
@@ -753,21 +879,7 @@ class ThHandler(tornado.web.RequestHandler):
                     # when rendering the template.
 
                 if new_cookies_str:
-                    for this_pair in new_cookies_str.split('&'):
-                        this_name, this_value = this_pair.split('=')
-                        this_value = urlparse.unquote(this_value)
-
-                        if this_name == self.session_cookie_name:
-                            self.cookie_st = this_value
-                        elif this_name == USER_COOKIE_NAME:
-                            self.cookie_usertoken = this_value
-                        else:
-                            self.clear_cookie(this_name, path='/')
-                            self.set_cookie(this_name, this_value, path='/')
-
-                    self.write_cookies()
-                    self.session.log('Cookies', 'Updating cookies as per stored procedure')
-                    self.cookies_changed = True
+                    self.apply_proc_cookies(new_cookies_str)
 
                 if header_str:
                     # HTTPHeaders returns a string like name1=value1&name2=value2...
@@ -879,12 +991,13 @@ class ThHandler(tornado.web.RequestHandler):
         else:
             template_str = resource.data
 
-            if resource is not None and resource.exists and \
-                    resource.resource_code != LOGIN_RESOURCE_CODE and \
-                    resource.render_jinja_template and \
-                    self.session.current_resource != resource:
-                # We may have retrieved a cached resource.  Set current_resource.
-                self.session.current_resource = resource
+
+            # if resource is not None and resource.exists and \
+            #         resource.resource_code != LOGIN_RESOURCE_CODE and \
+            #         resource.render_jinja_template and \
+            #         self.session.current_resource != resource:
+            #     We may have retrieved a cached resource.  Set current_resource.
+                # self.session.current_resource = resource
 
             self.session.current_template_str = template_str
 
@@ -934,6 +1047,7 @@ class ThHandler(tornado.web.RequestHandler):
         theas_params_str = self.session.theas_page.serialize()
 
         proc = None
+
 
         if resource and resource.api_stored_proc:
 
@@ -1208,21 +1322,7 @@ class ThHandler(tornado.web.RequestHandler):
                             # Cookies returns a string like name1=value1&name2=value2...
 
                             if new_cookies_str and cookies_str != new_cookies_str:
-                                for this_pair in new_cookies_str.split('&'):
-                                    this_name, this_value = this_pair.split('=')
-                                    this_value = urlparse.unquote(this_value)
-
-                                    if this_name == self.session_cookie_name:
-                                        self.cookie_st = this_value
-                                    elif this_name == USER_COOKIE_NAME:
-                                        self.cookie_usertoken = this_value
-                                    else:
-                                        self.clear_cookie(this_name, path='/')
-                                        self.set_cookie(this_name, this_value, path='/')
-
-                                self.write_cookies()
-                                self.session.log('Cookies', 'Updating cookies as per stored procedure E')
-                                self.cookies_changed = True
+                                self.apply_proc_cookies(new_cookies_str, 'E')
 
                         # Check to see if stored proc indicates we should redirect
                         if 'RedirectTo' in row:
@@ -1267,6 +1367,8 @@ class ThHandler(tornado.web.RequestHandler):
             self.session.comments = None
             return this_data, redirect_to, history_go_back
 
+
+
     #@run_on_executor
     #def get_data_background(self, resource, suppress_resultsets=False):
     #    return self.get_data(resource, suppress_resultsets=suppress_resultsets)
@@ -1281,20 +1383,32 @@ class ThHandler(tornado.web.RequestHandler):
         # even if a Jinja template is not actually used.
         # Normally run in a thread, and accesses session object
 
+        if not self.session:
+            raise ('Error in ThHandler.do_render_response():  Session must exist')
+
         buf = None
         this_data = None
         redirect_to = None
         history_go_back = False
 
+
         if this_resource is not None:
 
             if this_resource.api_stored_proc or this_resource.render_jinja_template:
-                this_data, redirect_to, history_go_back = await self.get_data(this_resource)
+
+                if not self.session.have_lock(self):
+                    raise TheasServerError('Error in ThHandler.do_render_response(): Session was not locked, so could not prodeed.')
+                else:
+                    this_data, redirect_to, history_go_back = await self.get_data(this_resource)
+
 
             if this_resource.render_jinja_template:
                 # resource indicates that we should render a Jinja template
                 try:
                     buf = self.session.theas_page.render(this_resource.data, data=this_data, request=self.request)
+
+                    if redirect_to is None and this_resource.redir_url is not None:
+                        redirect_to = this_resource.redir_url
                 except Exception as ex:
                     buf = 'Error when rendering Jinja template: ' + str(ex)
             elif this_resource.api_stored_proc:
@@ -1305,10 +1419,12 @@ class ThHandler(tornado.web.RequestHandler):
                                 'Content' in this_data['General']:
                     buf = this_data['General']['Content']
 
-            if redirect_to is None and this_resource.redir_url is not None:
-                redirect_to = this_resource.redir_url
+
+            if this_resource.api_stored_proc and this_resource.resource_code != LOGIN_RESOURCE_CODE:
+                self.session.current_resource = this_resource
 
         return buf, redirect_to, history_go_back
+
 
     async def do_post(self, *args, **kwargs):
 
@@ -1324,7 +1440,23 @@ class ThHandler(tornado.web.RequestHandler):
         next_page = None
         next_page_query = None
 
+        if not self.session:
+            return
+
+        obtained_lock = False
+
+        if not self.session.have_lock(self):
+            obtained_lock = await self.session.wait_for_lock(handler=self)
+
+        # if not self.deferred_xsrf, then XSRF token has already been validated by Tornado
+        xsrf_ok = not self.deferred_xsrf
+        xsrf_message = ''
+
+
+        # Update Theas params, etc.
         self.session.theas_page.process_client_request(request_handler=self, accept_any=False)
+
+        # Stage uploaded files, if any
         if self.request_has_files():
             await self.process_uploaded_files()
 
@@ -1333,155 +1465,123 @@ class ThHandler(tornado.web.RequestHandler):
         if self.get_argument('DoHistoryGoBack', default='0') == '1':
             history_go_back = True
 
-        cmd = None
-        if self.get_arguments('cmd'):
-            cmd = self.get_argument('cmd')
-        if not cmd and self.get_body_arguments('cmd'):
-            cmd = self.get_body_argument('cmd')
 
-        # this_page = self.session.theas_page.get_value('th:CurrentPage')
-        # if not this_page:
-        this_page = self.request.path.rsplit('/', 1)[1]
+        # inspect what the URL says this page is
+        this_path = self.request.path
+
+        this_page = this_path.lstrip('/')
+
         if '?' in this_page:
             this_page = this_page[:this_page.find('?')]
 
-            # if self.session.current_resource and this_page == self.session.current_resource.resource_code:
-            #    pass
-            # else:
+        this_page = '/'.join(seg for seg in this_page.split('/') if not seg.startswith('__tid')).lstrip('/')
+
+
+
+
+
+        # if self.session.current_resource and this_page != self.session.current_resource.resource_code:
+
             # Browser provided a different value for current_page.  Perhaps the user used the back button?
             # In any case, we want to use the correct stored procedure for this request.  Getting the template
             # will set that from us.
-        template_str, this_resource = await self.get_template(this_page)
+            # template_str, this_resource = await self.get_template(this_page)
 
-        if self.deferred_xsrf:
-            self.session.theas_page.set_value('th:PerformUpdate', '1')
-
-        if cmd is not None:
-            pass
-            #buf = '<html><body>Parameter cmd provided, but not implemented.</body></html>'
+        #if not self.session.current_resource:
+        if not self.session.current_resource or this_page != self.session.current_resource.resource_code:
+            template_str, this_resource = await self.get_template(this_page)
         else:
-            if self.session.theas_page.get_value('th:PerformUpdate') == '1':
-                # Before we can process next_page, we need to submit to process this_page post
-                self.session.log('Data', 'Performing update of posted data')
+            this_resource = self.session.current_resource
 
-                if self.session and self.session.current_resource:
-                    this_data, redirect_to, history_go_back = \
-                        await self.get_data(self.session.current_resource, suppress_resultsets=True)
-                    self.session.theas_page.set_value('th:PerformUpdate', '0')
+        if this_resource.requires_authentication and not self.session.logged_in:
+            self.session.log('Auth', 'Resource requires auth and user not logged in')
+            # still not logged in:  present login screen
+            self.session.bookmark_url = this_resource.resource_code
+            # buf = await self.session.build_login_screen()
+            self.session.log('Auth', 'Sending redirect to login screen')
+            redirect_to = self.session.get_login_url()
 
-                    # determine what page is being requested
-                    next_page = self.session.theas_page.get_value('th:NextPage')
-                    if next_page in ('None', 'default', 'index'):
-                        next_page = DEFAULT_RESOURCE_CODE
-                    if not next_page:
-                        next_page = this_page
 
-            if redirect_to:
-                self.session.log('Nav', 'PerformUpdate stored proc sent redirect to {}'.format(redirect_to))
+        if not xsrf_ok:
+            # XSRF token has not yet been validated
+            if this_resource is not None and this_resource.skip_xsrf:
+                # resource indicates that XSRF token validation is not needed
+                xsrf_ok = True
             else:
-                self.session.log('Nav', 'After PerformUpdate stored proc th:NextPage={}'.format(next_page))
-                # Force a redirect
-                redirect_to = next_page
-                # Perform redirect after processing the post (i.e. Post-Redirect-Get PRG) pattern
-                # Redir will be to redirect_to if set, else will be to next_page.
-                # This is true even if FORCE_REDIR_AFTER_POST == False, because th:PerformUpdate == 1
+                # resource indicates that XSRF token validation is required...so do it now
+                try:
+                    tornado.web.RequestHandler.check_xsrf_cookie(self)
+                    xsrf_ok = True
+                except Exception as e:
+                    # Tornado normally just raises an exception, such as:
+                    #   raise HTTPError(403, "'_xsrf' argument missing from POST")
+                    xsrf_ok = False
+                    xsrf_message = str(e)
 
-            if redirect_to:
-                pass
+            if not xsrf_ok:
+                log(None, 'xsrf', xsrf_message)
+                self.send_error(status_code=403, message=xsrf_message)
+                handled = True
+                return buf, redirect_to, history_go_back, handled
+
+
+        if this_resource.on_before:
+            this_function = getattr(TheasCustom, this_resource.on_before)
+            if this_function is not None:
+                handled = this_function(self, args, kwargs)
+
+
+        # Process the post itself. (We will then redirect and serve up the resulting get)
+        # Before we can process next_page, we need to submit to process this_page post
+        self.session.log('Data', 'Performing update of posted data')
+
+
+        # Execute stored procedure associated with this resource
+        this_data, redirect_to, history_go_back = \
+            await self.get_data(this_resource, suppress_resultsets=True)
+
+
+
+        next_page = self.session.theas_page.get_value('th:NextPage')
+        if next_page and '?' in next_page:
+            next_page = next_page[:next_page.find('?')]
+        if next_page in ('None', 'default', 'index'):
+            next_page = DEFAULT_RESOURCE_CODE
+        if not next_page:
+            next_page = this_page
+
+        if redirect_to:
+            self.session.log('Nav', 'PerformUpdate stored proc sent redirect to {}'.format(redirect_to))
+        else:
+            self.session.log('Nav', 'After PerformUpdate stored proc th:NextPage={}'.format(next_page))
+
+        if FORCE_REDIR_AFTER_POST:
+            # Perform redirect after processing the post (i.e. Post-Redirect-Get PRG) pattern
+            # Redir will be to redirect_to if set, else will be to next_page.
+            # This is true even if FORCE_REDIR_AFTER_POST == False, because th:PerformUpdate == 1
+
+            # We want to force a redirect even if next_page == this_page because this request
+            # is a POST, and we only want to serve up content on a GET
+
+            # Force a redirect
+            if this_page == next_page:
+                redirect_to = this_path
             else:
-                # determine what page is being requested
-                next_page = self.session.theas_page.get_value('th:NextPage')
-                if next_page and '?' in next_page:
-                    next_page = next_page[:next_page.find('?')]
-                if next_page in ('None', 'default', 'index'):
-                    next_page = DEFAULT_RESOURCE_CODE
-                if not next_page:
-                    next_page = this_page
+                redirect_to = this_path.replace(this_page, next_page)
+                redirect_to = redirect_to[:redirect_to.find('?')]
 
-                if FORCE_REDIR_AFTER_POST:
-                    # We want to force a redirect even if next_page == this_page because this request
-                    # is a POST, and we only want to serve up content on a GET
-                    redirect_to = next_page
 
-            if not redirect_to:
-                self.session.log('Nav', 'Before processing for POST th:NextPage={}'.format(next_page))
 
-                if not self.session.current_resource or next_page != self.session.current_template_str:
-                    template_str, this_resource = await self.get_template(next_page)
-                else:
-                    this_resource = self.session.current_resource
-
-                # if not self.deferred_xsrf, then XSRF token has already been validated by Tornado
-                xsrf_ok = not self.deferred_xsrf
-                xsrf_message = ''
-
-                if not xsrf_ok:
-                    # XSRF token has not yet been validated
-                    if this_resource is not None and this_resource.skip_xsrf:
-                        # resource indicates that XSRF token validation is not needed
-                        xsrf_ok = True
-                    else:
-                        # resource indicates that XSRF token validation is required...so do it now
-                        try:
-                            tornado.web.RequestHandler.check_xsrf_cookie(self)
-                            xsrf_ok = True
-                        except Exception as e:
-                            # Tornado normally just raises an exception, such as:
-                            #   raise HTTPError(403, "'_xsrf' argument missing from POST")
-                            xsrf_ok = False
-                            xsrf_message = str(e)
-
-                if not xsrf_ok:
-                    log(None, 'xsrf', xsrf_message)
-                    self.send_error(status_code=403, message=xsrf_message)
-                    handled = True
-                else:
-                    if this_resource is not None:
-                        if this_resource.requires_authentication and not self.session.logged_in:
-                            self.session.log('Auth', 'Resource requires auth and user not logged in')
-                            # still not logged in:  present login screen
-                            self.session.bookmark_url = this_resource.resource_code
-                            #buf = await self.session.build_login_screen()
-                            self.session.log('Auth', 'Sending redirect to login screen')
-                            redirect_to = self.session.get_login_url()
-                        else:
-                            if this_resource.on_before:
-                                this_function = getattr(TheasCustom, this_resource.on_before)
-                                if this_function is not None:
-                                    handled = this_function(self, args, kwargs)
-
-                            if not handled and not history_go_back and self.session is not None:
-                                # render output using template and data
-
-                                buf, redirect_to, history_go_back = await self.do_render_response(this_resource=this_resource)
-
-                                #buf, redirect_to, history_go_back = await asyncio.get_running_loop().run_in_executor(
-                                #    None, functools.partial(self.do_render_response, this_resource=this_resource))
-
-                                '''
-                                if this_resource and this_resource.api_stored_proc:
-                                    self.session.log('Data', 'Calling get_data')
-                                    this_data, redirect_to, history_go_back = self.get_data(this_resource)
-                                    #xyz
-
-                                if this_resource and this_resource.render_jinja_template and\
-                                        redirect_to is None and not history_go_back:
-                                    self.session.log('Render', 'Calling theas_page.render')
-                                    buf = self.session.theas_page.render(template_str, data=this_data)
-                                    self.session.log('Render', 'Done with theas_page.render')
-                                else:
-                                    # template_str does not need to be merged with data
-                                    buf = template_str
-                                '''
-
-                                if this_resource and this_resource.on_after:
-                                    this_function = getattr(TheasCustom, this_resource.on_after)
-                                    if this_function is not None:
-                                        handled = this_function(self, args, kwargs)
+            if this_resource and this_resource.on_after:
+                this_function = getattr(TheasCustom, this_resource.on_after)
+                if this_function is not None:
+                    handled = this_function(self, args, kwargs)
 
         return buf, redirect_to, history_go_back, handled
 
-    async def obtain_session(self, seconds_to_wait=30, write_to_cookie=True):
+
+    async def obtain_session(self, seconds_to_wait=30, write_to_cookie=True, obtain_lock = True):
+
         this_sess = None
 
         orig_cookie_session_token = self.cookie_st
@@ -1494,26 +1594,31 @@ class ThHandler(tornado.web.RequestHandler):
         log(None, 'Session', f'obtain_session() [{self.request.path}] found this session token in a cookie: ', this_session_token)
 
         this_sess, failed_to_lock = await ThSession.get_session(session_token=this_session_token,
-                                                          tab_id= this_tab_id,
-                                                          handler=self,
-                                                          comments='ThHandler.obtain_session')
-        if this_sess is None or failed_to_lock:
+                                                                tab_id= this_tab_id,
+                                                                handler=self,
+                                                                comments='ThHandler.obtain_session',
+                                                                obtain_lock=obtain_lock)
+
+        if this_sess is None:
+            self.clear_all_cookies()
             log(None, 'Sessions', 'Failed to obtain session in obtain_session()')
             return None
+
 
         else:
 
             this_sess.current_handler = self
             this_sess.current_xsrf_form_html = self.xsrf_form_html()
 
-            if self.session_cookie_name and write_to_cookie:
-                # next_url = '/'
-                if orig_cookie_session_token != this_sess.session_token:
-                    self.cookie_st = this_sess.session_token
-                    self.tab_id = this_sess.tab_id
-                    log(None, 'Cookies',
-                                      'Updating cookie {} obtain_session() gave different token ({} vs {})'.format(
-                                          self.session_cookie_name, orig_cookie_session_token, this_sess.session_token))
+            #self.cookie_st = this_sess.session_token
+            #self.tab_id = this_sess.tab_id
+
+            self.write_cookies()
+
+            if orig_cookie_session_token != this_sess.session_token:
+                log(None, 'Cookies',
+                                  'Cookie {} obtain_session() gave different token ({} vs {})'.format(
+                                      self.session_cookie_name, orig_cookie_session_token, this_sess.session_token))
 
             this_usertoken = this_sess.user_token
 
@@ -1532,10 +1637,9 @@ class ThHandler(tornado.web.RequestHandler):
                         if not this_sess.logged_in:
                             log(None, 'Sessions', 'FAILED to reauthenticate user from usertoken cookie')
                             this_sess.user_token = None
-                            self.cookie_usertoken = None
+                            self.discard_user_cookie()
                             log(None, 'Cookies',
-                                    'Updating cookie {} obtain_session() could not authenticate original usertoken'.format(
-                                    USER_COOKIE_NAME))
+                                    'Dropped user token cookie: obtain_session() could not authenticate original usertoken')
 
         return this_sess
 
@@ -1593,456 +1697,308 @@ class ThHandler(tornado.web.RequestHandler):
 
         log(None, 'POST', '*******************************')
 
+        handled = False
+
         redirect_to = None
 
         if not thbase.theas_server().is_running:
-            self.send_error(status_code=503)
-        else:
-
-            self.session = await self.obtain_session()
-
-            if self.session is None:
-                self.send_error(status_code=500)
-                handled = True
-                return
-
-            this_finished = False
-            handled = False
-
-            try:
-                self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
-                self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
-
-                buf = None
-                redirect_to = None
-                history_go_back = False
+            self.send_error(status_code=500)
+            return
 
 
-                # This is a post.  The next page may be specified in a form field theas:th:NextPage.
-                if not self.session.logged_in and self.get_arguments('u') and self.get_arguments('pw'):
-                    # The requested page is the login screen
-                    error_message = ''
-                    #if USE_WORKER_THREADS:
-                    success, error_message = await self.session.authenticate(username=self.get_argument('u'),
-                                                                             password=self.get_argument('pw'))
+        self.session = await self.obtain_session(obtain_lock = True)
 
-                    # if not self.session.authenticate(username=self.get_argument('u'), password=self.get_argument('pw')):
-                    if not success:
-                        # authentication failed, so send the login screen
-                        #self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
-                        self.session.error_message = 'Error: {}.'.format(error_message)
-                        #buf = await self.session.build_login_screen()
-                        #self.write(buf)
-                        # we shouldn't set self.session.bookmark_url as this is just a failed login attempt
-                        log(self.session, 'Response', 'Sending redirect to login screen')
-                        redirect_to = self.session.get_login_url()
+        if self.session is None:
+            self.send_error(status_code=500)
+            handled = True
+            return
 
-                        # handled = True
-                        #
-                        # if self.session and self.session.locked:
-                        #     await self.session.finished()
-                        #
-                        # await self.finish()
-                        #
-                        # this_finished = True
+        try:
+            self.session.log('POST Request', 'Received request for: {}'.format(self.request.path))
+            self.session.log('Authentication' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+
+            buf = None
+            redirect_to = None
+            history_go_back = False
+
+
+            # This is a post.  The next page may be specified in a form field theas:th:NextPage.
+            if not self.session.logged_in and self.get_arguments('u') and self.get_arguments('pw'):
+                # The requested page is the login screen
+                error_message = ''
+
+                success, error_message = await self.session.authenticate(
+                    username=self.get_argument('u'),
+                    password=self.get_argument('pw'))
+
+
+                self.write_cookies()
+
+                if not success:
+                    # authentication failed, so send the login screen
+                    #self.session.theas_page.set_value('theas:th:ErrorMessage', 'Error: {}.'.format(error_message))
+                    self.session.error_message = 'Error: {}.'.format(error_message)
+                    #buf = await self.session.build_login_screen()
+                    #self.write(buf)
+                    # we shouldn't set self.session.bookmark_url as this is just a failed login attempt
+                    log(self.session, 'Response', 'Sending redirect to login screen')
+                    redirect_to = self.session.get_login_url()
+
+                else:
+                    # Authentication succeeded, so continue with redirect
+                    # self.session.theas_page.set_value('theas:th:ErrorMessage', '')
+
+                    if self.session.bookmark_url:
+                        self.session.log('Proceeding with bookmarked page', self.session.bookmark_url)
+                        redirect_to = self.session.bookmark_url
+                        #await self.get_template(self.session.bookmark_url)
+                        self.session.bookmark_url = None
+
 
                     else:
-                        # Authentication succeeded, so continue with redirect
-                        # self.session.theas_page.set_value('theas:th:ErrorMessage', '')
+                        self.session.log('Response', 'Setting cookies after login page success')
+                        redirect_to = '~'
 
-                        if self.session.bookmark_url:
-                            self.session.log('Proceeding with bookmarked page', self.session.bookmark_url)
-                            redirect_to = self.session.bookmark_url
-                            #await self.get_template(self.session.bookmark_url)
-                            self.session.bookmark_url = None
-                            handled = False
+            if not handled:
 
-                        else:
-                            self.session.log('Response', 'Sending clientside redir after login page success')
-                            self.write(self.session.clientside_redir())
-                            handled = True
+                if not redirect_to:
+                    # Handle the actual form processing here. When done, we will persist session data and redirect.
 
-                            if self.session and self.session.locked:
-                                await self.session.finished()
-
-                            await self.finish()
-
-                            this_finished = True
+                    buf, redirect_to, history_go_back, handled = await self.do_post(args, kwargs)
 
                 if not handled:
+                    # CORS
+                    #self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+                    #self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+                    self.set_header('Cache-Control', 'no-store')
 
-                    if not redirect_to:
-                        # Handle the actual form processing here. When done, we will persist session data and redirect.
-                        #if USE_WORKER_THREADS:
-                        buf, redirect_to, history_go_back, handled = await self.do_post(args, kwargs)
+                    if redirect_to is not None:
+                        self.session.log('Session', 'Sending redirect to: ({}) after do_post()'.format(
+                                redirect_to))
 
-                    if not handled:
-                        if redirect_to is not None:
-                            if self.cookies_changed:
-                                # must perform a client-side redirect in order to set cookies
-                                self.session.log('Session', 'Sending client-side redirect to: ({}) after do_post()'.format(
-                                    redirect_to))
-                                self.write(self.session.clientside_redir(redirect_to))
-                                await self.session.finished()
-                            else:
-                                # can send a normal redirect, since no cookies need to be written
-                                this_finished = True
-                                self.session.log('Session',
-                                                 'Sending normal redirect to: ({}) after do_post()'.format(redirect_to))
-                                self.redirect(redirect_to)
-
-                                if self.session is not None and self.session.locked:
-                                    await self.session.finished()
-
-
-                        else:
-                            if history_go_back and self.session is not None:
-
-                                if len(self.session.history) > 0:
-                                    this_history_entry = self.session.history.pop()
-
-                                    self.session.theas_page.set_value('theas:th:NextPage', this_history_entry['PageName'])
-
-                                    self.session.log('Response', 'Sending clientside redir due to history_go_back')
-                                    this_finished = True
-                                    buf = self.session.clientside_redir()
-
-                            if buf is None:
-                                buf = '<html><body>No content to send in ThHandler.post()</body></html>'
-                            self.write(buf)
-
-                            # CORS
-                            self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-                            self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
-
-                            self.session.log('Response', 'Sending response')
+                    self.redirect(redirect_to, status = 303)
+                    handled = True
 
 
 
-            finally:
-                if not handled and not this_finished:
-                    if self.session and self.session.locked:
-                        await self.session.finished()
+        finally:
+            if not self._finished:
+                await self.finish()
 
-                    await self.finish()
+            if self.session and self.session.have_lock(self):
+                await self.session.finished(self)
 
-                self.session = None
+            self.session = None
+
+
+    async def set_response_headers(self, resource):
+        # CORS
+        # self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
+        # self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
+
+        if resource is not None and \
+                (resource.render_jinja_template or
+                 resource.api_stored_proc or
+                 resource.api_async_stored_proc
+                ):
+            self.set_header('Cache-Control', 'no-store')
+        else:
+            self.set_header('Cache-Control', 'public, max-age=900')
+
+        if self.filename is not None:
+            self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(self.filename))
+            self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
+
+        elif resource is not None:
+            if resource.filename:
+                if resource.filetype:
+                    self.set_header('Content-Type', resource.filetype)
+                else:
+                    self.set_header('Content-Type',
+                                    thcore.Theas.mimetype_for_extension(resource.filename))
+                self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
+
+            self.set_header('Content-Type',
+                            thcore.Theas.mimetype_for_extension(resource.resource_code))
+
 
     async def get(self, *args, **kwargs):
         ##########################################################
         # MAIN ENTRY POINT FOR HTTP GET REQUEST
         ##########################################################
 
+        log(None, 'GET', '*******************************')
+        log(None, 'GET', args[0])
+
         if not thbase.theas_server().is_running:
             # server is shutting down
             self.send_error(status_code=503)
-        else:
+            return
 
-            if self.session:
-                self.session.comments = 'ThHandler.get'
 
-            # do everything needed to process an HTTP GET request
+        # Remember that tab_id, request_path,received_tabid_url, and resource_code have already been set
+        # by this handler object's constructor
 
-            handled = False
-            buf = None
-            redirect_to = None
-            history_go_back = False
+        handled = False
+        resource = None
 
-            # try to find required resource
-            resource_code = None
-            resource = None
+        redirect_to = None
+        history_go_back = False
 
-            if self.request_path is not None and self.request_path.split('/')[0] == 'r':
-                # Special case:  an "r" as the first segment of the path, such as:
-                # r/resourcecode/aaa/bbb
-                # indicates that the second segment is to be the resource code.
-                # This allows URLs such as /r/img/myimg.jpg to be handled dynamically:  the resource img is
-                # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
-                # img/myimg.jpg
-                resource_code = self.request_path.split('/')[1]
+        buf = None
+
+
+        if not self.resource_code:
+            # retrieve (but do not validate yet) __cookie_st and __cookie_user_toekn
+            # We peek at these to see if we need to handle '~' as the default resource for a user
+            self.retrieve_cookies()
+
+            if self.__cookie_st or self.__cookie_usertoken:
+                # session may be invalid, but that there is a cookie is an indication that it
+                # it is worth doing more processing to determine the defaut resource
+                self.resource_code = '~'
             else:
-                resource_code = self.request_path
-                if resource_code and resource_code.count('.') >= 2:
-                    # A versioned filename, i.e. my.23.css for version #23 of my.css
-                    # We just want to cut out the version, and return the unversioned
-                    # filename as the resource code (i.e. my.css)
+                self.resource_code = DEFAULT_RESOURCE_CODE
 
-                    # That is, Theas will always / only serve up the most recent version
-                    # of a resource.  There is not support for serving up a particular
-                    # historical version.  The version number in the file name is merely
-                    # for the browser's benefit, so that we can "cache bust" / have the
-                    # browser request the latest version even if it has an old version in
-                    # cache.
-
-                    # For this reason, we don't really need to inspect the resources.
-                    # We need only manipulate the resource_code to strip out the version
-                    # number.
-                    segments = resource_code.split('.')
-                    if len(segments) >= 3 and 'ver' in segments:
-                        ver_pos = segments.index('ver')
-                        if ver_pos > 0:
-                            resource_code = '.'.join(segments[:ver_pos]) + '.' + '.'.join(segments[ver_pos + 2:])
-
-            if resource_code is not None and len(resource_code.strip()) == 0:
-                resource_code = None
-
-            if not resource_code:
-                if not self.session or (self.session and not self.session.logged_in):
-                    resource_code = DEFAULT_RESOURCE_CODE
-                elif self.session and self.session.logged_in:
-                    resource_code = '~'
+            self.do_not_bookmark = True
 
 
-            log(None, 'GET', f'**Starting get for {resource_code} (Handler:{self.handler_guid})')
+        if self.resource_code != '~':
+
+            log(None, 'GET', f'**Starting get for {self.resource_code} (Handler:{self.handler_guid})')
 
             # Request-chain anchor: resource_code + handler_guid tie together every
             # trace line emitted while processing this GET.  (self.session may still
             # be None here -- it is assigned by obtain_session() just below.)
             trace('get.start', trace_group='request', th_session=self.session,
-                  resource_code=resource_code, handler=self.handler_guid)
+                  resource_code=self.resource_code, handler=self.handler_guid)
+
+            resource = await G_cached_resources.get_resource(self.resource_code, None, get_default_resource=False)
+
+            # note: now we only set session.current_resource in do_render_response
+            # if resource.resource_code != LOGIN_RESOURCE_CODE:
+            #     self.session.current_resource = resource
 
 
-            # note: self.session is probably not yet assigned
+            if resource is None or not resource.exists or not resource.data:
+                log(self.session, 'Response',
+                    'Sending 404 error in response to HTTP GET request for {}'.format(self.resource_code))
 
-            if self.session is None:
-                log(None, 'SessionRetrieve', 'At start session is None')
-            else:
-                log(None, 'SessionRetrieve', 'At start session is:', self.session.session_key)
-
-            self.session = await self.obtain_session()
-
-            obtained_lock = False
-
-            if self.session is None:
-                log(None, 'SessionRetrieve', 'After obtain_session() session is None')
-            else:
-                obtained_lock = self.session.locked
-                log(None, 'SessionRetrieve', 'After obtain_session() session is:', self.session.session_key)
-
-
-            if self.session is None or not obtained_lock:
-                self.send_error(status_code=500)
-                handled = True
+                self.send_error(status_code=404)
                 return
 
-            # we have a session and it is locked exclusivly for our use
-            try:
 
-                if self.session and (self.tab_id != self.session.tab_id):
-                    self.tab_id = self.session.tab_id
+            elif resource.is_simple:
+                log(self.session, 'Response',
+                    'Sending response to simple HTTP GET request for {}'.format(self.resource_code))
 
-                global USE_MULTI_TABS
-                global MULTI_TAB_PREFIX
+                self.write(resource.data)
+                await self.set_response_headers(resource)
+                await self.finish()
+                return
+
+        try:
+            # a session is needed
+
+            self.session = await self.obtain_session(obtain_lock = True)
+
+            if not self.session:
+                log(None, 'SessionRetrieve', 'Could not obtain a session')
+                self.send_error(status_code=500)
+                # todo: consider sending a 503 with a body and Retry-After header
+                # https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status#server_error_responses
+                return
 
 
-                if USE_MULTI_TABS and (not self.received_tabid_url) and (thcore.Theas.mimetype_for_extension(resource_code) == 'text/html'):
-                    self.write_cookies()
+            if USE_MULTI_TABS:
+                if not self.received_tabid_url:
+
                     # mangle URL if needed
-                    redirect_to = '/' + MULTI_TAB_PREFIX + self.tab_id + '/' + self.request_path
+                    redirect_to = '/' + MULTI_TAB_PREFIX + self.session.tab_id + '/' + self.request_path.lstrip('/')
 
-                else:
-                    # URL does not need to be mangled.  Process request as normal.
+                    self.redirect(redirect_to)
 
-                    # A request for a cached public resource does not need a database connection.
-                    # We can serve up such requests without even checking the session.
-                    # If we do not check the session, multiple simultaneous requests can be processed,
+                    log(self.session,
+                        'MultiTab', 'Sending redirect to: ', redirect_to)
+
+                    return
 
 
-                    if resource_code:
-                        resource = await G_cached_resources.get_resource(resource_code, self.session)
+            # if resource.on_before:
+            #     this_function = getattr(TheasCustom, resource.on_before)
+            #     if this_function:
+            #         handled = this_function(self, args, kwargs)
 
-                    # see if the resource is public (so that we can serve up without a session)
-                    if resource is not None and resource.exists and \
-                            (resource.is_public or (self.session and self.session.logged_in)) and \
-                            not resource.render_jinja_template and \
-                            not resource.on_before and not resource.on_after:
-                        # note:  resource.data will usually be str but might be bytes
-                        log(None, 'CachedGET', 'Serving up cached resource', resource_code)
-                        buf = resource.data
 
-                    else:
-                        # Retrieve or create a session.  We want everyone to have a session (even if they are not authenticated)
-                        # We need to use the session's SQL connection to retrieve the resource
 
-                        log(None, 'GET', '*******************************')
-                        log(None, 'GET', args[0])
+            if (self.session and not self.session.logged_in and
+                    (not resource or resource.requires_authentication)
+            ):
 
-                        if self.session is None:
-                            log(None, 'GET Error', 'No session.  Cannot continue to process request.')
-                            self.write('<html><body>Error: cannot process request without a valid session</body></html>')
-                        else:
-                            # we have a session, but are not necessarily logged in
-                            self.session.log('GET', 'Have session', self.session.session_key)
-                            self.session.log('GET', 'Received request for: {}'.format(self.request.path))
+                if not self.do_not_bookmark:
+                    self.session.bookmark_url = resource.resource_code if resource else None
+                    self.session.current_resource = resource if resource else None
 
-                            self.session.log('Auth' 'User is logged in' if self.session.logged_in else 'User is NOT logged in')
+                # try to authinticate ...in case there is a user token cookie, etc.
+                await self.session.authenticate()
 
-                            # SOS Should have 404?  Take logged-in users back to where they were
-                            if not resource_code and self.session.logged_in:
-                                resource = self.session.current_resource
+                if not self.session.logged_in:
+                    # NOTE:  this needs further thought.
+                    # Sometimes it is nice to send the login screen in response to a request
+                    # for an auth-required resource if the user is not logged in.
+                    # Other times, we might prefer to send a 404 error, or to navigate
+                    # to index, etc. (consider <img src="xxx">, <audio>, etc.)
+                    #buf = await self.session.build_login_screen()
 
-                            if not resource_code and DEFAULT_RESOURCE_CODE and not self.session.logged_in:
-                                # resource_code was not provided and user is not logged in:  use default resource
-                                # If the user is logged in, we want get_resource to select the appropriate
-                                # resource for the user.
-                                resource_code = DEFAULT_RESOURCE_CODE
+                    log(self.session, 'Response', 'Sending redirect to login screen')
 
-                            if resource is None or not resource.exists:
+                    # still not logged in:  present login screen
+                    self.redirect(self.session.get_login_url())
+                    return
 
-                                if self.session.conn is None:
-                                    # Unusual / possible SQL connectivity problem led to a no connection.
-                                    # Retry creation of a connection.
-                                    self.session.conn = await G_conns.get_conn(conn_name=self.session.session_key)
 
-                                if self.session.conn is not None:
-                                    # Call get_resources again, this time with a session
-                                    resource = await G_cached_resources.get_resource(resource_code, self.session)
+            if self.resource_code == '~'and not resource and self.session and self.session.logged_in:
+                resource = await G_cached_resources.get_resource(self.resource_code,
+                    self.session if self.session and self.session.logged_in else None,
+                    get_default_resource=True if self.resource_code == '~' else False)
 
-                                    #handle invalid resource when logged in
-                                    if resource_code and resource is None or (resource and not resource.exists):
-                                        # If the user is logged in, but resource_code is not specified, we explicitly set get_default_resource
-                                        # so that the stored proc can look up the correct resource for us.
-                                        # This change was made 9/21/2017 to correct a problem that led to 404 errors resulting in serving
-                                        # up the default resource.
-                                        self.session.log('Get Resource', 'Logged in?', self.session.logged_in)
-                                        self.session.log('Get Resource', 'resource_code', resource_code if resource_code is not None else 'None')
-                                        resource = await G_cached_resources.get_resource(resource_code, self.session,
-                                                                                   get_default_resource=self.session.logged_in)
+            buf, redirect_to, history_go_back = await self.do_render_response(this_resource=resource)
 
-                            if resource is not None and resource.exists and\
-                                    resource.render_jinja_template:
-                                # We may have retrieved a cached resource.  Set current_resource.
-                                if resource.resource_code != LOGIN_RESOURCE_CODE:
-                                    self.session.current_resource = resource
+            if buf:
+                log(self.session,'Get', 'do_render_response returned buf')
 
-                            if resource is not None and resource.exists:
-                                if resource.on_before:
-                                    this_function = getattr(TheasCustom, resource.on_before)
-                                    if this_function:
-                                        handled = this_function(self, args, kwargs)
 
-                                if resource.requires_authentication and not self.session.logged_in:
+            # if resource.on_after:
+            #     this_function = getattr(TheasCustom, resource.on_after)
+            #     if this_function:
+            #         handled = this_function(self, args, kwargs)
 
-                                    if not self.session.logged_in:
-                                        # still not logged in:  present login screen
-                                        self.session.bookmark_url = resource.resource_code
-                                        # self.session.bookmark_url = self.request.path.rsplit('/', 1)[1]
-                                        self.session.current_resource = resource
+            if redirect_to is not None:
+                log(self.session,
+                    'Get', 'Redirecting to:', redirect_to)
+                self.redirect(redirect_to)
+                return
 
-                                        await self.session.authenticate()
 
-                                        if not self.session.logged_in:
-                                            # NOTE:  this needs further thought.
-                                            # Sometimes it is nice to send the login screen in response to a request
-                                            # for an auth-required resource if the user is not logged in.
-                                            # Other times, we might prefer to send a 404 error, or to navigate
-                                            # to index, etc. (consider <img src="xxx">, <audio>, etc.)
-                                            #buf = await self.session.build_login_screen()
-                                            redirect_to = self.session.get_login_url()
-                                            log(self.session, 'Response', 'Sending redirect to login screen')
+            if buf is None or len(buf) == 0:
+                log(self.session, 'Get',
+                    'Sending 404 error in response to HTTP GET request for {}'.format(self.resource_code))
+                self.send_error(status_code=404)
+                return
 
-                                if buf is None and (not resource.requires_authentication or self.session.logged_in):
-                                    if resource.api_stored_proc or resource.render_jinja_template:
-                                        #buf, redirect_to, history_go_back = self.do_render_response(this_resource=resource)
 
-            #                            buf, redirect_to, history_go_back = yield tornado.gen.multi(tornado.ioloop.IOLoop.current().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource)))
+            log(self.session, 'Get',
+                'Sending response to HTTP GET request for {}'.format(self.resource_code))
 
-            #                            buf, redirect_to, history_go_back = await asyncio.get_running_loop().run_in_executor(None, functools.partial(self.do_render_response, this_resource=resource))
-                                        buf, redirect_to, history_go_back = await self.do_render_response(this_resource=resource)
+            self.write(buf)
+            await self.set_response_headers(resource)
 
-                                    else:
-                                        # note:  resource.data will usually be str but might be bytes
-                                        buf = resource.data
 
-                                if resource.on_after:
-                                    this_function = getattr(TheasCustom, resource.on_after)
-                                    if this_function:
-                                        handled = this_function(self, args, kwargs)
+        finally:
+            if self.session:
+                await self.session.finished(self)
 
-                if not handled:
-                    if redirect_to is not None:
-                        self.redirect(redirect_to)
-                        handled = True
 
-                        '''
-                        if self.cookies_changed:
-                            # must perform a client-side redirect in order to set cookies
-                            self.write(self.session.clientside_redir(redirect_to))
-                            handled = True
-                        else:
-                            # can send a normal redirect, since no cookies need to be written
-                            self.redirect(redirect_to)
-                            handled = True
-                        '''
-
-                    elif history_go_back:
-                        pass
-
-                    if not handled:
-                        if buf is None:
-                            log(self.session, 'Response',
-                                'Sending 404 error in response to HTTP GET request for {}'.format(resource_code))
-
-                            self.send_error(status_code=404)
-
-                            handled = True
-                        else:
-                            log(self.session, 'Response',
-                                'Sending response to HTTP GET request for {}'.format(resource_code))
-
-                            self.write(buf)
-
-                            # CORS
-                            self.set_header('Access-Control-Allow-Origin', '*')  # allow CORS from any domain
-                            self.set_header('Access-Control-Max-Age', '0')  # disable CORS preflight caching
-
-                            if resource is not None and resource.is_public:
-                                self.set_header('Cache-Control', ' max-age=900')  # let browser cache for 15 minutes
-                            else:
-                                self.set_header('Cache-Control',
-                                                'Cache-Control: no-store, no-cache, must-revalidate, max-age=0')
-                                self.add_header('Cache-Control', 'Cache-Control: post-check=0, pre-check=0')
-                                self.add_header('Cache-Control', 'Pragma: no-cache')
-
-                            if self.filename is not None:
-                                self.set_header('Content-Type', thcore.Theas.mimetype_for_extension(self.filename))
-                                self.set_header('Content-Disposition', 'inline; filename=' + self.filename)
-
-                            elif resource is not None:
-                                if resource.filename:
-                                    if resource.filetype:
-                                        self.set_header('Content-Type', resource.filetype)
-                                    else:
-                                        self.set_header('Content-Type',
-                                                        thcore.Theas.mimetype_for_extension(resource.filename))
-                                self.set_header('Content-Disposition', 'inline; filename=' + resource.filename)
-                            else:
-                                self.set_header('Content-Type',
-                                                thcore.Theas.mimetype_for_extension(resource.resource_code))
-
-                if self.session and self.session.locked:
-                    self.session.comments = None
-                    await self.session.finished()
-
-                    self.session.log('Request',
-                                     'At end, Current Resource is {}'.format(
-                                         self.session.current_resource.resource_code
-                                         if self.session.current_resource
-                                         else 'Not Assigned!'
-                                     ))
-
-                if not handled and not self._finished:
-                    try:
-                        await self.finish()
-                    except:
-                        pass
-
-            finally:
-                # make sure we unlock the session, even if an error occurred.
-                if obtained_lock:
-                    if self.session.locked_by == self.handler_guid:
-                        self.session.log('Request', 'FAILSAFE unlock of session for', self.handler_guid)
-                        await self.session.finished()
 
 # -------------------------------------------------
 # ThHandler_Attach attachment handler
@@ -2189,7 +2145,7 @@ class ThHandler_Attach(ThHandler):
                     self.send_error(status_code=404)
 
             if self.session and self.session.locked:
-                await self.session.finished()
+                await self.session.finished(self)
                 self.session = None
 
     def data_received(self, chunk):
@@ -2219,27 +2175,20 @@ class ThHandler_Logout(ThHandler):
             await self.session.logout()
             G_sessions.remove_session(self.session.session_key)
 
-        self.cookie_st = None
-        self.cookie_usertoken = None
-        self.write_cookies()
+        self.clear_login_cookies()
         log(None, 'Cookies',
-                          'Clearing cookies {} and {} in Logout'.format(self.session_cookie_name, USER_COOKIE_NAME))
+                          'Clearing cookies {}, {} and {} in Logout'.format(
+                              self.session_cookie_name, self.user_cookie_name, USER_COOKIE_NAME))
 
-        if self.cookies_changed:
-            self.write(self.session.clientside_redir(nextURL))
 
-            if self.session and self.session.locked:
-                await self.session.finished()
+        if self.session and self.session.locked:
+            await self.session.finished(self)
 
-            await self.finish()
+        self.redirect(nextURL)
+        # no self.finish needed, due to redirect
+        # self.finish()
 
-        else:
-            if self.session and self.session.locked:
-                await self.session.finished()
-
-            self.redirect(nextURL)
-            # no self.finish needed, due to redirect
-            # self.finish()
+        await self.session.finished(self)
 
     def data_received(self, chunk):
         pass
@@ -2270,11 +2219,10 @@ class ThHandler_Login(ThHandler):
                 await self.session.logout()
                 G_sessions.remove_session(self.session.session_key)
 
-            self.cookie_st = None
-            self.cookie_usertoken = None
-            self.write_cookies()
+            self.clear_login_cookies()
             log(None, 'Cookies',
-                              'Clearing cookies {} and {} due to login'.format(self.session_cookie_name, USER_COOKIE_NAME))
+                              'Clearing cookies {}, {} and {} due to login'.format(
+                                  self.session_cookie_name, self.user_cookie_name, USER_COOKIE_NAME))
 
             # self.redirect('/')
             # self.session = None
@@ -2297,7 +2245,7 @@ class ThHandler_Login(ThHandler):
         self.write(buf)
 
         if self.session and self.session.locked:
-            await self.session.finished()
+            await self.session.finished(self)
 
         await self.finish()
 
@@ -2323,7 +2271,7 @@ class ThHandler_Login(ThHandler):
             self.session.error_message = 'Error: {}.'.format(error_message)
 
             if self.session is not None and self.session.locked:
-                await self.session.finished()
+                await self.session.finished(self)
 
             self.session = None
             #await self.get(self, args, kwargs)
@@ -2345,7 +2293,7 @@ class ThHandler_Login(ThHandler):
             self.redirect(next_page)
 
             if self.session is not None:
-                await self.session.finished()
+                await self.session.finished(self)
 
 
     def data_received(self, chunk):
@@ -2412,7 +2360,7 @@ class ThHandler_Async(ThHandler):
             if not cmd and self.get_body_arguments('command'):
                 cmd = self.get_body_argument('command')
 
-            self.session = await self.obtain_session()
+            self.session = await self.obtain_session(obtain_lock = True)
 
             if self.session is not None:
 
@@ -2522,7 +2470,7 @@ class ThHandler_Async(ThHandler):
                         next_page = ''
 
                     if self.session and self.session.locked:
-                        await self.session.finished()
+                        await self.session.finished(self)
 
                     buf = 'theas:th:LoggedIn={}&theas:th:ErrorMessage={}&theas:th:NextPage={}'.format(
                         '1' if self.session.logged_in else '0',
@@ -2593,7 +2541,7 @@ class ThHandler_Async(ThHandler):
 
                     if redirect_to:
                         if self.session is not None and self.session.locked:
-                            await self.session.finished()
+                            await self.session.finished(self)
                             self.session = None
 
                         # redirect as the stored procedure told us to
@@ -2634,7 +2582,7 @@ class ThHandler_Async(ThHandler):
                 self.write('Could not obtain a session')
 
             if self.session and self.session.locked:
-                await self.session.finished()
+                await self.session.finished(self)
                 self.session = None
 
             await self.finish()
@@ -2719,9 +2667,12 @@ class ThHandler_REST(ThHandler):
 
             requesttype_guid_str = self.request.query_arguments.get('rg')
 
+            # It would be unusual for a REST endpoint to need to handle
+            # multipart form file uploads--and this introduces session locking
+            # requirements. Soo this was removed 9/27/2026
             # allow REST to receive file uploads
-            if self.request_has_files():
-                await self.process_uploaded_files()
+            # if self.request_has_files():
+            #     await self.process_uploaded_files()
 
             # serialize form parameters (excluding theas: parameters) to pass into the stored procedure
             form_params = self.request.body_arguments
@@ -2889,21 +2840,7 @@ class ThHandler_REST(ThHandler):
                             if 'Cookies' in row:
                                 new_cookies_str = row['Cookies']
                                 if new_cookies_str and cookies_str != new_cookies_str:
-                                    for this_pair in new_cookies_str.split('&'):
-                                        this_name, this_value = this_pair.split('=')
-                                        this_value = urlparse.unquote(this_value)
-
-                                        if this_name == self.session_cookie_name:
-                                            self.cookie_st = this_value
-                                        elif this_name == USER_COOKIE_NAME:
-                                            self.cookie_usertoken = this_value
-                                        else:
-                                            self.clear_cookie(this_name, path='/')
-                                            self.set_cookie(this_name, this_value, path='/')
-
-                                    self.write_cookies()
-                                    self.session.log('Cookies', 'Updating cookies as per stored procedure F')
-                                    self.cookies_changed = True
+                                    self.apply_proc_cookies(new_cookies_str, 'F')
 
                             if 'Filename' in row:
                                 this_filename = row['Filename']
@@ -2997,8 +2934,8 @@ class ThHandler_REST(ThHandler):
 
                     await self.finish()
 
-                await self.session.finished()
-                # note:  since sql_conn is None, finished() will destroy the session
+                await self.session.finished(self)
+                # note:  since sql_conn is None, finished(handler) will destroy the session
 
                 self.session = None
 
@@ -3006,8 +2943,8 @@ class ThHandler_REST(ThHandler):
 
         except Exception as e:
             if self.session is not None:
-                await self.session.finished()
-                # note:  since sql_conn is None, finished() will destroy the session
+                await self.session.finished(self)
+                # note:  since sql_conn is None, finished(handler) will destroy the session
 
                 self.session = None
 
@@ -3174,47 +3111,6 @@ class ThHandler_Stat(tornado.web.RequestHandler):
         pass
 
 # -------------------------------------------------
-# ThHandler_Back "back" handler
-# -------------------------------------------------
-class ThHandler_Back(ThHandler):
-    def __init__(self, application, request, **kwargs):
-        super().__init__(application, request, **kwargs)
-
-    def __del__(self):
-        self.session = None
-
-    async def get(self, *args, **kwargs):
-
-        if self.session is None:
-            # try to get the session, but do not wait for it
-            self.session = await self.obtain_session()
-
-        if self.session is not None:
-            if len(self.session.history) > 1:
-                self.session.history.pop()
-                this_history_entry = self.session.history[-1]
-
-                self.session.theas_page.set_value('theas:th:NextPage', this_history_entry['PageName'])
-
-            self.session.log('Response', 'Sending clientside redir')
-            self.write(self.session.clientside_redir())
-
-            ##Handle the actual form processing here. When done, we will persist session data and redirect.
-            # buf = yield self.background_process_post_authenticated()
-            ##buf = self.background_process_post_authenticated()
-
-            # self.write(buf)
-            # self.session.log('Response', 'Sending response for back request')
-
-            await self.session.finished()
-            self.session = None
-
-        await self.finish()
-
-    def data_received(self, chunk):
-        pass
-
-# -------------------------------------------------
 # ThHandler_PurgeCache purge cache handler
 # -------------------------------------------------
 class ThHandler_PurgeCache(ThHandler):
@@ -3291,6 +3187,7 @@ class ThWSHandler_Test(tornado.websocket.WebSocketHandler):
 def get_program_settings():
     global G_program_options
 
+    global LOG_PATH
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
 
@@ -3307,6 +3204,11 @@ def get_program_settings():
     global FORCE_REDIR_AFTER_POST
 
     global USE_SECURE_COOKIES
+    global COOKIE_SECURE
+    global COOKIE_SAMESITE
+    global SESSION_COOKIE_DAYS
+    global USER_COOKIE_DAYS
+
     global USE_MULTI_TABS
     global MULTI_TAB_PREFIX
     global SESSION_HEADER_NAME
@@ -3346,6 +3248,13 @@ def get_program_settings():
     G_program_options.define("settings_path",
                              default=program_directory,
                              help="The path to the folder with configuration files.", type=str)
+
+    G_program_options.define("log_path",
+                             default=LOG_PATH,
+                             help="Folder for theas_debug.log and theas_trace.log.  Environment variables such as "
+                                  "%TEMP% are expanded, and {port} is replaced with the server port; a relative path "
+                                  "is relative to the program directory.  Blank means <program directory>/logs.",
+                             type=str)
 
     G_program_options.define("server_prefix",
                              default=SERVER_PREFIX,
@@ -3431,9 +3340,49 @@ def get_program_settings():
                              type=bool)
 
     G_program_options.define("use_secure_cookies",
-                             default=USE_SECURE_COOKIES,
-                             help="When storing session and user tokens in cookies, use secure cookies.",
-                             type=bool)
+        default=USE_SECURE_COOKIES,
+        help="Controls SIGNING, not the browser's Secure attribut",
+        type=bool)
+
+    # Controls SIGNING, not the browser's Secure attribute (the name predates Tornado 6.3's rename of
+    # set_secure_cookie to set_signed_cookie). True: cookies are HMAC-signed with the Application's
+    # cookie_secret, so the server rejects tampered or forged values. Signed values are still readable,
+    # not encrypted. Readers must use get_signed_cookie(). Changing this invalidates existing cookies.
+
+    G_program_options.define("cookie_secure",
+        default=COOKIE_SECURE,
+        help="Controls the browser's Secure attribute, not signing.",
+        type=bool)
+
+    # Controls the browser's Secure attribute, not signing. True: the browser stores and sends the
+    # cookie only over HTTPS (or http://localhost). Set False only for an instance browsed directly
+    # over plain HTTP from other machines. See COOKIE_SECURE at the top of this file.
+
+    G_program_options.define("cookie_samesite",
+        default=COOKIE_SAMESITE,
+        help="Lax, Strict, or None. Controls whether the browser sends on requests that start from another site.",
+        type=str)
+
+        # Controls whether the browser sends the cookie on requests that start from another site.
+        # 'Lax' (recommended): sent on same-site requests and on top-level GET navigations from other
+        # sites (links, the 303 after login). Not sent on cross-site POSTs, iframes or background requests,
+        # which gives some CSRF protection alongside the XSRF token.
+        # 'Strict': never sent on requests that start from another site, so a user following an external
+        # link arrives without the session or remember-me cookie on that first page.
+        # 'None': always sent, including cross-site and in iframes; requires COOKIE_SECURE = True, and
+        # browsers may still block or partition it as a third-party cookie.
+
+    G_program_options.define("session_cookie_days",
+        default=SESSION_COOKIE_DAYS,
+        help="Number of days to remember session cookie",
+        type=int)
+
+
+    G_program_options.define("user_cookie_days",
+        default=USER_COOKIE_DAYS,
+        help="Number of days to remember user cookie",
+        type=int)
+
 
     G_program_options.define("use_multi_tabs",
                              default=USE_MULTI_TABS,
@@ -3502,9 +3451,11 @@ def get_program_settings():
             e)
         if LOGGING_LEVEL:
             print(msg)
-        write_winlog(msg)
+        write_winlog(msg, is_error=True)
 
     if G_program_options.sql_server is None:
+        write_winlog('Theas app: sql_server is not configured (is settings.cfg present at {}?). Exiting.'.format(
+            G_program_options.settings_path + 'settings.cfg'), is_error=True)
         tornado.options.print_help()
         sys.exit()
 
@@ -3520,6 +3471,7 @@ def get_program_settings():
 
     SESSION_MAX_IDLE = G_program_options.session_max_idle_minutes
 
+    LOG_PATH = G_program_options.log_path
     LOGGING_LEVEL = int(G_program_options.logging_level)
     LOGIN_RESOURCE_CODE = G_program_options.login_resource_code
     LOGIN_AUTO_USER_TOKEN = G_program_options.login_auto_user_token
@@ -3541,11 +3493,36 @@ def get_program_settings():
     SQL_DEFAULT_SCHEMA = G_program_options.sql_default_schema
     SERVER_PORT = G_program_options.port
     BRANCH_CODE = G_program_options.branch_code
+    COOKIE_SECURE = G_program_options.cookie_secure
+    COOKIE_SAMESITE = G_program_options.cookie_samesite
+    SESSION_COOKIE_DAYS = G_program_options.session_cookie_days
+    USER_COOKIE_DAYS = G_program_options.user_cookie_days
+    MULTI_TAB_PREFIX = G_program_options.multi_tab_prefix
+    MAX_CACHE_ITEM_SIZE = G_program_options.max_cache_item_size
+    MAX_CACHE_SIZE = G_program_options.max_cache_size
 
     if LOGGING_LEVEL:
         msg = f"BRANCH_CODE={G_program_options.branch_code}"
         write_winlog(msg)
         print(msg)
+
+        # Effective cookie settings, so a settings.cfg mix-up is visible at startup
+        # (cookie_secure=True breaks logins when Theas is browsed directly over plain HTTP).
+        msg = (f"Theas app: cookie settings: cookie_secure={COOKIE_SECURE} cookie_samesite={COOKIE_SAMESITE} "
+               f"use_secure_cookies={USE_SECURE_COOKIES} use_multi_tabs={USE_MULTI_TABS}")
+        write_winlog(msg)
+        print(msg)
+
+    log_files_ok = False
+    try:
+        log_dir = thbase.setup_log_files(LOG_PATH.replace('{port}', str(SERVER_PORT)) if LOG_PATH else LOG_PATH)
+        msg = 'Theas app: writing log files to {}'.format(log_dir)
+        log_files_ok = True
+    except Exception as e:
+        msg = 'Theas app: WARNING: could not open log files ({}).  Logging to console only.'.format(e)
+    if LOGGING_LEVEL:
+        print(msg)
+    write_winlog(msg, is_error=not log_files_ok)
 
 async def get_ready(run_as_svc=False):
 
@@ -3556,7 +3533,7 @@ async def get_ready(run_as_svc=False):
 
     '''
 
-
+    global LOG_PATH
     global LOGGING_LEVEL
     global SESSION_MAX_IDLE
 
@@ -3611,7 +3588,7 @@ async def get_ready(run_as_svc=False):
         SQLSettings(
             server=G_program_options.sql_server,
             port=G_program_options.sql_port,
-            default_schema=G_program_options.sql_default_schema,
+            sql_default_schema=G_program_options.sql_default_schema,
             user=G_program_options.sql_user,
             password=G_program_options.sql_password,
             database=G_program_options.sql_database,
@@ -3667,7 +3644,7 @@ async def get_ready(run_as_svc=False):
         print(msg)
         traceback.print_exc()
 
-        write_winlog(msg)
+        write_winlog(msg, is_error=True)
         sys.exit()
 
 
@@ -3700,7 +3677,6 @@ def make_app():
         (r'/attach/(.*)', ThHandler_Attach),
         (r'/logout', ThHandler_Logout),
         (r'/login', ThHandler_Login),
-        (r'/back', ThHandler_Back),
         (r'/stat', ThHandler_Stat),
         (r'/purgecache', ThHandler_PurgeCache),
         # (r'/test', TestThreadedHandler),
@@ -3773,14 +3749,23 @@ async def periodic():
         await asyncio.sleep(G_periodic_wait)
 
 async def main(run_as_svc=False):
-    await get_ready(run_as_svc=run_as_svc)
+    try:
+        await get_ready(run_as_svc=run_as_svc)
+    except Exception:
+        # An ordinary exception here would otherwise only reach asyncio's default handler (invisible when
+        # running as a service), leaving the server running without serving anything.  Report it and exit
+        # like the other startup failures.
+        msg = 'Theas app: startup failed in get_ready():\n' + traceback.format_exc()
+        log(None, 'Startup', msg)
+        write_winlog(msg, is_error=True)
+        sys.exit(1)
 
     app = make_app()
 
     global SERVER_PORT
 
     try:
-        http_server = app.listen(SERVER_PORT)
+        http_server = app.listen(SERVER_PORT, xheaders=True)
         shutdown_event = asyncio.Event()
 
         thbase.theas_server().start(shutdown_event=shutdown_event, http_server=http_server, reason='TheasServer.main')
@@ -3789,7 +3774,8 @@ async def main(run_as_svc=False):
         msg = 'Theas app:  Could not start HTTP server on port {}. Is something else already running on that port? {}'.format(
             SERVER_PORT, e)
         print(msg)
-        write_winlog(msg)
+        write_winlog(msg, is_error=True)
+        sys.exit(1)  # nothing is listening, so don't keep running
 
     # note: this seems not to be needed.
     ## wait forever (i.e. server runs until there is a shutdown event)
@@ -3830,6 +3816,7 @@ def run(run_as_svc=False):
 
     except Exception as e:
         log(None, 'Shutdown', 'Exception in TheasServer.run() {}'.format(str(e)))
+        write_winlog('Exception in TheasServer.run() {}'.format(str(e)), is_error=True)
 
     pass
     log_memory('After end')

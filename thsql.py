@@ -10,7 +10,6 @@ import uuid
 import thsqlhelp
 
 import re
-_RE_STRIP_QUOTED_IDENTIFIERS = re.compile(r'\[[^\]]*\]|"[^"]*"')
 
 '''thsql.py is part of Theas.  This module declares the class ThStoredProc, as well as ConnectionPool and SQLSettings.
 A helper function for convenience named call_auth_storedproc() is also defined.
@@ -47,14 +46,19 @@ and process the resultset data after the connection lock has been released.
 
 '''
 
+_RE_STRIP_QUOTED_IDENTIFIERS = re.compile(r'\[[^\]]*\]|"[^"]*"')
+# or more robust version that handles embeedded closing brackets:
+# _RE_STRIP_QUOTED_IDENTIFIERS = re.compile(r'\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"')
+
 _LOGIN_AUTO_USER_TOKEN= None
+_SQL_DEFAULT_SCHEMA = 'theas'
 
 class SQLSettings:
     def __init__(self, server='someserver', port=1433, user='someuser', password='somepassword',
                  database='somedatabase', appname='someapp', max_conns=10, sql_timeout=120,
                  full_ok_checks=True, http_server_prefix='https://someserver.com',
                  login_auto_user_token=_LOGIN_AUTO_USER_TOKEN,
-                 default_schema = 'theas'
+                 sql_default_schema = _SQL_DEFAULT_SCHEMA,
                 ):
         self.server = server
         self.port = port
@@ -67,7 +71,7 @@ class SQLSettings:
         self.full_ok_checks = full_ok_checks
         self.http_server_prefix = http_server_prefix
         self.login_auto_user_token = login_auto_user_token
-        self.default_schema = default_schema
+        self.sql_default_schema = sql_default_schema
 
         _mssql.set_max_connections(max_conns)
 
@@ -119,6 +123,9 @@ class ConnectionPool(_ConnectionPool):
 
         global _LOGIN_AUTO_USER_TOKEN
         _LOGIN_AUTO_USER_TOKEN = sql_settings.login_auto_user_token
+
+        global _SQL_DEFAULT_SCHEMA
+        _SQL_DEFAULT_SCHEMA = sql_settings.sql_default_schema
 
     # --- driver-specific overrides (MSSQL / pymssql) ---
     # The pool bookkeeping (get_conn / release_conn / process_release_conns /
@@ -306,19 +313,29 @@ async def call_auth_storedproc(th_session=None, conn=None, username=None, passwo
                     th_session.error_message = err_msg
 
             else:
-                # May not necessary: if stored proc completes successfully then authentication should have succeeded
-                if len(proc.resultset) > 0 and 'SessionGUID' in proc.resultset[0] and\
-                        proc.resultset[0]['SessionGUID'] is not None:
-                    this_conn.is_public_authed = (user_token == _LOGIN_AUTO_USER_TOKEN)
-                    if not this_conn.is_public_authed:
-                        this_conn.is_user_authed = True
 
-                    #result = this_conn.is_public_authed or this_conn.is_user_authed
-                    result = proc.resultset
+                result = proc.resultset
 
-                if th_session is not None:
-                    th_session.logged_in = this_conn.is_user_authed
-                    th_session.conn.name = username if username else user_token[:5] + '...' #for logging / debugging
+                # we set conn information, but not session information
+                user_token = None
+                username = None
+
+                if len(proc.resultset) > 0:
+                    if 'UserToken' in proc.resultset[0]:
+                        user_token =  proc.resultset[0]['UserToken']
+
+                    if 'UserName' in proc.resultset[0]:
+                        username = proc.resultset[0]['UserName']
+
+                if user_token == _LOGIN_AUTO_USER_TOKEN:
+                    this_conn.is_public_authed = True
+                if (user_token and user_token != _LOGIN_AUTO_USER_TOKEN):
+                    this_conn.is_user_authed = True
+
+                if username:
+                    th_session.conn_name = username
+                elif user_token:
+                        th_session.conn.name = user_token[:5] + '...'
 
                 trace('auth_sp.result', trace_group='sql_connection_persist', th_session=th_session,
                       conn=this_conn, username=username, via_token=user_token is not None)
@@ -381,6 +398,7 @@ class ThStoredProc:
 
     def __init__(self, this_stored_proc_name, this_th_session, conn=None):
         self.conn = conn
+
         self._storedproc = None  # to hold _mssql stored proc, which has problems
         self.th_session = None
         self.stored_proc_name = None
@@ -395,21 +413,28 @@ class ThStoredProc:
             if self.th_session.conn is not None:
                 self.conn = this_th_session.conn
 
-        default_schema = 'theas'
+        sql_default_schema = 'theas'
 
         # use default schema from sql_settings if applicable
+        # (confirm the correct attribute name -- see issue 1)
         if self.conn is not None and self.conn.sql_settings is not None:
-            if self.conn.sql_settings.default_schema:
-                default_schema = self.conn.sql_settings.default_schema
+            if self.conn.sql_settings.sql_default_schema:
+                sql_default_schema = self.conn.sql_settings.sql_default_schema
 
-        # if the stored proc name does not specify a schema, prepend '{schema}.'
-        if '.' not in _RE_STRIP_QUOTED_IDENTIFIERS.sub('', this_stored_proc_name):
-            this_stored_proc_name = '{schema}.' + this_stored_proc_name
-        elif default_schema != 'theas':
-            # treat literal theas. as a placeholder
-            this_stored_proc_name = this_stored_proc_name.replace('theas.', '{schema}.', 1)
+        name = this_stored_proc_name
 
-        self.stored_proc_name = this_stored_proc_name.format(schema=default_schema)
+        if '.' not in _RE_STRIP_QUOTED_IDENTIFIERS.sub('', name):
+            # no schema specified: prepend default schema
+            name = f'{sql_default_schema}.{name}'
+        elif sql_default_schema.lower() != 'theas':
+            # treat a leading literal theas. (bare or bracketed) as a placeholder
+            lowered = name.lower()
+            if lowered.startswith('theas.'):
+                name = f'{sql_default_schema}.{name[len("theas."):]}'
+            elif lowered.startswith('[theas].'):
+                name = f'[{sql_default_schema}].{name[len("[theas]."):]}'
+
+        self.stored_proc_name = name
 
         # Note: Sessions have lazy-created conn:  when a session is created, the conn may not exist.
         # Subsequently, we check for (and establish if necessary) a connection in is_ok()

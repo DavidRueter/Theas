@@ -50,15 +50,18 @@ def _trace_enabled(trace_group):
     return not (groups & TRACE_MUTE_GROUPS)
 
 
-def _log_dir():
+def _log_dir(log_path=None):
     prog_dir, _ = get_program_directory()
-    log_dir = os.path.join(prog_dir, 'logs')
-    try:
-        os.makedirs(log_dir, exist_ok=True)
-    except Exception:
-        # If logs/ can't be created, fall back to the program directory so we
-        # still get a file rather than crashing startup over logging.
-        log_dir = prog_dir
+    if log_path:
+        # Configured via settings.cfg log_path.  Expand %ProgramData% etc.;
+        # a relative path is taken as relative to the program directory.
+        log_dir = os.path.expandvars(log_path)
+        if not os.path.isabs(log_dir):
+            log_dir = os.path.join(prog_dir, log_dir)
+    else:
+        log_dir = os.path.join(prog_dir, 'logs')
+    log_dir = os.path.normpath(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
     return log_dir
 
 # Local threshold for thbase.log() gating.  Semantics:
@@ -70,10 +73,12 @@ _LOG_THRESHOLD = 1
 
 
 def setup_logging():
-    # Idempotently configure the 'theas' logger so log() can route through stdlib
-    # logging instead of print().  The local _LOG_THRESHOLD gates output inside
-    # log(); this opens the door to adding file/queue handlers later.
-    # Call once at application startup (e.g., from TheasServer.run()).  To capture
+    # Idempotently configure the 'theas' logger with a console handler so log()
+    # can route through stdlib logging instead of print().  The local
+    # _LOG_THRESHOLD gates output inside log().
+    # Call once at application startup (e.g., from TheasServer.run()).  File
+    # handlers are added later by setup_log_files(), once settings.cfg has been
+    # read and the log directory is known.  To capture
     # Tornado's own logs through the same handlers, attach handlers to the root
     # logger instead and drop propagate=False.
     if not _logger.handlers:
@@ -84,27 +89,63 @@ def setup_logging():
         console.setFormatter(fmt)
         _logger.addHandler(console)
 
-        # Full debug log: mirrors everything that goes to the console to a
-        # rotating file so it can be tailed / reviewed after the fact.
-        full_h = RotatingFileHandler(
-            os.path.join(_log_dir(), 'theas_debug.log'),
-            maxBytes=20_000_000, backupCount=5, encoding='utf-8')
-        full_h.setFormatter(fmt)
-        _logger.addHandler(full_h)
-
         _logger.setLevel(logging.DEBUG)
         _logger.propagate = False
 
-    if not _trace_logger.handlers:
-        # Compact lifecycle trace slice: only the events emitted via trace().
-        trace_fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
-        trace_h = RotatingFileHandler(
-            os.path.join(_log_dir(), 'theas_trace.log'),
-            maxBytes=10_000_000, backupCount=5, encoding='utf-8')
-        trace_h.setFormatter(trace_fmt)
-        _trace_logger.addHandler(trace_h)
-        _trace_logger.setLevel(logging.DEBUG)
-        _trace_logger.propagate = False
+        # When running under TheasServerSvc, console output is not visible, and
+        # the log files are not open yet.  Until setup_log_files() runs, also send
+        # log() output to the Windows Event Log so early startup problems are seen.
+        if getattr(theas_server(), 'service_name', None):
+            _logger.addHandler(_startup_winlog_handler)
+
+
+class _WinlogHandler(logging.Handler):
+    # Forwards log records to write_winlog().  Used only during startup.
+    def emit(self, record):
+        try:
+            write_winlog(record.getMessage())
+        except Exception:
+            self.handleError(record)
+
+
+_startup_winlog_handler = _WinlogHandler()
+
+
+def setup_log_files(log_path=None):
+    # Add the rotating file handlers.  Call after settings.cfg has been read.
+    # Returns the log directory used.  Raises if the directory or files cannot
+    # be opened (e.g. no write permission); the caller decides how to report
+    # that, and logging simply continues to the console.
+    try:
+        log_dir = _log_dir(log_path)
+
+        if not any(isinstance(h, RotatingFileHandler) for h in _logger.handlers):
+            # Full debug log: mirrors everything that goes to the console to a
+            # rotating file so it can be tailed / reviewed after the fact.
+            fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
+            full_h = RotatingFileHandler(
+                os.path.join(log_dir, 'theas_debug.log'),
+                maxBytes=20_000_000, backupCount=5, encoding='utf-8')
+            full_h.setFormatter(fmt)
+            _logger.addHandler(full_h)
+
+        if not _trace_logger.handlers:
+            # Compact lifecycle trace slice: only the events emitted via trace().
+            trace_fmt = logging.Formatter('%(asctime)s %(message)s', datefmt=_LOG_DATEFMT)
+            trace_h = RotatingFileHandler(
+                os.path.join(log_dir, 'theas_trace.log'),
+                maxBytes=10_000_000, backupCount=5, encoding='utf-8')
+            trace_h.setFormatter(trace_fmt)
+            _trace_logger.addHandler(trace_h)
+            _trace_logger.setLevel(logging.DEBUG)
+            _trace_logger.propagate = False
+
+        return log_dir
+
+    finally:
+        # Startup is over: stop forwarding the (chatty) log() stream to the Event Log,
+        # whether or not the files could be opened.
+        _logger.removeHandler(_startup_winlog_handler)
 
 
 def _obj_ref(obj):
@@ -124,7 +165,7 @@ def trace(event, th_session=None, conn=None, trace_group=None, **fields):
     It writes to logs/theas_trace.log (the clean lifecycle slice) and mirrors
     the marker inline into the main log/console for context.
 
-    Parameters (only `event` is required):
+    Parameters (only `event` jois required):
         event       -- short label for this trace point (e.g. 'get.start').
         th_session  -- ThSession whose session/conn context to include.
         conn        -- explicit Conn; pass at release sites where self.conn was
@@ -278,7 +319,7 @@ def log(th_session, category, *args, severity=10000):
     # context (session_key, request_count, comments) is included in the message.
     # ThSession.log() is a thin pass-through that calls back here, so the actual
     # formatting and writing happens in one place.
-    if not (_LOG_THRESHOLD == 1 or 0 > severity >= _LOG_THRESHOLD):
+    if (_LOG_THRESHOLD  <= 0 or severity < _LOG_THRESHOLD):
         return
 
     msg_args = ' '.join(str(a) for a in args)
@@ -333,6 +374,7 @@ class TheasServerRunner():
         self.__is_stopping = False
         self.shutdown_event = shutdown_event
         self.http_server = None
+        self.service_name = None  # set by TheasServerSvc via set_service_name()
 
         self.loop = asyncio.new_event_loop()
 
@@ -388,8 +430,8 @@ class TheasServerRunner():
             loop = self.loop
 
             if loop is None or not loop.is_running():
-                self.write_winlog('Shutting Down: PROBLEM loop is not running in TheasServerRunner.stop()')
                 log(None, 'Shutdown', 'PROBLEM: loop is not running in TheasServerRunner.stop()')
+                self.write_winlog('Shutting Down: PROBLEM loop is not running in TheasServerRunner.stop()')
 
 
             if loop and loop.is_running():
@@ -428,7 +470,6 @@ class TheasServerRunner():
                 G_all_done = None
 
         log(None, 'Shutdown', '***stop() done')
-
         self.write_winlog('Shutting Down: Done with thbase TheasServerRunner.stop()')
 
 
@@ -450,20 +491,7 @@ class TheasServerRunner():
 
 
     def write_winlog(self, *args, is_error=False):
-        # for convenience, wrap LogInfoMsg for logging outside the TheasServerSvc class
-
-        import servicemanager  # See note above
-
-        fnc = None
-        if is_error:
-            fnc = servicemanager.LogErrorMsg
-        else:
-            fnc = servicemanager.LogInfoMsg
-
-        if len(args) >= 2:
-            fnc(args[1])
-        else:
-            fnc(args[0])
+        write_winlog(*args, is_error=is_error)
 
 G_server = None
 
@@ -474,6 +502,20 @@ def theas_server():
 
     return G_server
 
+
+def write_winlog(*args, is_error=False):
+    # Write to the Windows Event Log when running under TheasServerSvc (service_name set);
+    # otherwise (non-Windows, or TheasServer.py run directly) just print.  Never raises.
+    msg = ' '.join(str(a) for a in args)
+    service_name = getattr(theas_server(), 'service_name', None)
+    if service_name:
+        try:
+            import servicemanager
+            fnc = servicemanager.LogErrorMsg if is_error else servicemanager.LogInfoMsg
+            fnc('{}: {}'.format(service_name, msg))
+            return
+        except Exception:
+            pass
 
 #https://www.pythontutorial.net/advanced-python/python-references/
 #def ref_count(address):
@@ -529,8 +571,8 @@ async def stop_loop():
     loop.call_soon_threadsafe(loop.stop)
 
 async def shutdown():
-    theas_server().write_winlog('thbase.shutdown()')
     log(None, 'TheasServerRunner', '***shutdown() called')
+    theas_server().write_winlog('thbase.shutdown()')
 
     loop = theas_server().loop
     if loop is None or not loop.is_running():
@@ -557,13 +599,12 @@ async def shutdown():
 
 
         log(None, 'Shutdown', '***shutdown() is done with await asyncio.gather(*tasks)')
+        theas_server().write_winlog('Near end of thbase.shutdown()')
 
-        # note:  the rest of this code may be unreachable, for when all the tasks are cancelled
+        # note:  the rest of this code may be unreachable, for when all the tasks are canceled
         # the running asyncio.run(parallel(run_as_svc=run_as_svc)) in TheasServer.run(run_as_svc=False)
         # will be complete and execution will continue there.
 
-
-        theas_server().write_winlog('Near end of thbase.shutdown()')
 
         #if shutdown_event is not None:
         #   await shutdown_event.wait()
@@ -575,15 +616,14 @@ async def shutdown():
         theas_server().loop.call_soon_threadsafe(loop.stop)
 
 
-        global G_service_poll
-
-        theas_server().write_winlog('thbase.shutdown() calling G_service_poll()')
-
         if G_service_poll is not None:
+            log(None, 'Shutdown', 'thbase.shutdown() calling G_service_poll()')
+            theas_server().write_winlog('thbase.shutdown() calling G_service_poll()')
+
             G_service_poll()
 
-        theas_server().write_winlog('Done with thbase.shutdown()')
         log(None, 'Shutdown', '*Done with thbase.shutdown()')
+        theas_server().write_winlog('Done with thbase.shutdown()')
 
 def set_service_name(service_name: str):
     theas_server().service_name = service_name
