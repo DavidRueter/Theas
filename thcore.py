@@ -283,6 +283,7 @@ class Theas:
 
             self.jinja_env.undefined = SilentUndefined
 
+            self.jinja_env.filters['theasServerPrefix'] = self.theas_serverprefix
             self.jinja_env.filters['theasSessionToken'] = self.theas_sessiontoken
             # Ouputs the current session token as a hidden form field.  This is required for normal
             # operation of Theas.  Also outputs other commonly-used Theas hidden form fields:
@@ -1094,6 +1095,22 @@ class Theas:
         )
 
         return buf
+
+    @pass_environment
+    def theas_serverprefix(self, this_env, this_value, vuejs=False, *args, **kwargs):
+
+        val = ''
+        if type(this_value) is uuid.UUID:
+            val = this_value.hex
+        else:
+            val = this_value
+        segments = [self.th_session.server_prefix.rstrip('/')]
+
+        if self.th_session.use_multi_tabs and self.th_session.tab_id:
+            segments.append(self.th_session.multi_tab_prefix + self.th_session.tab_id)
+
+        segments.append(val.lstrip('/'))
+        return '/'.join(segments)
 
     # @environmentfilter
     @pass_environment

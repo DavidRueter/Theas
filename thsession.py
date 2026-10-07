@@ -343,6 +343,7 @@ class ThSession:
         global _MULTI_TAB_PREFIX
         self.use_multi_tabs = _USE_MULTI_TABS
         self.multi_tab_prefix = _MULTI_TAB_PREFIX
+        self.server_prefix = _SERVER_PREFIX
 
         self.session_token = str(uuid.uuid4())
 

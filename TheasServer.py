@@ -1,5 +1,6 @@
 # usr/bin/python
 import asyncio
+import os
 import platform
 import contextlib
 
@@ -1443,15 +1444,8 @@ class ThHandler(tornado.web.RequestHandler):
         if self.get_argument('DoHistoryGoBack', default='0') == '1':
             history_go_back = True
 
-        # inspect what the URL says this page is
+        this_page = self.resource_code
         this_path = self.request.path
-
-        this_page = this_path.lstrip('/')
-
-        if '?' in this_page:
-            this_page = this_page[: this_page.find('?')]
-
-        this_page = '/'.join(seg for seg in this_page.split('/') if not seg.startswith('__tid')).lstrip('/')
 
         # if self.session.current_resource and this_page != self.session.current_resource.resource_code:
 
@@ -1461,10 +1455,19 @@ class ThHandler(tornado.web.RequestHandler):
         # template_str, this_resource = await self.get_template(this_page)
 
         # if not self.session.current_resource:
-        if not self.session.current_resource or this_page != self.session.current_resource.resource_code:
+        if (this_page and
+                (
+                not self.session.current_resource or
+                this_page != self.session.current_resource.resource_code
+                )):
             template_str, this_resource = await self.get_template(this_page)
         else:
             this_resource = self.session.current_resource
+
+        if not this_resource:
+            self.send_error(status_code=404, message='HTTP POST to an unknown page')
+            handled = True
+            return buf, redirect_to, history_go_back, handled
 
         if this_resource.requires_authentication and not self.session.logged_in:
             self.session.log('Auth', 'Resource requires auth and user not logged in')
@@ -3456,6 +3459,10 @@ def get_program_settings():
     )
 
     G_program_options.parse_command_line()
+
+    # Accept settings_path with or without a trailing separator (a trailing "\" before a closing quote
+    # is eaten by Windows argument parsing).
+    G_program_options.settings_path = os.path.join(os.path.normpath(G_program_options.settings_path), '')
 
     msg = 'Theas app: trying to use configuration from {}'.format(G_program_options.settings_path + 'settings.cfg')
     if LOGGING_LEVEL:
