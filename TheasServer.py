@@ -50,32 +50,55 @@ __author__ = 'DavidRueter'
 THEAS_VERSION = '0.90.1.255'  # from version.cfg
 THEAS_VERSION_INT = '255'
 
-SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
+CONFIG_FILE_NAME = 'settings.cfg'
 
+# --- Web server ---
+SERVER_PORT = 8881
+SERVER_PREFIX = 'localhost:8881'
+
+# --- Logging ---
 LOG_PATH = '%TEMP%/Theas/Port{port}'  # {port} is replaced with SERVER_PORT
 LOGGING_LEVEL = 1  # Enable all logging.  0 to disable all, other value to specify threshold.
-LOGIN_RESOURCE_CODE = 'login'
-LOGIN_AUTO_USER_TOKEN = None
-DEFAULT_RESOURCE_CODE = None
+STARTUP_LOGGING = True  # write to Windows Event Log at startup before log file logging is avail.
+DEBUG_TRACE_ENABLED = True  # debug trace is in addition to logging and is useful for low-level observability
 
-FULL_SQL_IS_OK_CHECK = False
-SQL_TIMEOUT = 60
+# --- SQL connection ---
 SQL_PORT = 1433
 SQL_DEFAULT_SCHEMA = 'theas'
+SQL_TIMEOUT = 60
+FULL_SQL_IS_OK_CHECK = False
+CREATE_INIT_CONNECTIONS = 0
 
-USE_WORKER_THREADS = False
-MAX_WORKERS = 30
-
+# --- Sessions and multi-tab ---
+SESSION_MAX_IDLE = 60  # Max idle time (in minutes) before TheasServer session is terminated
+SESSION_HEADER_NAME = 'X-Theas-Sesstoken'
+USE_MULTI_TABS = False
+MULTI_TAB_PREFIX = '__tid'
 USE_SESSION_COOKIE = True
+
+# --- Login and user token ---
+LOGIN_RESOURCE_CODE = 'login'
+LOGIN_AUTO_USER_TOKEN = None
 REMEMBER_USER_TOKEN = False
-FORCE_REDIR_AFTER_POST = True
+
+# --- Cookies ---
+SESSION_COOKIE_NAME = 'theas:th:ST'
+USER_COOKIE_NAME = 'theas:th:UserToken'
+SESSION_COOKIE_DAYS = 1
+USER_COOKIE_DAYS = 30
+# Lifetime of the session and users cookies: used both as the browser expiry
+# (in write_cookies) and as the server-side signature age limit (in retrieve_cookies)
+# so a client that ignores the expiry gains nothing.
+# write_cookies() re-issues the cookie on each call, so this acts as an idle timeout.
+# Note that SESSION_MAX_IDLE controls the actual session expiry time.
 
 USE_SECURE_COOKIES = True
 # Controls SIGNING, not the browser's Secure attribute (the name predates Tornado 6.3's rename of
 # set_secure_cookie to set_signed_cookie). True: cookies are HMAC-signed with the Application's
-# cookie_secret, so the server rejects tampered or forged values. Signed values are still readable,
+# COOKIE_SECRET_HMAC, so the server rejects tampered or forged values. Signed values are still readable,
 # not encrypted. Readers must use get_signed_cookie(). Changing this invalidates existing cookies.
 
+COOKIE_SECRET_HMAC = 'tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay='
 COOKIE_SECURE = True
 # Controls the browser's Secure attribute, not signing. True: the browser stores and sends the
 # cookie only over HTTPS (or http://localhost, which browsers treat as secure). Keep True behind an
@@ -83,34 +106,20 @@ COOKIE_SECURE = True
 # instance browsed directly over plain HTTP from other machines (e.g. testing); otherwise the
 # browser silently drops the session cookie and logins fail. Independent of USE_SECURE_COOKIES.
 
-COOKIE_SAMESITE = 'Lax'  # settings.cfg: cookie_samesite
+COOKIE_SAMESITE = 'Lax'
 # Lax: sent on top-level GET navigations (including the 303 after login and external links).
 # Strict would stop the remember-me cookie on the first request arriving from another site.
 
-SESSION_COOKIE_DAYS = 1
-USER_COOKIE_DAYS = 30
-# Lifetime of the session cookie: used both as the browser expiry (write_cookies) and as the
-# server-side signature age limit (retrieve_cookies), so a client that ignores the expiry gains
-# nothing. write_cookies() re-issues the cookie on each call, so this acts as an idle timeout.
+# --- Request handling ---
+DEFAULT_RESOURCE_CODE = None
+BRANCH_CODE = None
+FORCE_REDIR_AFTER_POST = True
+USE_WORKER_THREADS = False
+MAX_WORKERS = 30
 
-
-USE_MULTI_TABS = False
-MULTI_TAB_PREFIX = '__tid'
-
-SESSION_HEADER_NAME = 'X-Theas-Sesstoken'
-SESSION_COOKIE_NAME = 'theas:th:ST'
-USER_COOKIE_NAME = 'theas:th:UserToken'
-SERVER_PREFIX = 'localhost:8881'
-SERVER_PORT = 8881
-
-COOKIE_SECRET = 'tF7nGhE6nIcPMTvGPHlbAk5NIoCOrKnlHIfPQyej6Ay='
-
+# --- Cache ---
 MAX_CACHE_ITEM_SIZE = 1024 * 1024 * 100  # Only cache SysWebResources that are less than 100 Meg in size
 MAX_CACHE_SIZE = 1024 * 1024 * 1024 * 2  # Use a maximum of 2 GB of cache
-
-CREATE_INIT_CONNECTIONS = 0
-
-BRANCH_CODE = None
 
 G_sessions = None  # Global list of sessions
 G_cached_resources = None  # Global list of cached resources
@@ -2619,7 +2628,13 @@ class ThHandler_REST(ThHandler):
             buf = None
             bufbin = b''
 
-            if self.request_path is not None and self.request_path.split('/')[0] == 'r':
+            requesttype_code = self.resource_code
+            if requesttype_code.lower().split('/')[0] =='rest':
+                requesttype_code = '/'.join(requesttype_code.split('/')[1:])
+
+
+
+            if requesttype_code.split('/')[0] == 'r':
                 # Special case:  an "r" as the first segment of the path, such as:
                 # r/resourcecode/aaa/bbb
                 # indicates that the second segment is to be the resource code.
@@ -2627,14 +2642,12 @@ class ThHandler_REST(ThHandler):
                 # loaded, and then myimg.jpg is passed in.  (Otherwise the resource would be taken to be
                 # img/myimg.jpg
                 requesttype_code = self.request_path.split('/')[1]
-            else:
-                requesttype_code = self.request_path
 
             if requesttype_code:
                 requesttype_code = requesttype_code.strip()
 
             if requesttype_code == '':
-                resource_code = None
+                requesttype_code = None
 
             requesttype_guid_str = self.request.query_arguments.get('rg')
 
@@ -2704,9 +2717,6 @@ class ThHandler_REST(ThHandler):
 
             # Execute spDoRestRequest in the database
             proc = ThStoredProc(rest_proc_name, self.session)
-
-            if requesttype_code.startswith('rest/'):
-                requesttype_code = requesttype_code[len('rest/') :]
 
             self.session.log('REST', 'REST stored proc is: {}'.format(rest_proc_name))
 
@@ -3176,74 +3186,75 @@ class ThWSHandler_Test(tornado.websocket.WebSocketHandler):
 def get_program_settings():
     global G_program_options
 
+    # global variables to be updated from command line parameters and/or
+    # reading the settings.cfg file
+
+    # --- Web server ---
+    global SERVER_PORT
+    global SERVER_PREFIX
+
+    # --- Logging ---
     global LOG_PATH
     global LOGGING_LEVEL
-    global SESSION_MAX_IDLE
+    global STARTUP_LOGGING
+    global DEBUG_TRACE_ENABLED
 
+    # --- SQL connection ---
+    global SQL_PORT
+    global SQL_DEFAULT_SCHEMA
+    global SQL_TIMEOUT
+    global FULL_SQL_IS_OK_CHECK
+
+    # --- Sessions and multi-tab ---
+    global SESSION_MAX_IDLE
+    global SESSION_HEADER_NAME
+    global USE_MULTI_TABS
+    global MULTI_TAB_PREFIX
+
+    # --- Login and user token ---
     global LOGIN_RESOURCE_CODE
     global LOGIN_AUTO_USER_TOKEN
     global REMEMBER_USER_TOKEN
-    global DEFAULT_RESOURCE_CODE
 
-    global FULL_SQL_IS_OK_CHECK
-    global SQL_TIMEOUT
-    global SQL_PORT
-    global SQL_DEFAULT_SCHEMA
-
-    global FORCE_REDIR_AFTER_POST
-
-    global USE_SECURE_COOKIES
-    global COOKIE_SECURE
-    global COOKIE_SAMESITE
-    global SESSION_COOKIE_DAYS
-    global USER_COOKIE_DAYS
-
-    global USE_MULTI_TABS
-    global MULTI_TAB_PREFIX
-    global SESSION_HEADER_NAME
+    # --- Cookies ---
     global SESSION_COOKIE_NAME
     global USER_COOKIE_NAME
-    global SERVER_PREFIX
-    global SERVER_PORT
+    global SESSION_COOKIE_DAYS
+    global USER_COOKIE_DAYS
+    global USE_SECURE_COOKIES
+    global COOKIE_SECRET_HMAC
+    global COOKIE_SECURE
+    global COOKIE_SAMESITE
 
+    # --- Request handling ---
+    global DEFAULT_RESOURCE_CODE
+    global BRANCH_CODE
+    global FORCE_REDIR_AFTER_POST
     global USE_WORKER_THREADS
     global MAX_WORKERS
 
+    # --- Cache ---
     global MAX_CACHE_ITEM_SIZE
     global MAX_CACHE_SIZE
 
-    global BRANCH_CODE
 
     program_directory, program_filename = get_program_directory()
 
-    msg = 'Theas app: Program directory is: {}'.format(program_directory)
-    if LOGGING_LEVEL:
-        print(msg)
-    write_winlog(msg)
-
-    msg = 'Theas app: program filename is {}'.format(program_filename)
-    if LOGGING_LEVEL:
-        print(msg)
-    write_winlog(msg)
-
-    msg = 'Theas app: program parameters: {}'.format(str(sys.argv[1:]))
-    if LOGGING_LEVEL:
-        print(msg)
-    write_winlog(msg)
-
     G_program_options = tornado.options.options
 
+    # *********************************
+    # define all settings.cfg settings
+    # Note: hard-coded global values are used as the defaults
+    # *********************************
+
+    # --- Bootstrap ---
     G_program_options.define(
         "settings_path", default=program_directory, help="The path to the folder with configuration files.", type=str
     )
 
+    # --- Web server ---
     G_program_options.define(
-        "log_path",
-        default=LOG_PATH,
-        help="Folder for theas_debug.log and theas_trace.log.  Environment variables such as "
-        "%TEMP% are expanded, and {port} is replaced with the server port; a relative path "
-        "is relative to the program directory.  Blank means <program directory>/logs.",
-        type=str,
+        "port", default=SERVER_PORT, help="The TCP/IP port that the web server will listen on", type=int
     )
 
     G_program_options.define(
@@ -3253,33 +3264,61 @@ def get_program_settings():
         type=str,
     )
 
+    # --- Logging ---
     G_program_options.define(
-        "port", default=SERVER_PORT, help="The TCP/IP port that the web server will listen on", type=int
+        "log_path",
+        default=LOG_PATH,
+        help="Folder for theas_debug.log and theas_trace.log.  Environment variables such as "
+             "%TEMP% are expanded, and {port} is replaced with the server port; a relative path "
+             "is relative to the program directory.  Blank means <program directory>/logs.",
+        type=str,
     )
 
+    G_program_options.define(
+        "logging_level",
+        default=LOGGING_LEVEL,
+        help="Controls logging.  0 to disable all, 1 to enable all, or threshold to exceed.",
+        type=int,
+    )
+
+    G_program_options.define(
+        "startup_logging",
+        default=STARTUP_LOGGING,
+        help="During startup write to Windows Event Log before log file is ready for use",
+        type=bool,
+    )
+
+    G_program_options.define(
+        "debug_trace_enabled",
+        default=DEBUG_TRACE_ENABLED,
+        help="Separate from logging the debug file is useful for low-level observability",
+        type=bool,
+    )
+
+    # --- SQL connection ---
     G_program_options.define("sql_server", default=None, help="Server name of your MSSQL server instance", type=str)
 
     G_program_options.define(
         "sql_port", default=SQL_PORT, help="TCP/IP port for your MSSQL server connections", type=int
     )
 
-    G_program_options.define(
-        "sql_default_schema",
-        default=SQL_DEFAULT_SCHEMA,
-        help="Default SQL schema to substitute '{schema}' or 'theas.'",
-        type=str,
-    )
+    G_program_options.define("sql_database", help="MSSQL default database for SQL connections", type=str)
 
     G_program_options.define("sql_user", help="MSSQL login user name for SQL connections", type=str)
 
     G_program_options.define("sql_password", help="MSSQL login password for SQL connections", type=str)
 
-    G_program_options.define("sql_database", help="MSSQL default database for SQL connections", type=str)
-
     G_program_options.define(
         "sql_appname",
         default="TheasServer",
         help="Descriptive name for SQL connections to know the name of this application",
+        type=str,
+    )
+
+    G_program_options.define(
+        "sql_default_schema",
+        default=SQL_DEFAULT_SCHEMA,
+        help="Default SQL schema to substitute '{schema}' or 'theas.'",
         type=str,
     )
 
@@ -3295,6 +3334,14 @@ def get_program_settings():
     )
 
     G_program_options.define(
+        "full_sql_is_ok_check",
+        default=FULL_SQL_IS_OK_CHECK,
+        help="Explicitly test SQL connection before each call.",
+        type=bool,
+    )
+
+    # --- Sessions and multi-tab ---
+    G_program_options.define(
         "session_max_idle_minutes",
         default=SESSION_MAX_IDLE,
         help="Maximum idle time (in minutes) that user sessions will remain active",
@@ -3302,12 +3349,24 @@ def get_program_settings():
     )
 
     G_program_options.define(
-        "logging_level",
-        default=LOGGING_LEVEL,
-        help="Controls logging.  0 to disable all, 1 to enable all, or threshold to exceed.",
-        type=int,
+        "session_header_name",
+        default=SESSION_HEADER_NAME,
+        help="Name of HTTP header used to send session token.",
+        type=str,
     )
 
+    G_program_options.define(
+        "use_multi_tabs", default=USE_MULTI_TABS, help="Support tab-specific sessions via URL-mangling.", type=bool
+    )
+
+    G_program_options.define(
+        "multi_tab_prefix",
+        default=MULTI_TAB_PREFIX,
+        help="String to embed in URL as prefix of the tabid if using multi-tab support",
+        type=str,
+    )
+
+    # --- Login and user token ---
     G_program_options.define(
         "login_resource_code", default=LOGIN_RESOURCE_CODE, help="Resource code of the login screen template.", type=str
     )
@@ -3326,38 +3385,47 @@ def get_program_settings():
         type=bool,
     )
 
+    # --- Cookies ---
     G_program_options.define(
-        "default_resource_code",
-        default=DEFAULT_RESOURCE_CODE,
-        help="Resource code to use when a resource is not specified (i.e. like index.htm)",
+        "session_cookie_name",
+        default=SESSION_COOKIE_NAME,
+        help="Name of cookie used to store session token.",
         type=str,
     )
 
     G_program_options.define(
-        "full_sql_is_ok_check",
-        default=FULL_SQL_IS_OK_CHECK,
-        help="Explicitly test SQL connection before each call.",
-        type=bool,
+        "user_cookie_name",
+        default=USER_COOKIE_NAME,
+        help="Name of cookie used to store user token (if applicable).",
+        type=str,
     )
 
     G_program_options.define(
-        "force_redir_after_post",
-        default=FORCE_REDIR_AFTER_POST,
-        help="After a POST, perform a redirect even if no update was requested.",
-        type=bool,
+        "session_cookie_days", default=SESSION_COOKIE_DAYS, help="Number of days to remember session cookie", type=int
+    )
+
+    G_program_options.define(
+        "user_cookie_days", default=USER_COOKIE_DAYS, help="Number of days to remember user cookie", type=int
     )
 
     G_program_options.define(
         "use_secure_cookies",
         default=USE_SECURE_COOKIES,
-        help="Controls SIGNING, not the browser's Secure attribut",
+        help="Controls SIGNING, not the browser's Secure attribute",
         type=bool,
     )
 
     # Controls SIGNING, not the browser's Secure attribute (the name predates Tornado 6.3's rename of
     # set_secure_cookie to set_signed_cookie). True: cookies are HMAC-signed with the Application's
-    # cookie_secret, so the server rejects tampered or forged values. Signed values are still readable,
+    # cookie_secret_hmac, so the server rejects tampered or forged values. Signed values are still readable,
     # not encrypted. Readers must use get_signed_cookie(). Changing this invalidates existing cookies.
+
+    G_program_options.define(
+        "cookie_secret_hmac",
+        default=COOKIE_SECRET_HMAC,
+        help="HMAC secret used to sign cookies (if enabled)",
+        type=str,
+    )
 
     G_program_options.define(
         "cookie_secure", default=COOKIE_SECURE, help="Controls the browser's Secure attribute, not signing.", type=bool
@@ -3383,44 +3451,26 @@ def get_program_settings():
     # 'None': always sent, including cross-site and in iframes; requires COOKIE_SECURE = True, and
     # browsers may still block or partition it as a third-party cookie.
 
+    # --- Request handling ---
     G_program_options.define(
-        "session_cookie_days", default=SESSION_COOKIE_DAYS, help="Number of days to remember session cookie", type=int
-    )
-
-    G_program_options.define(
-        "user_cookie_days", default=USER_COOKIE_DAYS, help="Number of days to remember user cookie", type=int
-    )
-
-    G_program_options.define(
-        "use_multi_tabs", default=USE_MULTI_TABS, help="Support tab-specific sessions via URL-mangling.", type=bool
-    )
-
-    G_program_options.define(
-        "multi_tab_prefix",
-        default=MULTI_TAB_PREFIX,
-        help="String to embed in URL as prefix of the tabid if using multi-tab support",
+        "default_resource_code",
+        default=DEFAULT_RESOURCE_CODE,
+        help="Resource code to use when a resource is not specified (i.e. like index.htm)",
         type=str,
     )
 
     G_program_options.define(
-        "session_header_name",
-        default=SESSION_HEADER_NAME,
-        help="Name of HTTP header used to send session token.)",
+        "branch_code",
+        default=BRANCH_CODE,
+        help="Preferred resource branch to serve, falling back to default (None) as needed",
         type=str,
     )
 
     G_program_options.define(
-        "session_cookie_name",
-        default=SESSION_COOKIE_NAME,
-        help="Name of cookie used to store session token.)",
-        type=str,
-    )
-
-    G_program_options.define(
-        "user_cookie_name",
-        default=USER_COOKIE_NAME,
-        help="Name of cookie used to store user token (if applicable).",
-        type=str,
+        "force_redir_after_post",
+        default=FORCE_REDIR_AFTER_POST,
+        help="After a POST, perform a redirect even if no update was requested.",
+        type=bool,
     )
 
     G_program_options.define(
@@ -3437,6 +3487,7 @@ def get_program_settings():
         type=int,
     )
 
+    # --- Cache ---
     G_program_options.define(
         "max_cache_item_size",
         default=MAX_CACHE_ITEM_SIZE,
@@ -3451,44 +3502,70 @@ def get_program_settings():
         type=int,
     )
 
-    G_program_options.define(
-        "branch_code",
-        default=BRANCH_CODE,
-        help="Preferred resource branch to serve, falling back to default (None) as needed",
-        type=str,
-    )
 
     G_program_options.parse_command_line()
 
-    # Accept settings_path with or without a trailing separator (a trailing "\" before a closing quote
-    # is eaten by Windows argument parsing).
-    G_program_options.settings_path = os.path.join(os.path.normpath(G_program_options.settings_path), '')
+    # Clean up settings_path (from the command line at this point):
+    # Blank means the program directory.  Accept a path with or without a trailing separator
+    # (a trailing "\" before a closing quote is eaten by Windows argument parsing)
+    settings_path = G_program_options.settings_path or program_directory
+    settings_path = os.path.join(os.path.normpath(settings_path), '')
+    G_program_options.settings_path = settings_path
 
-    msg = 'Theas app: trying to use configuration from {}'.format(G_program_options.settings_path + 'settings.cfg')
-    if LOGGING_LEVEL:
+
+    if STARTUP_LOGGING:
+        msg = 'Theas app: trying to use configuration from {}'.format(
+            settings_path + CONFIG_FILE_NAME)
         print(msg)
-    write_winlog(msg)
+        write_winlog(msg)
+
+        msg = 'Theas app: Program directory is: {}'.format(program_directory)
+        print(msg)
+        write_winlog(msg)
+
+        msg = 'Theas app: program filename is {}'.format(program_filename)
+        print(msg)
+        write_winlog(msg)
+
+        msg = 'Theas app: program parameters: {}'.format(str(sys.argv[1:]))
+        print(msg)
+        write_winlog(msg)
 
     try:
         if G_program_options.sql_server is None:
-            tornado.options.parse_config_file(G_program_options.settings_path + 'settings.cfg')
+            tornado.options.parse_config_file(settings_path + CONFIG_FILE_NAME)
+
+            # The config file may set settings_path to redirect to an alternate config file
+            alt_settings_path = G_program_options.settings_path or program_directory
+            alt_settings_path = os.path.join(os.path.normpath(alt_settings_path), '')
+
+            if os.path.normcase(alt_settings_path) != os.path.normcase(settings_path):
+                settings_path = alt_settings_path
+                if STARTUP_LOGGING:
+                    msg = 'Theas app: redirected to configuration in {}'.format(settings_path + CONFIG_FILE_NAME)
+                    print(msg)
+                    write_winlog(msg)
+                tornado.options.parse_config_file(settings_path + CONFIG_FILE_NAME)
+
+            G_program_options.settings_path = settings_path  # only one level of redirect is followed
+
     except Exception as e:
-        msg = 'Theas app: error processing settings.cfg file in {}  {}'.format(
-            G_program_options.settings_path + 'settings.cfg', e
-        )
-        if LOGGING_LEVEL:
-            print(msg)
+        msg = 'Theas app: error processing config file at {}  {}'.format(settings_path + CONFIG_FILE_NAME, e)
+        print(msg)
         write_winlog(msg, is_error=True)
 
+    # sql_server is important, and is used as a litmus test to determine
+    # if settings have been read
     if G_program_options.sql_server is None:
         write_winlog(
-            'Theas app: sql_server is not configured (is settings.cfg present at {}?). Exiting.'.format(
-                G_program_options.settings_path + 'settings.cfg'
+            'Theas app: sql_server is not configured (is settings file present at {}?). Exiting.'.format(
+                settings_path + CONFIG_FILE_NAME
             ),
             is_error=True,
         )
         tornado.options.print_help()
         sys.exit()
+
 
     # Now we have settings set in G_program_options elements.
     # Some of these used a hard-coded constant as the default. (For example, we don't want to have hard-coded
@@ -3500,35 +3577,52 @@ def get_program_settings():
     # (and possibly other reasons) in some cases we prefer to access the global constants directly.  So we now
     # want to update the value of the global constants based on what has been configured.
 
-    SESSION_MAX_IDLE = G_program_options.session_max_idle_minutes
 
+    # --- Web server ---
+    SERVER_PORT = G_program_options.port
+    SERVER_PREFIX = G_program_options.server_prefix
+
+    # --- Logging ---
     LOG_PATH = G_program_options.log_path
-    LOGGING_LEVEL = int(G_program_options.logging_level)
+    LOGGING_LEVEL = G_program_options.logging_level
+    STARTUP_LOGGING = G_program_options.startup_logging
+    DEBUG_TRACE_ENABLED = G_program_options.debug_trace_enabled
+
+    # --- SQL connection ---
+    SQL_PORT = G_program_options.sql_port
+    SQL_DEFAULT_SCHEMA = G_program_options.sql_default_schema
+    SQL_TIMEOUT = G_program_options.sql_timeout
+    FULL_SQL_IS_OK_CHECK = G_program_options.full_sql_is_ok_check
+
+    # --- Sessions and multi-tab ---
+    SESSION_MAX_IDLE = G_program_options.session_max_idle_minutes
+    SESSION_HEADER_NAME = G_program_options.session_header_name
+    USE_MULTI_TABS = G_program_options.use_multi_tabs
+    MULTI_TAB_PREFIX = G_program_options.multi_tab_prefix
+
+    # --- Login and user token ---
     LOGIN_RESOURCE_CODE = G_program_options.login_resource_code
     LOGIN_AUTO_USER_TOKEN = G_program_options.login_auto_user_token
     REMEMBER_USER_TOKEN = G_program_options.remember_user_token
-    DEFAULT_RESOURCE_CODE = G_program_options.default_resource_code
-    FULL_SQL_IS_OK_CHECK = G_program_options.full_sql_is_ok_check
-    FORCE_REDIR_AFTER_POST = G_program_options.force_redir_after_post
-    USE_SECURE_COOKIES = G_program_options.use_secure_cookies
-    USE_MULTI_TABS = G_program_options.use_multi_tabs
 
-    SESSION_HEADER_NAME = G_program_options.session_header_name
+    # --- Cookies ---
     SESSION_COOKIE_NAME = G_program_options.session_cookie_name
-    SERVER_PREFIX = G_program_options.server_prefix
     USER_COOKIE_NAME = G_program_options.user_cookie_name
-    USE_WORKER_THREADS = G_program_options.use_worker_threads
-    MAX_WORKERS = G_program_options.max_worker_threads
-    SQL_TIMEOUT = G_program_options.sql_timeout
-    SQL_PORT = G_program_options.sql_port
-    SQL_DEFAULT_SCHEMA = G_program_options.sql_default_schema
-    SERVER_PORT = G_program_options.port
-    BRANCH_CODE = G_program_options.branch_code
-    COOKIE_SECURE = G_program_options.cookie_secure
-    COOKIE_SAMESITE = G_program_options.cookie_samesite
     SESSION_COOKIE_DAYS = G_program_options.session_cookie_days
     USER_COOKIE_DAYS = G_program_options.user_cookie_days
-    MULTI_TAB_PREFIX = G_program_options.multi_tab_prefix
+    USE_SECURE_COOKIES = G_program_options.use_secure_cookies
+    COOKIE_SECRET_HMAC = G_program_options.cookie_secret_hmac
+    COOKIE_SECURE = G_program_options.cookie_secure
+    COOKIE_SAMESITE = G_program_options.cookie_samesite
+
+    # --- Request handling ---
+    DEFAULT_RESOURCE_CODE = G_program_options.default_resource_code
+    BRANCH_CODE = G_program_options.branch_code
+    FORCE_REDIR_AFTER_POST = G_program_options.force_redir_after_post
+    USE_WORKER_THREADS = G_program_options.use_worker_threads
+    MAX_WORKERS = G_program_options.max_worker_threads
+
+    # --- Cache ---
     MAX_CACHE_ITEM_SIZE = G_program_options.max_cache_item_size
     MAX_CACHE_SIZE = G_program_options.max_cache_size
 
@@ -3564,40 +3658,55 @@ async def get_ready(run_as_svc=False):
     global G_conns
     global G_break_handler
 
-    '''
 
+    # --- Logging ---
     global LOG_PATH
     global LOGGING_LEVEL
-    global SESSION_MAX_IDLE
+    global STARTUP_LOGGING
+    global DEBUG_TRACE_ENABLED
 
+    # --- SQL connection ---
+    global FULL_SQL_IS_OK_CHECK
+
+    # --- Sessions and multi-tab ---
+    global SESSION_MAX_IDLE
+    global SESSION_HEADER_NAME
+    global USE_MULTI_TABS
+    global MULTI_TAB_PREFIX
+
+    # --- Login and user token ---
     global LOGIN_RESOURCE_CODE
     global LOGIN_AUTO_USER_TOKEN
     global REMEMBER_USER_TOKEN
-    global DEFAULT_RESOURCE_CODE
 
-    global FULL_SQL_IS_OK_CHECK
-    global FORCE_REDIR_AFTER_POST
-
-    global USE_SECURE_COOKIES
-    global USE_MULTI_TABS
-    global MULTI_TAB_PREFIX
-    
-    global SESSION_HEADER_NAME
+    # --- Cookies ---
     global SESSION_COOKIE_NAME
     global USER_COOKIE_NAME
+    global USE_SECURE_COOKIES
 
+    # --- Request handling ---
+    global DEFAULT_RESOURCE_CODE
+    global BRANCH_CODE
+    global FORCE_REDIR_AFTER_POST
     global USE_WORKER_THREADS
     global MAX_WORKERS
 
+    # --- Cache ---
     global MAX_CACHE_ITEM_SIZE
     global MAX_CACHE_SIZE
-    
-    global BRANCH_CODE
-    '''
-    if LOGGING_LEVEL:
-        msg = 'Theas app getting ready...'
+
+
+    program_directory, program_filename = get_program_directory()
+
+
+
+    msg = 'Theas app getting ready...'
+    print(msg)
+    if STARTUP_LOGGING:
+        # Note that at this point in the execution STARTUP_LOGGING will
+        # always reflect the hard-coded value, as settings file has not
+        # yet been processed
         write_winlog(msg)
-        print(msg)
 
     # register callback to call when Theas stops
     thbase.set_all_done(all_done)
@@ -3609,9 +3718,11 @@ async def get_ready(run_as_svc=False):
     if G_break_handler:
         G_break_handler.enable()
 
-    program_directory, program_filename = get_program_directory()
-
+    # read settings from settings.cfg and/or command line
     get_program_settings()
+
+    # instantiate global objects, passing in settings to the
+    # constructors as needed
 
     G_sessions = ThSessions()  # Global list of sessions
 
@@ -3677,6 +3788,8 @@ async def get_ready(run_as_svc=False):
         write_winlog(msg, is_error=True)
         sys.exit()
 
+
+    # Write this entry regarldess of STARTUP_LOGGING
     msg = 'In get_ready() ready to start Theas server {} (in {}) on port {}.'.format(
         program_filename, program_directory, G_program_options.port
     )
@@ -3733,7 +3846,7 @@ def make_app():
     my_handlers += [(r'/(.*)', ThHandler)]
 
     return tornado.web.Application(
-        my_handlers, debug=False, autoreload=False, xsrf_cookies=True, cookie_secret=COOKIE_SECRET
+        my_handlers, debug=False, autoreload=False, xsrf_cookies=True, cookie_secret=COOKIE_SECRET_HMAC
     )
 
 

@@ -24,7 +24,7 @@ _LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
 # Layer 1: master switch.  Set False for production builds to disable ALL
 # trace() output globally.  Checked first in trace(), so it short-circuits
 # everything else.
-DEBUG_TRACE_ENABLED = False
+DEBUG_TRACE_ENABLED = False # True
 
 # Layer 2: flat named groups.  Each trace() call may name one or more groups
 # via trace_group='a;b' (';'-delimited).  Untagged calls belong to 'ungrouped'.
@@ -32,7 +32,7 @@ DEBUG_TRACE_ENABLED = False
 #                        (overrides the mute list).
 #   TRACE_MUTE_GROUPS -- otherwise: every group emits EXCEPT these.
 # Edit these two sets to centrally enable/disable trace points by group.
-TRACE_ONLY_GROUPS = set()
+TRACE_ONLY_GROUPS = set() # TRACE_ONLY_GROUPS = {'theas_params'}
 TRACE_MUTE_GROUPS = set()
 
 
@@ -166,7 +166,7 @@ def trace(event, th_session=None, conn=None, trace_group=None, **fields):
     It writes to logs/theas_trace.log (the clean lifecycle slice) and mirrors
     the marker inline into the main log/console for context.
 
-    Parameters (only `event` jois required):
+    Parameters (only `event` is required):
         event       -- short label for this trace point (e.g. 'get.start').
         th_session  -- ThSession whose session/conn context to include.
         conn        -- explicit Conn; pass at release sites where self.conn was

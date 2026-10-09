@@ -118,6 +118,8 @@ import urllib.parse as urlparse
 import html
 import json
 import base64
+import sys
+import weakref
 
 from collections.abc import Coroutine
 
@@ -136,6 +138,8 @@ from jinja2 import (
 from jinja2.environment import Environment
 
 from thresource import G_cached_resources
+import thbase
+from thbase import trace
 
 ALLOW_UNSAFE_FUNCTIONS = False
 _i = 1
@@ -148,6 +152,14 @@ def format_str_if(this_str, fmt_str):
         this_str = this_str
         buf = fmt_str.format(this_str)
     return buf
+
+
+def html_attribs(attribs):
+    # Render control attribs as ' k="v"' (skipping type), HTML-escaping each value:
+    # the Jinja environment does not autoescape, and filter output is emitted as-is.
+    return ''.join(
+        ' {}="{}"'.format(k, html.escape(str(v), quote=True)) for k, v in attribs.items() if k.lower() != 'type'
+    )
 
 
 # -----Jinja2 template loader for database-cached resources-----
@@ -210,6 +222,21 @@ class TheasControl:
 noneTheasControl = TheasControl()
 
 
+def _trace_repr(v, limit=200):
+    # repr() so '', None and SilentUndefined are distinguishable in the trace log
+    try:
+        s = repr(v)
+    except Exception:
+        s = '<unreprable {}>'.format(type(v).__name__)
+    if limit and len(s) > limit:
+        s = s[:limit] + '...({} chars)'.format(len(s))
+    return s
+
+
+def _trace_ref(obj):
+    return hex(id(obj))[2:] if obj is not None else '-'
+
+
 class TheasControlNV:
     def __init__(self, name='', control_type=None, default_value=None):
         self.name = name
@@ -225,8 +252,16 @@ class TheasControlNV:
         self.__datavalue = ''
         # For internal use (to aid in setting the value of this name-value pair when the value must
         # correspond to a child control, such as radio, checkbox, or select
-        self.value = ''
-        # The current value, i.e. what jquery .val() would return for this name
+        self.__value = ''
+        # The current value, i.e. what jquery .val() would return for this name.  Exposed as the
+        # .value property (set directly here so construction does not emit a trace).
+
+        self.__is_null = True
+        self.__native_type = ''
+
+        self.th_page = None
+        # weakref.ref to the owning Theas page (set by get_control).  Used only by trace() to report
+        # session context; weak so the page and its controls do not form a reference cycle.
         self.__default_value = default_value
         # For checkbox, radio, and select, the default value to use if __datavalue is not set
         self.control_type = control_type
@@ -243,28 +278,103 @@ class TheasControlNV:
         self.controls = None
         del self.controls
 
+    def _trace_change(self, attr, old, new, **fields):
+        # OPTIONAL developer trace (see thbase.trace) -- no effect on behavior.
+        if not thbase.DEBUG_TRACE_ENABLED:
+            return
+        try:
+            if type(old) is type(new) and old == new:
+                return
+        except Exception:
+            pass
+
+        th_page = self.th_page() if self.th_page is not None else None
+
+        # Report the first few callers outside this object (skips the datavalue setter -> value hop).
+        # Several frames, because nearly every change funnels through get_control.
+        frame = sys._getframe(2)
+        while frame is not None and frame.f_locals.get('self') is self:
+            frame = frame.f_back
+        callers = []
+        while frame is not None and len(callers) < 3:
+            callers.append('{}:{}'.format(frame.f_code.co_name, frame.f_lineno))
+            frame = frame.f_back
+        caller = '<'.join(callers) or '-'
+
+        trace(
+            'param.' + attr,
+            th_session=getattr(th_page, 'th_session', None),
+            trace_group='theas_params',
+            page=_trace_ref(th_page),
+            ctrl=self.name,
+            type=self.control_type,
+            old=_trace_repr(old),
+            new=_trace_repr(new),
+            caller=caller,
+            **fields,
+        )
+
+    @property
+    def value(self):
+        return self.__value
+
+    @value.setter
+    def value(self, value):
+        self._trace_change('value', self.__value, value)
+        self.__value = value
+
     @property
     def datavalue(self):
         return self.__datavalue
 
+    @property
+    def is_null(self):
+        # True if the most recent datavalue assigned was None or Jinja-undefined (stored as '')
+        return self.__is_null
+
+    @property
+    def native_type(self):
+        # Type name of the most recent datavalue assigned, before conversion to str ('' if is_null)
+        return self.__native_type
+
     @datavalue.setter
     def datavalue(self, datavalue):
-        self.__datavalue = datavalue
+        # Theas Param values are always strings.  Record the native null-ness and type of the
+        # assigned value first, so they remain available after the conversion.
+        self.__is_null = datavalue is None or isinstance(datavalue, Undefined)
+        self.__native_type = '' if self.__is_null else type(datavalue).__name__
+        new_datavalue = '' if self.__is_null else str(datavalue)
 
+        self._trace_change('datavalue', self.__datavalue, new_datavalue, native=self.__native_type)
+        self.__datavalue = new_datavalue
+
+        self._apply_selection()
+
+    def _apply_selection(self):
+        # Set .checked on child controls and derive .value from the current __datavalue.  Called by
+        # the datavalue setter, and by get_control after rebuilding select options without assigning
+        # datavalue (e.g. datavalue='__th'), since rebuilt options start out unchecked.
         if self.control_type in ('radio', 'checkbox', 'select'):
+            # The checked option wins regardless of its position; unchecked_value applies only if
+            # no option is checked.  Option values may come from data (e.g. UUID keys from a
+            # source_list), so convert.
+            checked_value = None
+            unchecked_value = ''
             for temp_ctrlvalue, temp_ctrl in self.controls.items():
                 if temp_ctrl is not None:
-                    temp_ctrl.checked = (str(self.__datavalue) == str(temp_ctrl.value)) or (
-                        (self.__datavalue is None or str(self.__datavalue) == '')
-                        and str(self.__default_value) == str(temp_ctrl.value)
+                    temp_ctrl.checked = (self.__datavalue == str(temp_ctrl.value)) or (
+                        self.__datavalue == '' and str(self.__default_value) == str(temp_ctrl.value)
                     )
 
                     if temp_ctrl.checked:
-                        self.value = temp_ctrl.value
+                        if checked_value is None:
+                            checked_value = str(temp_ctrl.value)
                     else:
-                        self.value = temp_ctrl.unchecked_value
+                        unchecked_value = str(temp_ctrl.unchecked_value)
+
+            self.value = checked_value if checked_value is not None else unchecked_value
         else:
-            self.value = self.datavalue
+            self.value = self.__datavalue
 
 
 class Theas:
@@ -560,15 +670,24 @@ class Theas:
                     this_ctrl_nv = TheasControlNV(
                         name=ctrl_name, control_type=control_type, default_value=default_value_param
                     )
+                    this_ctrl_nv.th_page = weakref.ref(self)
                     is_new_control = True
                     if save_param:
                         self.control_names[ctrl_name] = this_ctrl_nv
                     else:
                         this_ctrl_nv.name_prefix = ''
+                        trace(
+                            'params.not_persisted',
+                            th_session=self.th_session,
+                            trace_group='theas_params',
+                            page=_trace_ref(self),
+                            ctrl=ctrl_name,
+                            type=control_type,
+                        )
             else:
                 # existing control, but may have been auto-created as a hidden...but now we have a more specific
                 # type
-                if control_type != 'hidden':
+                if control_type and control_type != 'hidden':
                     this_ctrl_nv.control_type = control_type
 
             if this_ctrl_nv is not None and include_in_json:
@@ -724,6 +843,11 @@ class Theas:
                         # datavalue property setter will set .checked which will not yet be set in the case of a new
                         # auto-created control.
                         this_ctrl_nv.datavalue = default_value_param
+                    else:
+                        # datavalue is not being assigned (e.g. '__th' = keep the Theas Param value), so the
+                        # setter will not run.  Re-derive .checked from the existing value, because select
+                        # options rebuilt above start out unchecked.
+                        this_ctrl_nv._apply_selection()
 
                 if this_ctrl is None:
                     this_ctrl = noneTheasControl
@@ -804,6 +928,17 @@ class Theas:
 
         changed_controls = []
 
+        trace(
+            'params.process.start',
+            th_session=self.th_session,
+            trace_group='theas_params',
+            page=_trace_ref(self),
+            source='buf' if buf else 'request',
+            from_stored_proc=from_stored_proc,
+            perform_processing=perform_processing,
+            buf=_trace_repr(buf, limit=None) if buf else '-',
+        )
+
         if buf and buf.index('=') > 0:
             # process from a string buf (typically returned by a stored procedure)
 
@@ -870,6 +1005,14 @@ class Theas:
                 self.th_session.log('Theas', 'TheasParams ' + this_ctrl_nv.name + '=' + this_ctrl_nv.value)
         else:
             self.th_session.log('Theas', 'No TheasParams were updated')
+
+        trace(
+            'params.process.end',
+            th_session=self.th_session,
+            trace_group='theas_params',
+            page=_trace_ref(self),
+            changed=_trace_repr([c.name for c in changed_controls]),
+        )
 
         return changed_controls
 
@@ -1191,10 +1334,7 @@ class Theas:
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
             ctrl_name, datavalue=this_value, control_type=type, **kwargs
         )
-        this_attribs_str = ''
-        for k, v in this_ctrl.attribs.items():
-            if k.lower() != 'type':
-                this_attribs_str += ' {}="{}"'.format(k, v)
+        this_attribs_str = html_attribs(this_ctrl.attribs)
 
         buf = '<input name="{}"{} type="{}"{}'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
@@ -1248,17 +1388,14 @@ class Theas:
             ctrl_name, datavalue=this_value, control_type='radio', **kwargs
         )
 
-        this_attribs_str = ''
-        for k, v in this_ctrl.attribs.items():
-            if k.lower() != 'type':
-                this_attribs_str += ' {}="{}"'.format(k, v)
+        this_attribs_str = html_attribs(this_ctrl.attribs)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_ctrl_nv.control_type,
             this_attribs_str,
-            this_ctrl.value,
+            html.escape(str(this_ctrl.value), quote=True),
             ' checked="checked"' if this_ctrl.checked else '',
         )
 
@@ -1317,23 +1454,22 @@ class Theas:
         this_ctrl_nv, this_ctrl, value_changed = this_page.get_control(
             ctrl_name, datavalue=this_value, control_type='select', options_dict=this_options_dict, **kwargs
         )
-        this_attribs_str = ''
-        for k, v in this_ctrl.attribs.items():
-            if k.lower() != 'type':
-                this_attribs_str += ' {}="{}"'.format(k, v)
+        this_attribs_str = html_attribs(this_ctrl.attribs)
 
         buf = '<select name="{}"{}{} >'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name, format_str_if(this_ctrl.id, ' id="{}"'), this_attribs_str
         )
 
+        # Option values and captions may come from data (e.g. source_list rows), so escape them:
+        # the Jinja environment does not autoescape, and filter output is emitted as-is.
         for temp_optval, temp_optctrl in this_ctrl_nv.controls.items():
             buf = buf + '\n<option value="{}"{}{}>{}</option>'.format(
-                temp_optval,
+                html.escape(str(temp_optval), quote=True),
                 ' selected="selected"'
                 if ((temp_optctrl.checked) or (not this_ctrl_nv.value and not temp_optval))
                 else '',
                 ' disabled="disabled"' if not temp_optval else '',
-                temp_optctrl.caption,
+                html.escape(str(temp_optctrl.caption), quote=True),
             )
         buf = buf + '\n</select>'
 
@@ -1362,10 +1498,7 @@ class Theas:
             ctrl_name, datavalue=this_value, control_type='textarea', **kwargs
         )
 
-        this_attribs_str = ''
-        for k, v in this_ctrl.attribs.items():
-            if k.lower() != 'type':
-                this_attribs_str += ' {}="{}"'.format(k, v)
+        this_attribs_str = html_attribs(this_ctrl.attribs)
 
         value_str = ''
         if this_ctrl_nv.value is not None and not isinstance(this_ctrl_nv.value, SilentUndefined):
@@ -1408,17 +1541,14 @@ class Theas:
             ctrl_name, datavalue=this_value, control_type='checkbox', **kwargs
         )
 
-        this_attribs_str = ''
-        for k, v in this_ctrl.attribs.items():
-            if k.lower() != 'type':
-                this_attribs_str += ' {}="{}"'.format(k, v)
+        this_attribs_str = html_attribs(this_ctrl.attribs)
 
         buf = '<input name="{}"{} type="{}"{} value="{}"{}>'.format(
             this_ctrl_nv.name_prefix + this_ctrl_nv.name,
             format_str_if(this_ctrl.id, ' id="{}"'),
             this_ctrl_nv.control_type,
             this_attribs_str,
-            this_ctrl.value,
+            html.escape(str(this_ctrl.value), quote=True),
             ' checked="checked"' if this_ctrl.checked else '',
         )
 
@@ -1744,6 +1874,15 @@ class Theas:
                 if this_control_nv.value is not None and not isinstance(this_control_nv.value, SilentUndefined):
                     buf += urlparse.quote(str(this_control_nv.value))
                 buf += '&'
+
+        trace(
+            'params.serialize',
+            th_session=self.th_session,
+            trace_group='theas_params',
+            page=_trace_ref(self),
+            scope='all' if control_list is None else 'partial',
+            buf=_trace_repr(buf, limit=None),
+        )
 
         return buf
 

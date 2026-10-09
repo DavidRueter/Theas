@@ -404,6 +404,12 @@ class ThSession:
         self.remember_user_token = _REMEMBER_USER_TOKEN
 
         self.theas_page = Theas(theas_session=self)
+        trace(
+            'params.page_created',
+            th_session=self,
+            trace_group='theas_params',
+            page=hex(id(self.theas_page))[2:],
+        )
 
         self.wait_list = []
 
